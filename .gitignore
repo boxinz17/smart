@@ -1,0 +1,66 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+.Python
+pip-wheel-metadata/
+
+# ---------- Virtual environments ----------
+venv/
+.venv/
+env/
+.env
+.env.*
+
+# ---------- Testing / linting ----------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# ---------- Editor / OS ----------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+.Rhistory
+.RData
+.Rproj.user/
+
+# ---------- Experiment artifacts (too large or machine-specific) ----------
+# Simulation results and figures are regenerated from the scripts.
+simulation/result/
+simulation/fig/
+simulation/logs/
+
+# Real-data experiment artifacts.
+single_cell/raw_data/
+single_cell/raw_data_compressed/
+single_cell/processed_data/
+single_cell/source_matrix/
+single_cell/result/
+single_cell/fig/
+single_cell/logs/
+single_cell/reference/
+single_cell/exploratory_data_analysis/
+single_cell/pre_processing/logs/
+
+# Large reference signature files that users can download separately.
+# Keep small ones under version control (see single_cell/pre_processing/signatures/README.md).
+*.h5ad
+*.h5
+*.mtx
+*.rds
+
+# ---------- Notebooks checkpoints ----------
+.ipynb_checkpoints/

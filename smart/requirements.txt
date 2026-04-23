@@ -1,0 +1,8 @@
+numpy>=1.23
+scipy>=1.9
+scikit-learn>=1.1
+matplotlib>=3.5
+joblib>=1.2
+optuna>=3.0
+autograd>=1.5
+pymanopt>=2.1

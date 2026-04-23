@@ -1,0 +1,7 @@
+# R packages used across the simulation and single-cell experiment scripts.
+# Install from an R session with: install.packages(c("rrpack", "jsonlite", "reticulate", "MASS"))
+
+rrpack        # RRR, SRRR, RSSVD, SOFAR estimators
+jsonlite      # read/write JSON result files in the simulation pipeline
+reticulate    # Python/NumPy interop used by the single-cell baselines
+MASS          # multivariate normal sampling used by simulation/utils_R.R
