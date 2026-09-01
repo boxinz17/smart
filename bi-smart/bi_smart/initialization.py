@@ -1,0 +1,425 @@
+"""Fitting-fold reduced-rank initializers and target-only safeguard.
+
+The screen in :mod:`bi_smart.screening` uses only initialization responses.
+This module consumes its selected whole-block unions on an independent fitting
+fold.  It implements the exact restricted reduced-rank regression estimator in
+Eq. ``(bismart-rrr-initializer)``, lifts that estimator into the redundant
+block-invariant joint parameterization in Eq. ``(bismart-source-initializer)``,
+and implements the target-only safeguard in Eq.
+``(bismart-target-only-safeguard)``.
+
+The joint optimizer itself is intentionally not completed here.  The returned
+``BISMARTState`` is the fully specified starting point consumed by
+:mod:`bi_smart.refinement`; that module implements the stated geometry and
+safeguards while leaving the manuscript's unresolved horizontal-space linear
+solve as explicit pseudocode.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Mapping, Optional, Sequence
+
+import numpy as np
+from numpy.typing import NDArray
+
+from .linalg import (
+    comparison_tolerance,
+    deterministic_rank_at_most_approximation,
+    spd_inverse_sqrt,
+    strict_truncated_svd,
+    truncated_svd,
+)
+from .refinement import BISMARTState, fitted_target
+from .types import (
+    Candidate,
+    CandidateStatus,
+    FailureReason,
+    FloatArray,
+    FoldData,
+    NumericalFailure,
+    ScreenResult,
+    SourceDecomposition,
+)
+
+
+def _finite_matrix(value: NDArray[np.floating], *, name: str) -> FloatArray:
+    """Normalize a finite, nonempty matrix for a local result object."""
+
+    result = np.asarray(value, dtype=float)
+    if result.ndim != 2 or 0 in result.shape:
+        raise ValueError(f"{name} must be a nonempty matrix; got shape {result.shape}.")
+    if not np.all(np.isfinite(result)):
+        raise ValueError(f"{name} must contain only finite values.")
+    return result
+
+
+# Backwards-readable mathematical name for the concrete state shared with the
+# refinement module.  There is intentionally only one runtime state type.
+JointParameterState = BISMARTState
+
+
+@dataclass(frozen=True)
+class InitializationResult:
+    """Restricted-RRR candidate and, when successful, its joint start state."""
+
+    candidate: Candidate
+    state: Optional[JointParameterState] = None
+    coordinate_matrix: Optional[FloatArray] = None
+
+    def __post_init__(self) -> None:
+        if self.candidate.status is CandidateStatus.SUCCESSFUL:
+            if self.state is None or self.coordinate_matrix is None:
+                raise ValueError("A successful initialization requires state and coordinate_matrix.")
+            coordinate = _finite_matrix(self.coordinate_matrix, name="coordinate_matrix")
+            assert self.candidate.matrix is not None
+            if self.candidate.matrix.shape != fitted_target(self.state).shape:
+                raise ValueError("Candidate and state target matrices have incompatible shapes.")
+            object.__setattr__(self, "coordinate_matrix", coordinate)
+        elif self.state is not None or self.coordinate_matrix is not None:
+            raise ValueError("An unsuccessful initialization cannot contain a state or coordinates.")
+
+    @property
+    def successful(self) -> bool:
+        """Whether all restricted-RRR and state-lifting checks passed."""
+
+        return self.candidate.status is CandidateStatus.SUCCESSFUL
+
+
+def _failed_initialization(
+    *,
+    label: str,
+    reason: FailureReason,
+    message: str,
+    order_key: Sequence[Any],
+    metadata: Mapping[str, Any],
+) -> InitializationResult:
+    """Create the branch record that Appendix Algorithm 2 will omit."""
+
+    return InitializationResult(
+        candidate=Candidate.unsuccessful(
+            label=label,
+            reason=reason,
+            message=message,
+            order_key=order_key,
+            kind="restricted_rrr",
+            metadata=metadata,
+        )
+    )
+
+
+def initialize_restricted_rrr(
+    fitting_fold: FoldData,
+    source: SourceDecomposition,
+    screen: ScreenResult,
+    *,
+    target_rank: int,
+    label: str = "restricted_rrr",
+    order_key: Sequence[Any] = (),
+    atol: float = 1e-12,
+    rtol: float = 1e-10,
+) -> InitializationResult:
+    """Recompute exact restricted RRR on the independent fitting fold.
+
+    PSEUDOCODE
+    ----------
+    1. Read the exact block labels selected on the initialization fold and
+       concatenate the associated columns of ``U_hat_0`` and ``V_hat_0``.
+    2. Strictly certify the selected left reduced Gram matrix and compute its
+       symmetric inverse square root.
+    3. Whiten the fitting-fold cross-covariance on the left, take the unique
+       nonzero rank-``r`` truncation, and unwhiten it
+       [Eq. ``(bismart-rrr-initializer)``].
+    4. Retain the resulting ambient coefficient as the exact fitting-fold RRR
+       candidate; this is candidate ``t=0``, not merely solver scratch state.
+    5. Factor its coordinate matrix, pad ``A`` and ``B`` with exact zero rows,
+       and construct one full source core per block
+       [Eq. ``(bismart-source-initializer)``].
+
+    The caller should invoke this only after the observable Wedin gate passes.
+    The gate is deliberately not repeated here because it depends on the
+    source-error certificate and belongs to source-block orchestration.
+    """
+
+    if isinstance(target_rank, (bool, np.bool_)) or not isinstance(
+        target_rank, (int, np.integer)
+    ):
+        raise TypeError("target_rank must be an integer.")
+    target_rank = int(target_rank)
+    if target_rank < 1 or target_rank > source.rank:
+        raise ValueError("target_rank must lie in [1, source.rank].")
+    if fitting_fold.n_features != source.source_shape[0]:
+        raise ValueError("Fitting predictors and source rows are incompatible.")
+    if fitting_fold.n_responses != source.source_shape[1]:
+        raise ValueError("Fitting responses and source columns are incompatible.")
+    if screen.partition.rank != source.rank:
+        raise ValueError("Screen partition and source decomposition use different r0 values.")
+
+    metadata = {
+        "partition": screen.partition.blocks,
+        "left_blocks": screen.left_blocks,
+        "right_blocks": screen.right_blocks,
+        "target_rank": target_rank,
+    }
+    if screen.status is not CandidateStatus.SUCCESSFUL:
+        return _failed_initialization(
+            label=label,
+            reason=FailureReason.SCREEN_FAILED,
+            message="Restricted RRR requires a successful screen with both block unions.",
+            order_key=order_key,
+            metadata=metadata,
+        )
+
+    partition = screen.partition
+    left_indices = partition.union_indices(screen.left_blocks)
+    right_indices = partition.union_indices(screen.right_blocks)
+    if len(left_indices) < target_rank or len(right_indices) < target_rank:
+        return _failed_initialization(
+            label=label,
+            reason=FailureReason.SCREEN_FAILED,
+            message="A screened union has dimension smaller than target_rank.",
+            order_key=order_key,
+            metadata=metadata,
+        )
+    metadata = {
+        **metadata,
+        "left_dimension": len(left_indices),
+        "right_dimension": len(right_indices),
+    }
+
+    U0 = source.left_vectors
+    V0 = source.right_vectors
+
+    # PSEUDOCODE 0: A generalized SourceDecomposition may express the same
+    # source approximation in independently rotated left/right bases, giving a
+    # full core inside each allowed block.  It must not mix *across* blocks or
+    # move singular values between them: doing so would make the certified
+    # partition inconsistent and the block-diagonal initializer would silently
+    # discard source mass.  Treat either condition as a local invalid branch.
+    assert source.coordinate_core is not None
+    full_source_core = source.coordinate_core
+    allowed_entries = np.zeros_like(full_source_core, dtype=bool)
+    for block in partition.blocks:
+        indices = np.asarray(block, dtype=int)
+        allowed_entries[np.ix_(indices, indices)] = True
+    off_block_core = np.where(allowed_entries, 0.0, full_source_core)
+    core_scale = float(np.linalg.norm(full_source_core, ord=2))
+    core_tolerance = comparison_tolerance(
+        core_scale,
+        atol=atol,
+        rtol=rtol,
+    )
+    if float(np.linalg.norm(off_block_core, ord=2)) > core_tolerance:
+        return _failed_initialization(
+            label=label,
+            reason=FailureReason.INVALID_INPUT,
+            message=(
+                "The source coordinate core has mass across the supplied "
+                "partition blocks."
+            ),
+            order_key=order_key,
+            metadata=metadata,
+        )
+    for block_label, block in enumerate(partition.blocks):
+        indices = np.asarray(block, dtype=int)
+        block_core = full_source_core[np.ix_(indices, indices)]
+        actual_values = np.linalg.svd(block_core, compute_uv=False)
+        expected_values = source.singular_values[indices]
+        block_scale = max(
+            float(expected_values[0]),
+            float(actual_values[0]),
+        )
+        block_tolerance = comparison_tolerance(
+            block_scale,
+            atol=atol,
+            rtol=rtol,
+        )
+        if not np.all(np.abs(actual_values - expected_values) <= block_tolerance):
+            return _failed_initialization(
+                label=label,
+                reason=FailureReason.INVALID_INPUT,
+                message=(
+                    f"Source core block {block_label} does not carry the "
+                    "singular values assigned to that certified block."
+                ),
+                order_key=order_key,
+                metadata=metadata,
+            )
+
+    U_selected = U0[:, np.asarray(left_indices, dtype=int)]
+    V_selected = V0[:, np.asarray(right_indices, dtype=int)]
+    n = fitting_fold.n_samples
+
+    # PSEUDOCODE 1--2: Strictly certify and invert-square-root the selected
+    # fitting design.  A failed check omits only this RRR/refinement branch.
+    fitting_gram = (fitting_fold.X.T @ fitting_fold.X) / n
+    selected_gram = U_selected.T @ fitting_gram @ U_selected
+    try:
+        inverse_sqrt = spd_inverse_sqrt(
+            selected_gram,
+            atol=atol,
+            rtol=rtol,
+        )
+    except NumericalFailure as failure:
+        return _failed_initialization(
+            label=label,
+            reason=failure.reason,
+            message=str(failure),
+            order_key=order_key,
+            metadata=metadata,
+        )
+
+    # PSEUDOCODE 3: Form the paper's whitened k_u-by-k_v cross-covariance and
+    # enforce its strict, nonzero rank-r cutoff.
+    cross_covariance = (fitting_fold.X.T @ fitting_fold.Y) / n
+    whitened = inverse_sqrt @ U_selected.T @ cross_covariance @ V_selected
+    try:
+        whitened_svd = strict_truncated_svd(
+            whitened,
+            target_rank,
+            atol=atol,
+            rtol=rtol,
+        )
+    except NumericalFailure as failure:
+        return _failed_initialization(
+            label=label,
+            reason=failure.reason,
+            message=str(failure),
+            order_key=order_key,
+            metadata=metadata,
+        )
+
+    coordinate_matrix = inverse_sqrt @ whitened_svd.approximation
+    coefficient = U_selected @ coordinate_matrix @ V_selected.T
+
+    # PSEUDOCODE 4--5: Take a compact factorization of the *unwhitened*
+    # coordinate solution, then embed its factors into r0 source coordinates.
+    # Its rank is r after the strict whitened cutoff and invertible unwhitening.
+    coordinate_svd = truncated_svd(coordinate_matrix, target_rank)
+    A = np.zeros((source.rank, target_rank), dtype=float)
+    B = np.zeros((source.rank, target_rank), dtype=float)
+    A[np.asarray(left_indices, dtype=int), :] = coordinate_svd.u
+    B[np.asarray(right_indices, dtype=int), :] = coordinate_svd.vt.T
+    H = np.diag(coordinate_svd.singular_values)
+
+    # PSEUDOCODE 6: Copy each full block of the already validated source core.
+    # It is diagonal in the automatic SVD bases and generally full after
+    # independent within-block left/right rotations.  Keeping the full blocks
+    # is precisely what preserves the represented source under those rotations.
+    G_blocks: list[FloatArray] = []
+    for block in partition.blocks:
+        indices = np.asarray(block, dtype=int)
+        G_blocks.append(full_source_core[np.ix_(indices, indices)].copy())
+
+    active_u = np.zeros(source.rank, dtype=bool)
+    active_v = np.zeros(source.rank, dtype=bool)
+    active_u[np.asarray(left_indices, dtype=int)] = True
+    active_v[np.asarray(right_indices, dtype=int)] = True
+    state = BISMARTState(
+        U0=U0,
+        V0=V0,
+        A=A,
+        B=B,
+        H=H,
+        G_blocks=tuple(G_blocks),
+        active_u=active_u,
+        active_v=active_v,
+    )
+    candidate = Candidate.successful(
+        label=label,
+        matrix=coefficient,
+        order_key=order_key,
+        kind="restricted_rrr",
+        metadata=metadata,
+    )
+    return InitializationResult(
+        candidate=candidate,
+        state=state,
+        coordinate_matrix=coordinate_matrix,
+    )
+
+
+def target_only_rrr(
+    fitting_fold: FoldData,
+    *,
+    target_rank: int,
+    label: str = "target_only_rrr",
+    order_key: Sequence[Any] = (),
+    pinv_rcond: Optional[float] = None,
+) -> Candidate:
+    """Compute the target-only rank-at-most-``r`` safeguard.
+
+    Implements
+
+    ``X_ft^dagger { P_ft Y_ft }_r`` with
+    ``P_ft = X_ft X_ft^dagger``
+
+    from Eq. ``(bismart-target-only-safeguard)``.  The multiplication order
+    avoids materializing the potentially large ``n_ft x n_ft`` projector.
+    At a positive tied cutoff, the helper uses a fixed coordinate-lexicographic
+    subspace of the invariant tied singular-space projector.  At a zero cutoff
+    it reconstructs only the uniquely identified positive-rank component.
+    Unlike source-guided RRR, the paper keeps this safeguard rather than
+    declaring a tied cutoff unsuccessful.
+    """
+
+    if isinstance(target_rank, (bool, np.bool_)) or not isinstance(
+        target_rank, (int, np.integer)
+    ):
+        raise TypeError("target_rank must be an integer.")
+    target_rank = int(target_rank)
+    if target_rank < 1:
+        raise ValueError("target_rank must be positive.")
+    if target_rank > min(fitting_fold.n_features, fitting_fold.n_responses):
+        raise ValueError("target_rank cannot exceed min(number of predictors, responses).")
+    if pinv_rcond is not None:
+        pinv_rcond = float(pinv_rcond)
+        if not np.isfinite(pinv_rcond) or pinv_rcond < 0:
+            raise ValueError("pinv_rcond must be finite and nonnegative.")
+
+    # PSEUDOCODE 1: Compute the Moore--Penrose map.  It chooses the minimum-norm
+    # coefficient representative when the fitting design is singular.
+    if pinv_rcond is None:
+        design_pseudoinverse = np.linalg.pinv(fitting_fold.X)
+    else:
+        design_pseudoinverse = np.linalg.pinv(fitting_fold.X, rcond=pinv_rcond)
+
+    # PSEUDOCODE 2: Form P_ft Y_ft without allocating P_ft itself.
+    projected_response = fitting_fold.X @ (design_pseudoinverse @ fitting_fold.Y)
+
+    # PSEUDOCODE 3: Apply a deterministic best rank-at-most-r approximation.
+    # If r exceeds the matrix's possible rank, retaining its full thin rank is
+    # exactly the same rank-at-most-r optimization.
+    retained_rank = min(target_rank, min(projected_response.shape))
+    truncated_response = deterministic_rank_at_most_approximation(
+        projected_response,
+        retained_rank,
+    )
+
+    # PSEUDOCODE 4: Map the fitted values back to the minimum-norm coefficient.
+    coefficient = design_pseudoinverse @ truncated_response
+    return Candidate.successful(
+        label=label,
+        matrix=coefficient,
+        order_key=order_key,
+        kind="target_only_rrr",
+        metadata={
+            "target_rank": target_rank,
+            "design_rank": int(np.linalg.matrix_rank(fitting_fold.X)),
+            "pinv_rcond": pinv_rcond,
+        },
+    )
+
+
+# A short alias mirrors the mathematical stage name and is convenient for
+# callers that do not need the longer imperative name.
+restricted_rrr = initialize_restricted_rrr
+
+
+__all__ = [
+    "InitializationResult",
+    "JointParameterState",
+    "initialize_restricted_rrr",
+    "restricted_rrr",
+    "target_only_rrr",
+]

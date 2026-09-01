@@ -1,0 +1,5 @@
+# Runtime dependencies for the executable BI-SMART scaffold.
+numpy>=1.23
+
+# Development/test dependency.
+pytest>=7.0
