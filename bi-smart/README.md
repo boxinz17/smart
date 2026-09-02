@@ -20,15 +20,18 @@ restricted reduced-rank regression (RRR), safeguard candidates, and validation
 selector.  Those stages are implemented as ordinary deterministic numerical
 code.
 
-The appendix defines the quotient Gauss--Newton direction intrinsically, but it
-does not yet specify a concrete horizontal-coordinate basis or the assembly of
-the corresponding constrained normal equations.  The package therefore keeps
-that one backend as detailed, equation-linked pseudocode.  If refinement is
-enabled, the estimator enumerates every weight/radius/backtracking call,
-records each unavailable call as an unsuccessful diagnostic, retains its exact
-RRR candidate at `t=0`, and continues through later branches and safeguards.
-It does not silently substitute an ambient gradient step, because that would
-be a different estimator and could break block-rotation invariance.
+The quotient Gauss--Newton implementation provides two backends for the
+appendix's full-tangent Moore--Penrose formulation.  The dense reference
+assembles the joint residual Jacobian and applies a rank-revealing SVD without
+damping.  The matrix-free backend applies the same Jacobian and its exact
+adjoint through zero-start LSQR, without forming the full Jacobian or a dense
+vertical-coordinate matrix.  `RefinementControls` defaults to `"dense"`, which
+retains the strict full-Jacobian numerical-rank policy.  Large-data runs may
+explicitly select `"matrix_free"`, or select `"auto"` to use dense below the
+workspace cap and matrix-free above it.  Both paths check the quotient
+dimension, tangency, horizontality, the normal residual, and the descent
+identity.  A singular or irregular call remains an unsuccessful branch-local
+diagnostic; its exact RRR candidate at `t=0` and later safeguards are retained.
 
 ## Installation
 
@@ -71,6 +74,9 @@ config = BISMARTConfig(
     source_error_bound=0.10,       # externally calibrated epsilon_hat_0
     budget_path=((2, 2), (3, 3), (5, 5)),
     source_weights=(0.1, 1.0, 10.0),
+    pinv_rcond=1e-12,              # explicit target-only pseudoinverse cutoff
+    atol=1e-12,                    # absolute numerical comparison tolerance
+    rtol=1e-10,                    # relative numerical comparison tolerance
 )
 
 model = BISMART(C0_tilde, config)
@@ -105,6 +111,9 @@ controls = RefinementControls(
     radius_half_width=2,        # J_rho
     max_backtracking_cap=5,     # B_cal
     iteration_cap=10,           # T
+    # Explicit scalable policy; use "dense" for the strict full-J SVD check.
+    gauss_newton_backend="matrix_free",
+    # matrix_free_max_iterations=500,  # optional explicit Krylov cap
 )
 model = BISMART(C0_tilde, replace(config, refinement_controls=controls))
 result = model.fit_folds(
@@ -115,17 +124,18 @@ result = model.fit_folds(
 )
 ```
 
-In this development version no `t>=1` refinement candidate is produced:
-`model.branch_diagnostics_` contains a `not_implemented` record for each
-calibrated call, while exact and safeguard candidates are still validated.
+Regular calibrated calls now produce `t=1,...,T` refinement candidates.  A
+call contributes those iterates only if every requested iteration completes;
+otherwise its partial path is discarded and `model.branch_diagnostics_`
+records the numerical reason.
 
 ## Appendix algorithm represented by the package
 
 The canonical API uses three independent target folds:
 
 1. **Initialization fold:** infer source blocks and screen whole block unions.
-2. **Fitting fold:** recompute exact restricted RRR and, once implemented, run
-   safeguarded quotient Gauss--Newton refinement.
+2. **Fitting fold:** recompute exact restricted RRR and run safeguarded
+   quotient Gauss--Newton refinement when explicitly enabled.
 3. **Validation fold:** choose deterministically from every successful transfer
    candidate plus full-block, target-only, and zero safeguards.
 
@@ -183,7 +193,9 @@ bi_smart/
     source_blocks.py   Source SVD, certified cuts, coarsenings, Wedin gate
     screening.py       Exact block/cell knapsacks and one-sweep screen
     initialization.py  Restricted and target-only reduced-rank regression
-    refinement.py      Joint state/objective plus quotient-GN pseudocode
+    _quotient_geometry.py  Tangent frame, gauge space, quotient dimensions
+    _matrix_free_linalg.py  NumPy-only Golub--Kahan/LSQR iteration
+    refinement.py      Joint state/objective, quotient-GN solve, safeguards
     candidates.py      Deterministic candidate library and validation
     estimator.py       Complete BI-SMART orchestration
 ```
@@ -198,10 +210,30 @@ The scaffold does not invent values that the appendix has not fixed.  In
 particular, callers must make deliberate choices for ranks, fold construction,
 the source-error certificate, budgets, weights, and refinement controls.
 `RefinementControls` represents `c_A`, `beta`, `bar_eta`, `q_rho`, `J_rho`,
-`B_cal`, and `T`; core/separation thresholds use the appendix's computable
-default rule.  Numerical positive-definiteness and rank tolerances are exposed
-in the configuration because exact mathematical comparisons need
-floating-point interpretations in code.
+`B_cal`, and `T`; its `max_dense_work_bytes`, `gauss_newton_backend`, and
+`matrix_free_max_iterations` fields are non-statistical process controls.
+`"dense"` is the default and applies the strict full-Jacobian SVD policy.
+`"matrix_free"` is an explicit scalable mode, while `"auto"` opts into that
+mode only when the full-Jacobian workspace estimate exceeds the cap.  The
+matrix-free path certifies algebraic injectivity, applies several necessary
+numerical-rank screens, and checks the returned solution's normal residual,
+tangency, horizontality, and descent identity.  It does not claim exact parity
+with every near-rank-deficiency decision of the dense SVD, so its diagnostics
+intentionally report `jacobian_rank=None` and no full-Jacobian singular values.
+It still performs a compact rank SVD whose dimensions depend on `r0`, not on
+the ambient sample/predictor/response dimensions.  Its worst-case workspace is
+quartic and its dense SVD work is sixth-order in `r0`; a separate 256 MiB
+safety guard prevents an accidental large-rank allocation.  Core/separation
+thresholds use the
+appendix's computable default rule.  Numerical positive-definiteness and rank
+tolerances are exposed in the configuration because exact mathematical
+comparisons need floating-point interpretations in code.  The configured
+`atol`/`rtol` policy is threaded through source certification, screening ties,
+regularity checks, local polar factors, and the quotient Jacobian; each object
+uses its own local scale.  `pinv_rcond` is always passed explicitly to the
+target-only pseudoinverse (default `1e-12`) so its rank decision is independent
+of NumPy's implicit defaults.  Public numerical inputs must be real-valued;
+complex arrays are rejected instead of having their imaginary parts discarded.
 
 The package follows the appendix when it differs from the concise methodology
 section:
@@ -222,5 +254,6 @@ python -m pytest -q
 
 The suite checks configuration and dimension validation, certified partition
 construction, exact knapsack tie-breaking, strict rank failures, deterministic
-tied target-only truncation, restricted RRR, safeguard retention, refinement
+tied target-only truncation, restricted RRR, quotient dimension/rank,
+tangency, horizontality, gauge equivariance, safeguard retention, refinement
 failure continuation, deterministic validation, and end-to-end runs.

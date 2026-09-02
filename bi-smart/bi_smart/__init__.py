@@ -12,7 +12,10 @@ from .initialization import (
 from .refinement import (
     BISMARTDirection,
     BISMARTState,
+    GaussNewtonDiagnostics,
+    GaussNewtonResult,
     quotient_gauss_newton_direction,
+    solve_quotient_gauss_newton,
 )
 from .screening import (
     block_hard_threshold,
@@ -30,6 +33,7 @@ from .types import (
     BlockPartition,
     Candidate,
     CandidateStatus,
+    DEFAULT_PINV_RCOND,
     FailureReason,
     FoldData,
     RefinementControls,
@@ -47,8 +51,11 @@ __all__ = [
     "BlockPartition",
     "Candidate",
     "CandidateStatus",
+    "DEFAULT_PINV_RCOND",
     "FailureReason",
     "FoldData",
+    "GaussNewtonDiagnostics",
+    "GaussNewtonResult",
     "InitializationResult",
     "JointParameterState",
     "RefinementControls",
@@ -65,6 +72,7 @@ __all__ = [
     "quotient_gauss_newton_direction",
     "run_block_screen",
     "score_and_select_candidates",
+    "solve_quotient_gauss_newton",
     "target_only_rrr",
     "validation_loss",
 ]

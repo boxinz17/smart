@@ -28,7 +28,10 @@ def validate_matrix(matrix: Any, *, name: str = "matrix") -> FloatArray:
     """Return a finite, nonempty, two-dimensional floating-point array."""
 
     # PSEUDOCODE 1: Normalize array-like input without changing its dimensions.
-    result = np.asarray(matrix, dtype=float)
+    raw = np.asarray(matrix)
+    if np.iscomplexobj(raw):
+        raise ValueError(f"{name} must be real-valued; complex input is unsupported.")
+    result = np.asarray(raw, dtype=float)
 
     # PSEUDOCODE 2: Reject objects for which BI-SMART matrix formulas are undefined.
     if result.ndim != 2:
@@ -50,9 +53,18 @@ def comparison_tolerance(
 ) -> float:
     """Compute the package-wide threshold ``atol + rtol * abs(scale)``."""
 
-    scale = float(scale)
-    atol = float(atol)
-    rtol = float(rtol)
+    raw_scale = np.asarray(scale)
+    raw_atol = np.asarray(atol)
+    raw_rtol = np.asarray(rtol)
+    if any(np.iscomplexobj(value) for value in (raw_scale, raw_atol, raw_rtol)):
+        raise ValueError(
+            "scale, atol, and rtol must be real-valued; complex input is unsupported."
+        )
+    if any(value.ndim != 0 for value in (raw_scale, raw_atol, raw_rtol)):
+        raise ValueError("scale, atol, and rtol must be scalars.")
+    scale = float(raw_scale)
+    atol = float(raw_atol)
+    rtol = float(raw_rtol)
     if not np.isfinite(scale):
         raise ValueError("scale must be finite.")
     if not np.isfinite(atol) or atol < 0 or not np.isfinite(rtol) or rtol < 0:
@@ -409,7 +421,12 @@ def spd_solve(
     eigenvalues, eigenvectors = strict_spd_eigh(matrix, atol=atol, rtol=rtol)
 
     # PSEUDOCODE 2: Validate the right-hand side without requiring it to be 2-D.
-    rhs = np.asarray(right_hand_side, dtype=float)
+    raw_rhs = np.asarray(right_hand_side)
+    if np.iscomplexobj(raw_rhs):
+        raise ValueError(
+            "right_hand_side must be real-valued; complex input is unsupported."
+        )
+    rhs = np.asarray(raw_rhs, dtype=float)
     if rhs.ndim not in (1, 2) or rhs.shape[0] != eigenvalues.size:
         raise ValueError(
             "right_hand_side must be a vector or matrix whose first dimension "

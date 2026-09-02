@@ -23,7 +23,14 @@ from typing import Iterable, Optional, Sequence, Tuple
 import numpy as np
 from numpy.typing import NDArray
 
-from .linalg import spd_solve, strict_polar_factor, strict_truncated_svd
+from .linalg import (
+    DEFAULT_ATOL,
+    DEFAULT_RTOL,
+    comparison_tolerance,
+    spd_solve,
+    strict_polar_factor,
+    strict_truncated_svd,
+)
 from .types import (
     BlockPartition,
     CandidateStatus,
@@ -98,20 +105,30 @@ def _validate_nonnegative_integer(value: int, *, name: str) -> int:
     return result
 
 
-def _better_state(candidate: _KnapsackState, incumbent: Optional[_KnapsackState]) -> bool:
-    """Apply the paper's deterministic maximum-energy and lexicographic rule.
+def _better_state(
+    candidate: _KnapsackState,
+    incumbent: Optional[_KnapsackState],
+    *,
+    atol: float,
+    rtol: float,
+) -> bool:
+    """Apply maximum-energy priority and deterministic approximate ties.
 
-    Energies are compared exactly here.  Approximate equality would add a new
-    tuning tolerance that the manuscript does not define.  The item order and
-    summation order are fixed, so the result is deterministic for one numeric
-    backend.
+    A candidate wins on energy only when its advantage exceeds the package's
+    scale-aware comparison tolerance.  Energies inside that tolerance band
+    represent the same mathematical block energy at floating-point precision,
+    so the lexicographically smaller label tuple wins.  Setting both
+    tolerances to zero recovers literal energy comparison.
     """
 
     if incumbent is None:
         return True
-    if candidate.energy > incumbent.energy:
+    scale = max(abs(candidate.energy), abs(incumbent.energy))
+    tolerance = comparison_tolerance(scale, atol=atol, rtol=rtol)
+    difference = candidate.energy - incumbent.energy
+    if difference > tolerance:
         return True
-    if candidate.energy < incumbent.energy:
+    if difference < -tolerance:
         return False
     return candidate.labels < incumbent.labels
 
@@ -123,6 +140,8 @@ def _exact_subset_knapsack(
     *,
     capacity: int,
     minimum_weight: int = 0,
+    atol: float = DEFAULT_ATOL,
+    rtol: float = DEFAULT_RTOL,
 ) -> _KnapsackState:
     """Solve a nonnegative-value zero-one knapsack with deterministic ties.
 
@@ -134,6 +153,9 @@ def _exact_subset_knapsack(
 
     capacity = _validate_nonnegative_integer(capacity, name="capacity")
     minimum_weight = _validate_nonnegative_integer(minimum_weight, name="minimum_weight")
+    # Validate the numerical policy even for an empty item list, for which the
+    # state comparator below might never otherwise be called.
+    comparison_tolerance(0.0, atol=atol, rtol=rtol)
     if minimum_weight > capacity:
         raise NumericalFailure(
             FailureReason.SCREEN_FAILED,
@@ -164,7 +186,7 @@ def _exact_subset_knapsack(
                 energy=previous.energy + energy,
                 labels=previous.labels + (label,),
             )
-            if _better_state(proposal, states[total]):
+            if _better_state(proposal, states[total], atol=atol, rtol=rtol):
                 states[total] = proposal
 
     # PSEUDOCODE 3: Maximize over all admissible realized dimensions, then use
@@ -172,7 +194,7 @@ def _exact_subset_knapsack(
     best: Optional[_KnapsackState] = None
     for total in range(minimum_weight, capacity + 1):
         state = states[total]
-        if state is not None and _better_state(state, best):
+        if state is not None and _better_state(state, best, atol=atol, rtol=rtol):
             best = state
     if best is None:
         raise NumericalFailure(
@@ -258,6 +280,8 @@ def block_hard_threshold(
     *,
     target_rank: int,
     budget: int,
+    atol: float = DEFAULT_ATOL,
+    rtol: float = DEFAULT_RTOL,
 ) -> BlockThresholdResult:
     """Retain the exact maximum-energy whole-block row support.
 
@@ -266,7 +290,10 @@ def block_hard_threshold(
     unrestricted, although the BI-SMART screen uses ``r`` columns.
     """
 
-    array = np.asarray(matrix, dtype=float)
+    raw = np.asarray(matrix)
+    if np.iscomplexobj(raw):
+        raise ValueError("matrix must be real-valued; complex input is unsupported.")
+    array = np.asarray(raw, dtype=float)
     if array.ndim != 2 or array.shape[0] != partition.rank:
         raise ValueError(
             f"matrix must have shape (r0, k) with r0={partition.rank}; got {array.shape}."
@@ -283,6 +310,8 @@ def block_hard_threshold(
         tuple(range(partition.n_blocks)),
         capacity=budget,
         minimum_weight=target_rank,
+        atol=atol,
+        rtol=rtol,
     )
     selected = tuple(int(label) for label in state.labels)
     indices = partition.union_indices(selected)
@@ -301,6 +330,8 @@ def cell_hard_threshold(
     partition: BlockPartition,
     *,
     capacity: int,
+    atol: float = DEFAULT_ATOL,
+    rtol: float = DEFAULT_RTOL,
 ) -> CellThresholdResult:
     """Retain maximum-energy block cells under the exact cell-size budget.
 
@@ -308,7 +339,10 @@ def cell_hard_threshold(
     are enumerated row-major, which fixes the appendix's lexicographic tie rule.
     """
 
-    array = np.asarray(matrix, dtype=float)
+    raw = np.asarray(matrix)
+    if np.iscomplexobj(raw):
+        raise ValueError("matrix must be real-valued; complex input is unsupported.")
+    array = np.asarray(raw, dtype=float)
     r0 = partition.rank
     if array.ndim != 2 or array.shape != (r0, r0):
         raise ValueError(f"matrix must have shape ({r0}, {r0}); got {array.shape}.")
@@ -334,6 +368,8 @@ def cell_hard_threshold(
         labels,
         capacity=capacity,
         minimum_weight=0,
+        atol=atol,
+        rtol=rtol,
     )
     selected = tuple((int(left), int(right)) for left, right in state.labels)
     thresholded = np.zeros_like(array)
@@ -359,8 +395,8 @@ def compute_screening_statistic(
     initialization_fold: FoldData,
     source: SourceDecomposition,
     *,
-    atol: float = 1e-12,
-    rtol: float = 1e-10,
+    atol: float = DEFAULT_ATOL,
+    rtol: float = DEFAULT_RTOL,
 ) -> FloatArray:
     """Compute ``Z_in`` from Eq. ``(bismart-screen-statistic-inverse)``.
 
@@ -420,8 +456,8 @@ def run_block_screen(
     target_rank: int,
     left_budget: int,
     right_budget: int,
-    atol: float = 1e-12,
-    rtol: float = 1e-10,
+    atol: float = DEFAULT_ATOL,
+    rtol: float = DEFAULT_RTOL,
 ) -> ScreenResult:
     """Run one appendix hybrid-pilot and one-sweep screening branch.
 
@@ -494,6 +530,8 @@ def run_block_screen(
                 statistic,
                 partition,
                 capacity=left_budget * right_budget,
+                atol=atol,
+                rtol=rtol,
             ).matrix
         except NumericalFailure as failure:
             return _failed_screen(partition, failure, statistic=statistic)
@@ -524,6 +562,8 @@ def run_block_screen(
             partition,
             target_rank=target_rank,
             budget=left_budget,
+            atol=atol,
+            rtol=rtol,
         )
         _unused_left_polar = strict_polar_factor(
             initial_left.matrix,
@@ -535,6 +575,8 @@ def run_block_screen(
             partition,
             target_rank=target_rank,
             budget=right_budget,
+            atol=atol,
+            rtol=rtol,
         )
         right_factor_0 = strict_polar_factor(
             initial_right.matrix,
@@ -557,6 +599,8 @@ def run_block_screen(
             partition,
             target_rank=target_rank,
             budget=left_budget,
+            atol=atol,
+            rtol=rtol,
         )
         left_factor_1 = strict_polar_factor(
             left_update.matrix,
@@ -578,6 +622,8 @@ def run_block_screen(
             partition,
             target_rank=target_rank,
             budget=right_budget,
+            atol=atol,
+            rtol=rtol,
         )
         right_factor_1 = strict_polar_factor(
             right_update.matrix,

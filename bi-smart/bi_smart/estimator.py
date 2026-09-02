@@ -5,10 +5,11 @@ deliberately three-fold because the theorem-ready appendix uses initialization,
 fitting, and validation responses for disjoint purposes.  It does not invent a
 two-fold cross-fitting aggregation that the manuscript has not yet specified.
 
-All fully specified stages are executable.  Joint quotient Gauss--Newton
-refinement is opt-in; until its horizontal normal-equation backend is filled
-in, each calibrated refinement call is recorded as unsuccessful and the
-appendix continuation rules keep the exact RRR and safeguard candidates.
+Joint quotient Gauss--Newton refinement is opt-in because its finite trust and
+line-search grids require explicit manuscript constants.  When enabled, each
+fixed-support direction is computed by the configured dense or matrix-free
+Moore--Penrose backend and every algebraic failure remains local to its
+calibrated call.
 """
 
 from __future__ import annotations
@@ -25,8 +26,8 @@ from .refinement import (
     default_core_thresholds,
     fitted_source,
     fitted_target,
-    quotient_gauss_newton_direction,
     safeguarded_backtracking,
+    solve_quotient_gauss_newton,
 )
 from .screening import run_block_screen
 from .source_blocks import (
@@ -63,14 +64,18 @@ class BISMART:
     -----
     ``fit_folds`` is executable with ``enable_refinement=False`` (the default).
     It produces pilot, frozen, exact restricted-RRR, full-block, target-only,
-    and zero candidates.  With refinement enabled, it enumerates the appendix
-    calibration grids.  The currently missing horizontal solve makes those
-    calls unsuccessful diagnostics; it does not abort later branches or erase
-    their exact ``t=0`` candidates.
+    and zero candidates.  With refinement enabled, it additionally enumerates
+    the appendix calibration grids and retains a call's iterates only when all
+    requested quotient-rank, path, and Armijo checks pass.
     """
 
     def __init__(self, observed_source: Any, config: BISMARTConfig) -> None:
-        source = np.asarray(observed_source, dtype=float)
+        raw_source = np.asarray(observed_source)
+        if np.iscomplexobj(raw_source):
+            raise ValueError(
+                "observed_source must be real-valued; complex input is unsupported."
+            )
+        source = np.asarray(raw_source, dtype=float)
         if source.ndim != 2 or 0 in source.shape:
             raise ValueError(
                 "observed_source must be a nonempty two-dimensional matrix."
@@ -223,6 +228,8 @@ class BISMART:
             library.decomposition,
             partition,
             config.source_error_bound,
+            atol=config.atol,
+            rtol=config.rtol,
         )
         gate_metadata = {
             **metadata,
@@ -266,8 +273,8 @@ class BISMART:
 
         # PSEUDOCODE 4: Enumerate every omega/radius/cap call.  Each call tries
         # the quotient direction, finite path certificate, and Armijo steps.
-        # The missing direction backend is represented as a failed call, not a
-        # process-wide exception, so later branches and safeguards still run.
+        # Any rank or regularity failure is branch-local, so later calibrated
+        # calls and mandatory safeguards still run.
         if enable_refinement:
             assert rrr.state is not None
             refinement_candidates, refinement_diagnostics = (
@@ -316,15 +323,6 @@ class BISMART:
         source_norm_squared = float(
             np.sum(source_approximation * source_approximation)
         )
-        refinement_scale = max(
-            float(np.linalg.norm(initial_state.H, ord=2)),
-            *(float(np.linalg.norm(core, ord=2)) for core in initial_state.G_blocks),
-        )
-        refinement_tolerance = config.atol + config.rtol * refinement_scale
-        separation_tolerance = (
-            config.atol + config.rtol * refinement_scale**2
-        )
-
         # PSEUDOCODE 1: For each omega, compute the observable scale s_hat_omega
         # and the increasing radius grid s_hat_omega*q_rho^j, -J_rho <= j <=
         # J_rho.  Strict source/RRR checks imply a positive scale.
@@ -410,8 +408,8 @@ class BISMART:
                         thresholds = default_core_thresholds(
                             initial_state,
                             radius=radius,
-                            zero_tolerance=refinement_tolerance,
-                            separation_tolerance=separation_tolerance,
+                            atol=config.atol,
+                            rtol=config.rtol,
                         )
                     except RefinementError as failure:
                         diagnostics.append(
@@ -443,13 +441,23 @@ class BISMART:
                             iteration,
                         )
                         try:
-                            direction = quotient_gauss_newton_direction(
+                            gauss_newton = solve_quotient_gauss_newton(
                                 current_state,
                                 fitting.X,
                                 fitting.Y,
                                 self.observed_source,
                                 omega,
+                                atol=config.atol,
+                                rtol=config.rtol,
+                                max_dense_work_bytes=(
+                                    controls.max_dense_work_bytes
+                                ),
+                                solver_backend=controls.gauss_newton_backend,
+                                matrix_free_max_iterations=(
+                                    controls.matrix_free_max_iterations
+                                ),
                             )
+                            direction = gauss_newton.direction
                             backtracking = safeguarded_backtracking(
                                 current_state,
                                 direction,
@@ -463,18 +471,9 @@ class BISMART:
                                 contraction=controls.contraction,
                                 armijo_constant=controls.armijo_constant,
                                 max_trials=backtracking_cap,
-                                rank_tolerance=refinement_tolerance,
+                                polar_atol=config.atol,
+                                polar_rtol=config.rtol,
                             )
-                        except NotImplementedError as failure:
-                            failure_record = Candidate.unsuccessful(
-                                label=f"{call_label}/t={iteration}",
-                                reason=FailureReason.NOT_IMPLEMENTED,
-                                message=str(failure),
-                                order_key=iteration_order,
-                                kind="refinement_call",
-                                metadata=call_metadata,
-                            )
-                            break
                         except NumericalFailure as failure:
                             failure_record = Candidate.unsuccessful(
                                 label=f"{call_label}/t={iteration}",
@@ -529,6 +528,7 @@ class BISMART:
                                 kind="refinement",
                                 metadata={
                                     **call_metadata,
+                                    **gauss_newton.diagnostics.as_metadata(),
                                     "iteration": iteration,
                                     "accepted_step_size": backtracking.step_size,
                                 },
@@ -580,6 +580,8 @@ class BISMART:
             config.source_rank,
             config.source_error_bound,
             c_gap=config.c_gap,
+            atol=config.atol,
+            rtol=config.rtol,
         )
         self.source_library_ = library
         candidates: list[Candidate] = []
@@ -653,6 +655,7 @@ class BISMART:
                 target_rank=config.target_rank,
                 label="safeguard/target_only_rrr",
                 order_key=(2, 0),
+                pinv_rcond=config.pinv_rcond,
             )
         )
         candidates.append(

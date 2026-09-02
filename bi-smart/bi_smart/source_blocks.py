@@ -33,6 +33,88 @@ from .types import (
 )
 
 
+_DEFAULT_ATOL = 1e-12
+_DEFAULT_RTOL = 1e-10
+
+
+def _real_scalar(value: Any, *, name: str) -> float:
+    """Normalize a public scalar without dropping an imaginary component."""
+
+    raw = np.asarray(value)
+    if np.iscomplexobj(raw):
+        raise ValueError(f"{name} must be real-valued; complex input is unsupported.")
+    if raw.ndim != 0:
+        raise ValueError(f"{name} must be a scalar.")
+    return float(raw)
+
+
+def _validate_tolerances(atol: float, rtol: float) -> Tuple[float, float]:
+    """Normalize nonnegative tolerances used by source spectral decisions."""
+
+    absolute = _real_scalar(atol, name="atol")
+    relative = _real_scalar(rtol, name="rtol")
+    if (
+        not np.isfinite(absolute)
+        or absolute < 0
+        or not np.isfinite(relative)
+        or relative < 0
+    ):
+        raise ValueError("atol and rtol must be finite and nonnegative.")
+    return absolute, relative
+
+
+def _strict_gap_passes(
+    gap: float,
+    threshold: float,
+    *,
+    spectral_scale: float,
+    atol: float,
+    rtol: float,
+) -> bool:
+    """Return a conservative numerical version of ``gap > threshold``.
+
+    A gap is a subtraction of two singular values.  Scaling its roundoff guard
+    only by the (possibly almost-zero) gap would therefore miss cancellation.
+    The guard is instead relative to the singular values that produced it.
+    Equality and values within the guard fail, preserving the manuscript's
+    strict branch semantics without certifying a cut created by roundoff.
+    """
+
+    scale = max(
+        abs(float(spectral_scale)),
+        abs(float(gap)),
+        abs(float(threshold)),
+    )
+    margin = float(atol) + float(rtol) * scale
+    return float(gap) - float(threshold) > margin
+
+
+def _nonstrict_gap_passes(
+    gap: float,
+    threshold: float,
+    *,
+    spectral_scale: float,
+    atol: float,
+    rtol: float,
+) -> bool:
+    """Return a tolerance-aware version of ``gap >= threshold``.
+
+    Unlike the strict source-boundary rules above, equality belongs to the
+    Wedin gate's acceptance region.  A computed gap that lies below the
+    threshold only by its absolute/relative roundoff guard is therefore
+    treated as equality.  ``spectral_scale`` is the scale of the singular
+    values whose subtraction produced the active observable lower bound.
+    """
+
+    scale = max(
+        abs(float(spectral_scale)),
+        abs(float(gap)),
+        abs(float(threshold)),
+    )
+    margin = float(atol) + float(rtol) * scale
+    return float(gap) + margin >= float(threshold)
+
+
 def _nonnegative_integer(value: Any, *, name: str) -> int:
     """Normalize an integer index while rejecting booleans and fractional values."""
 
@@ -47,20 +129,27 @@ def _nonnegative_integer(value: Any, *, name: str) -> int:
 def _validate_error_bound(source_error_bound: float) -> float:
     """Validate the externally calibrated source operator-error bound."""
 
-    epsilon = float(source_error_bound)
+    epsilon = _real_scalar(source_error_bound, name="source_error_bound")
     if not np.isfinite(epsilon) or epsilon < 0:
         raise ValueError("source_error_bound must be finite and nonnegative.")
     return epsilon
 
 
-def _source_calibration(source_error_bound: float, c_gap: float) -> Tuple[float, float]:
+def _source_calibration(
+    source_error_bound: float,
+    c_gap: float,
+    *,
+    atol: float = _DEFAULT_ATOL,
+    rtol: float = _DEFAULT_RTOL,
+) -> Tuple[float, float, float, float]:
     """Validate the two scalars used by every source certification rule."""
 
     epsilon = _validate_error_bound(source_error_bound)
-    gap_constant = float(c_gap)
+    gap_constant = _real_scalar(c_gap, name="c_gap")
     if not np.isfinite(gap_constant) or gap_constant <= 2:
         raise ValueError("c_gap must be finite and strictly larger than 2.")
-    return epsilon, gap_constant
+    absolute, relative = _validate_tolerances(atol, rtol)
+    return epsilon, gap_constant, absolute, relative
 
 
 def gaussian_source_error_bound(
@@ -81,8 +170,11 @@ def gaussian_source_error_bound(
     """
 
     # PSEUDOCODE 1: Validate the externally supplied noise scale and tail level.
-    tau0 = float(noise_standard_deviation)
-    x0 = float(tail_parameter)
+    tau0 = _real_scalar(
+        noise_standard_deviation,
+        name="noise_standard_deviation",
+    )
+    x0 = _real_scalar(tail_parameter, name="tail_parameter")
     if not np.isfinite(tau0) or tau0 < 0:
         raise ValueError("noise_standard_deviation must be finite and nonnegative.")
     if not np.isfinite(x0) or x0 <= 0:
@@ -144,17 +236,38 @@ def source_rank_boundary_passes(
     source_error_bound: float,
     *,
     c_gap: float = 3.0,
+    atol: float = _DEFAULT_ATOL,
+    rtol: float = _DEFAULT_RTOL,
 ) -> bool:
-    """Evaluate Eq. ``(bismart-rank-boundary-check)`` exactly.
+    """Evaluate Eq. ``(bismart-rank-boundary-check)`` conservatively.
 
-    The inequality is strict.  Equality therefore fails, matching the paper.
+    The inequality is strict.  Equality and a tolerance-sized neighborhood of
+    equality therefore fail.  The relative tolerance is scaled by the two
+    singular values forming the boundary, so an ``epsilon0=0`` tie cannot pass
+    merely because its numerical SVD representatives differ by roundoff.
     """
 
     # PSEUDOCODE 1: Validate the source-only calibration constants.
-    epsilon, gap_constant = _source_calibration(source_error_bound, c_gap)
+    epsilon, gap_constant, absolute, relative = _source_calibration(
+        source_error_bound,
+        c_gap,
+        atol=atol,
+        rtol=rtol,
+    )
 
-    # PSEUDOCODE 2: Compare the observed truncation gap with c_gap*epsilon_hat.
-    return source_rank_boundary_gap(decomposition) > gap_constant * epsilon
+    # PSEUDOCODE 2: Compare the observed truncation gap with c_gap*epsilon_hat,
+    # requiring clearance beyond numerical uncertainty in the two boundary
+    # singular values.
+    threshold = gap_constant * epsilon
+    retained = float(decomposition.singular_values[-1])
+    excluded = float(decomposition.next_singular_value)
+    return _strict_gap_passes(
+        retained - excluded,
+        threshold,
+        spectral_scale=max(abs(retained), abs(excluded)),
+        atol=absolute,
+        rtol=relative,
+    )
 
 
 def require_source_rank_boundary(
@@ -162,11 +275,17 @@ def require_source_rank_boundary(
     source_error_bound: float,
     *,
     c_gap: float = 3.0,
+    atol: float = _DEFAULT_ATOL,
+    rtol: float = _DEFAULT_RTOL,
 ) -> None:
     """Raise a recoverable branch failure unless the rank boundary passes."""
 
     if not source_rank_boundary_passes(
-        decomposition, source_error_bound, c_gap=c_gap
+        decomposition,
+        source_error_bound,
+        c_gap=c_gap,
+        atol=atol,
+        rtol=rtol,
     ):
         gap = source_rank_boundary_gap(decomposition)
         threshold = float(c_gap) * float(source_error_bound)
@@ -192,6 +311,8 @@ def certified_cut_positions(
     source_error_bound: float,
     *,
     c_gap: float = 3.0,
+    atol: float = _DEFAULT_ATOL,
+    rtol: float = _DEFAULT_RTOL,
 ) -> Tuple[int, ...]:
     """Return the certified internal cuts in Eq. ``(bismart-certified-cuts)``.
 
@@ -201,17 +322,33 @@ def certified_cut_positions(
     """
 
     # PSEUDOCODE 1: Calibrate the strict observed-gap threshold.
-    epsilon, gap_constant = _source_calibration(source_error_bound, c_gap)
+    epsilon, gap_constant, absolute, relative = _source_calibration(
+        source_error_bound,
+        c_gap,
+        atol=atol,
+        rtol=rtol,
+    )
     threshold = gap_constant * epsilon
 
     # PSEUDOCODE 2: Compute all r0-1 adjacent gaps in source order.
     gaps = observed_internal_gaps(decomposition)
 
-    # PSEUDOCODE 3: Keep precisely the boundaries whose gaps are strictly larger.
+    # PSEUDOCODE 3: Keep only boundaries separated from the strict threshold by
+    # more than the roundoff scale of their adjacent singular values.
+    values = decomposition.singular_values
     return tuple(
         position
         for position, gap in enumerate(gaps, start=1)
-        if float(gap) > threshold
+        if _strict_gap_passes(
+            float(gap),
+            threshold,
+            spectral_scale=max(
+                abs(float(values[position - 1])),
+                abs(float(values[position])),
+            ),
+            atol=absolute,
+            rtol=relative,
+        )
     )
 
 
@@ -219,12 +356,18 @@ def build_nested_partitions(
     source_rank: int,
     cuts: Sequence[int],
     internal_gaps: Sequence[float],
+    *,
+    atol: float = _DEFAULT_ATOL,
+    rtol: float = _DEFAULT_RTOL,
+    gap_scales: Sequence[float] | None = None,
 ) -> Tuple[BlockPartition, ...]:
     """Build Eq. ``(bismart-partition-library)`` from finest to coarsest.
 
     Certified cuts are deleted by increasing observed gap, with the smaller cut
-    position breaking exact ties.  This ordering is part of the estimator and
-    later contributes to deterministic validation tie-breaking.
+    position breaking numerical ties.  ``gap_scales`` may provide the local
+    singular-value scale for each subtracted gap; otherwise each gap supplies
+    its own scale.  This ordering is part of the estimator and later
+    contributes to deterministic validation tie-breaking.
     """
 
     # PSEUDOCODE 1: Validate source rank and the complete adjacent-gap vector.
@@ -235,11 +378,30 @@ def build_nested_partitions(
     r0 = int(source_rank)
     if r0 < 1:
         raise ValueError("source_rank must be at least one.")
-    gaps = np.asarray(internal_gaps, dtype=float)
+    raw_gaps = np.asarray(internal_gaps)
+    if np.iscomplexobj(raw_gaps):
+        raise ValueError(
+            "internal_gaps must be real-valued; complex input is unsupported."
+        )
+    gaps = np.asarray(raw_gaps, dtype=float)
     if gaps.ndim != 1 or gaps.size != max(r0 - 1, 0):
         raise ValueError(f"internal_gaps must have length {max(r0 - 1, 0)}.")
     if np.any(~np.isfinite(gaps)) or np.any(gaps < 0):
         raise ValueError("internal_gaps must be finite and nonnegative.")
+    absolute, relative = _validate_tolerances(atol, rtol)
+    if gap_scales is None:
+        scales = np.abs(gaps)
+    else:
+        raw_scales = np.asarray(gap_scales)
+        if np.iscomplexobj(raw_scales):
+            raise ValueError(
+                "gap_scales must be real-valued; complex input is unsupported."
+            )
+        scales = np.asarray(raw_scales, dtype=float)
+        if scales.ndim != 1 or scales.size != gaps.size:
+            raise ValueError(f"gap_scales must have length {gaps.size}.")
+        if np.any(~np.isfinite(scales)) or np.any(scales < 0):
+            raise ValueError("gap_scales must be finite and nonnegative.")
 
     # PSEUDOCODE 2: Canonicalize the certified set and construct its finest partition.
     current_cuts = tuple(
@@ -248,8 +410,35 @@ def build_nested_partitions(
     finest = BlockPartition.from_cut_positions(r0, current_cuts)
     library = [finest]
 
-    # PSEUDOCODE 3: Rank cuts by increasing gap and then smaller position.
-    removal_order = sorted(current_cuts, key=lambda cut: (float(gaps[cut - 1]), cut))
+    # PSEUDOCODE 3: Rank cuts by increasing gap.  First form contiguous
+    # tolerance-sized groups in exact gap order; then use smaller position
+    # inside each numerical-tie group.  Grouping avoids a non-transitive fuzzy
+    # comparator while retaining deterministic behavior.
+    exact_order = sorted(current_cuts, key=lambda cut: (float(gaps[cut - 1]), cut))
+    removal_order: list[int] = []
+    tie_group: list[int] = []
+    group_anchor: int | None = None
+    for cut in exact_order:
+        if group_anchor is None:
+            tie_group = [cut]
+            group_anchor = cut
+            continue
+        anchor_gap = float(gaps[group_anchor - 1])
+        cut_gap = float(gaps[cut - 1])
+        comparison_scale = max(
+            float(scales[group_anchor - 1]),
+            float(scales[cut - 1]),
+            abs(anchor_gap),
+            abs(cut_gap),
+        )
+        tie_tolerance = absolute + relative * comparison_scale
+        if cut_gap - anchor_gap <= tie_tolerance:
+            tie_group.append(cut)
+        else:
+            removal_order.extend(sorted(tie_group))
+            tie_group = [cut]
+            group_anchor = cut
+    removal_order.extend(sorted(tie_group))
 
     # PSEUDOCODE 4: Delete one cut at a time, retaining every deterministic coarsening.
     remaining = set(current_cuts)
@@ -267,6 +456,8 @@ def build_source_block_library(
     source_error_bound: float,
     *,
     c_gap: float = 3.0,
+    atol: float = _DEFAULT_ATOL,
+    rtol: float = _DEFAULT_RTOL,
 ) -> SourceBlockLibrary:
     """Construct all source-only objects needed by complete BI-SMART.
 
@@ -280,9 +471,20 @@ def build_source_block_library(
     decomposition = compute_source_decomposition(observed_source, source_rank)
 
     # PSEUDOCODE 2: Evaluate the strict outer boundary check before target use.
-    epsilon, gap_constant = _source_calibration(source_error_bound, c_gap)
+    epsilon, gap_constant, absolute, relative = _source_calibration(
+        source_error_bound,
+        c_gap,
+        atol=atol,
+        rtol=rtol,
+    )
     boundary_gap = source_rank_boundary_gap(decomposition)
-    boundary_passes = boundary_gap > gap_constant * epsilon
+    boundary_passes = source_rank_boundary_passes(
+        decomposition,
+        epsilon,
+        c_gap=gap_constant,
+        atol=absolute,
+        rtol=relative,
+    )
 
     # PSEUDOCODE 3: Certify internal boundaries using the same source-only scale.
     gaps = observed_internal_gaps(decomposition)
@@ -290,10 +492,20 @@ def build_source_block_library(
         decomposition,
         epsilon,
         c_gap=gap_constant,
+        atol=absolute,
+        rtol=relative,
     )
 
     # PSEUDOCODE 4: Coarsen deterministically until the single-block safeguard.
-    partitions = build_nested_partitions(decomposition.rank, cuts, gaps)
+    values = decomposition.singular_values
+    partitions = build_nested_partitions(
+        decomposition.rank,
+        cuts,
+        gaps,
+        atol=absolute,
+        rtol=relative,
+        gap_scales=np.maximum(np.abs(values[:-1]), np.abs(values[1:])),
+    )
 
     # PSEUDOCODE 5: Return both usable objects and the failed/passed boundary diagnostic.
     return SourceBlockLibrary(
@@ -305,6 +517,8 @@ def build_source_block_library(
         certified_cuts=cuts,
         observed_internal_gaps=gaps,
         partitions=partitions,
+        atol=absolute,
+        rtol=relative,
     )
 
 
@@ -331,6 +545,53 @@ def _validate_block(
     return normalized
 
 
+def _observable_block_gap_details(
+    decomposition: SourceDecomposition,
+    block: Sequence[int],
+    source_error_bound: float,
+) -> Tuple[float, float]:
+    """Return one observable block gap and its active spectral scale.
+
+    The scale follows the boundary term attaining the minimum rather than the
+    largest singular value in the complete source matrix.  This keeps the
+    relative guard local when the source spectrum spans several magnitudes.
+    """
+
+    epsilon = _validate_error_bound(source_error_bound)
+    indices = _validate_block(block, source_rank=decomposition.rank)
+    a, b = indices[0], indices[-1]
+    values = decomposition.singular_values
+
+    # Each pair is (observable lower-bound term, scale of the singular-value
+    # subtraction that produced it).  The first term compares d_hat_b to zero.
+    terms = [
+        (
+            float(values[b] - epsilon),
+            abs(float(values[b])),
+        )
+    ]
+    if a > 0:
+        terms.append(
+            (
+                float(values[a - 1] - values[a] - 2.0 * epsilon),
+                max(abs(float(values[a - 1])), abs(float(values[a]))),
+            )
+        )
+    if b < decomposition.rank - 1:
+        terms.append(
+            (
+                float(values[b] - values[b + 1] - 2.0 * epsilon),
+                max(abs(float(values[b])), abs(float(values[b + 1]))),
+            )
+        )
+
+    gap = min(term for term, _ in terms)
+    # Exact ties can arise in idealized spectra.  The larger active scale gives
+    # a representation-independent guard without importing unrelated blocks.
+    spectral_scale = max(scale for term, scale in terms if term == gap)
+    return gap, spectral_scale
+
+
 def observable_block_gap(
     decomposition: SourceDecomposition,
     block: Sequence[int],
@@ -343,25 +604,15 @@ def observable_block_gap(
     value from the source null space.
     """
 
-    # PSEUDOCODE 1: Validate a consecutive empirical block B=[a,b].
-    epsilon = _validate_error_bound(source_error_bound)
-    indices = _validate_block(block, source_rank=decomposition.rank)
-    a, b = indices[0], indices[-1]
-    values = decomposition.singular_values
-
-    # PSEUDOCODE 2: Start with separation of d_hat_b from zero/source null space.
-    terms = [float(values[b] - epsilon)]
-
-    # PSEUDOCODE 3: Add the observed left boundary when B is not the first block.
-    if a > 0:
-        terms.append(float(values[a - 1] - values[a] - 2.0 * epsilon))
-
-    # PSEUDOCODE 4: Add the observed right boundary when B is not the last block.
-    if b < decomposition.rank - 1:
-        terms.append(float(values[b] - values[b + 1] - 2.0 * epsilon))
-
-    # PSEUDOCODE 5: The observable lower bound is the weakest present separation.
-    return min(terms)
+    # PSEUDOCODE 1: Evaluate every existing block-boundary term and return the
+    # weakest one.  The internal helper also records its local spectral scale
+    # for the tolerance-aware Wedin comparison below.
+    gap, _ = _observable_block_gap_details(
+        decomposition,
+        block,
+        source_error_bound,
+    )
+    return gap
 
 
 def observable_partition_gaps(
@@ -401,21 +652,45 @@ def evaluate_wedin_gate(
     decomposition: SourceDecomposition,
     partition: BlockPartition,
     source_error_bound: float,
+    *,
+    atol: float = _DEFAULT_ATOL,
+    rtol: float = _DEFAULT_RTOL,
 ) -> WedinGateResult:
     """Evaluate the observable whole-partition Wedin gate.
 
-    Passing means ``min_l gamma_lower(B_l) >= 4*epsilon_hat``.  Equality passes
-    because the displayed appendix gate is non-strict.  Failure does not erase
-    successful pilot/frozen candidates; it only skips RRR and refinement.
+    Passing means ``min_l gamma_lower(B_l) >= 4*epsilon_hat``.  Equality and a
+    configured roundoff neighborhood below equality pass because the displayed
+    appendix gate is non-strict.  Setting both tolerances to zero recovers the
+    literal floating-point comparison.  Failure does not erase successful
+    pilot/frozen candidates; it only skips RRR and refinement.
     """
 
     # PSEUDOCODE 1: Validate epsilon_hat and compute every block-specific lower gap.
     epsilon = _validate_error_bound(source_error_bound)
-    gaps = observable_partition_gaps(decomposition, partition, epsilon)
+    absolute, relative = _validate_tolerances(atol, rtol)
+    if partition.rank != decomposition.rank:
+        raise ValueError(
+            "partition must cover exactly the retained source singular directions."
+        )
+    gap_details = tuple(
+        _observable_block_gap_details(decomposition, block, epsilon)
+        for block in partition.blocks
+    )
+    gaps = tuple(gap for gap, _ in gap_details)
 
     # PSEUDOCODE 2: Apply the common appendix threshold 4*epsilon_hat.
     threshold = 4.0 * epsilon
-    failing = tuple(label for label, gap in enumerate(gaps) if gap < threshold)
+    failing = tuple(
+        label
+        for label, (gap, spectral_scale) in enumerate(gap_details)
+        if not _nonstrict_gap_passes(
+            gap,
+            threshold,
+            spectral_scale=spectral_scale,
+            atol=absolute,
+            rtol=relative,
+        )
+    )
 
     # PSEUDOCODE 3: Preserve all diagnostics so the branch decision is inspectable.
     return WedinGateResult(
@@ -430,6 +705,9 @@ def passes_wedin_gate(
     decomposition: SourceDecomposition,
     partition: BlockPartition,
     source_error_bound: float,
+    *,
+    atol: float = _DEFAULT_ATOL,
+    rtol: float = _DEFAULT_RTOL,
 ) -> bool:
     """Boolean convenience wrapper around :func:`evaluate_wedin_gate`."""
 
@@ -437,6 +715,8 @@ def passes_wedin_gate(
         decomposition,
         partition,
         source_error_bound,
+        atol=atol,
+        rtol=rtol,
     ).passes
 
 

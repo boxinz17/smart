@@ -13,10 +13,15 @@ from bi_smart.linalg import (
 from bi_smart.types import (
     BISMARTConfig,
     BlockPartition,
+    Candidate,
+    CandidateStatus,
+    DEFAULT_PINV_RCOND,
     FailureReason,
     FoldData,
     NumericalFailure,
     RefinementControls,
+    ScreenResult,
+    TruncatedSVD,
 )
 
 
@@ -34,6 +39,8 @@ def test_config_normalizes_and_validates_structural_inputs():
     assert config.budget_path == ((2, 3), (5, 5))
     assert config.source_weights == (0.1, 1.0)
     assert config.c_gap == 3.0
+    assert config.pinv_rcond == DEFAULT_PINV_RCOND
+    assert FailureReason.NOT_IMPLEMENTED.value == "not_implemented"
 
     with pytest.raises(ValueError, match="1 <= target_rank <= source_rank"):
         BISMARTConfig(3, 2, 0.1, ((3, 3),), (1.0,))
@@ -47,9 +54,13 @@ def test_config_normalizes_and_validates_structural_inputs():
         BISMARTConfig(2, 5, 0.1, ((2, 2), (2, 2)), (1.0,))
     with pytest.raises(ValueError, match="duplicate values"):
         BISMARTConfig(2, 5, 0.1, ((2, 2),), (1.0, 1.0))
+    with pytest.raises(ValueError, match="pinv_rcond must be finite and nonnegative"):
+        BISMARTConfig(2, 5, 0.1, ((2, 2),), (1.0,), pinv_rcond=-1.0)
+    with pytest.raises(ValueError, match="real-valued"):
+        BISMARTConfig(2, 5, 0.1, ((2, 2),), (1.0,), pinv_rcond=1e-12 + 1j)
 
 
-def test_refinement_controls_represent_every_fixed_algorithm_constant():
+def test_refinement_controls_represent_algorithm_constants_and_resource_cap():
     controls = RefinementControls(
         armijo_constant=1e-4,
         contraction=0.5,
@@ -62,11 +73,52 @@ def test_refinement_controls_represent_every_fixed_algorithm_constant():
     assert controls.radius_half_width == 2
     assert controls.max_backtracking_cap == 4
     assert controls.iteration_cap == 5
+    assert controls.max_dense_work_bytes == 512 * 1024**2
+    assert controls.gauss_newton_backend == "dense"
+    assert controls.matrix_free_max_iterations is None
+
+    iterative = RefinementControls(
+        1e-4,
+        0.5,
+        1.0,
+        2.0,
+        1,
+        2,
+        3,
+        gauss_newton_backend="matrix-free",
+        matrix_free_max_iterations=17,
+    )
+    assert iterative.gauss_newton_backend == "matrix_free"
+    assert iterative.matrix_free_max_iterations == 17
 
     with pytest.raises(ValueError, match="strictly larger than one"):
         RefinementControls(1e-4, 0.5, 1.0, 1.0, 1, 2, 3)
     with pytest.raises(ValueError, match="both be positive"):
         RefinementControls(1e-4, 0.5, 1.0, 2.0, 1, 0, 3)
+    with pytest.raises(ValueError, match="max_dense_work_bytes must be positive"):
+        RefinementControls(1e-4, 0.5, 1.0, 2.0, 1, 2, 3, 0)
+    with pytest.raises(ValueError, match="gauss_newton_backend"):
+        RefinementControls(
+            1e-4,
+            0.5,
+            1.0,
+            2.0,
+            1,
+            2,
+            3,
+            gauss_newton_backend="unknown",
+        )
+    with pytest.raises(ValueError, match="matrix_free_max_iterations"):
+        RefinementControls(
+            1e-4,
+            0.5,
+            1.0,
+            2.0,
+            1,
+            2,
+            3,
+            matrix_free_max_iterations=0,
+        )
 
 
 def test_fold_data_checks_rows_finiteness_and_reports_dimensions():
@@ -81,6 +133,37 @@ def test_fold_data_checks_rows_finiteness_and_reports_dimensions():
         FoldData(np.ones((3, 2)), np.ones((4, 1)), name="bad")
     with pytest.raises(ValueError, match="finite"):
         FoldData(np.array([[1.0], [np.nan]]), np.ones((2, 1)), name="bad")
+
+
+def test_public_matrix_values_reject_complex_inputs_without_casting() -> None:
+    """Public value objects never discard even a small imaginary component."""
+
+    complex_matrix = np.array([[1.0 + 1e-14j]])
+    with pytest.raises(ValueError, match="real-valued"):
+        FoldData(complex_matrix, np.ones((1, 1)), name="complex")
+    with pytest.raises(ValueError, match="real-valued"):
+        Candidate.successful(label="complex", matrix=complex_matrix)
+    with pytest.raises(ValueError, match="real-valued"):
+        TruncatedSVD(
+            u=np.ones((1, 1)),
+            singular_values=np.array([1.0 + 1e-14j]),
+            vt=np.ones((1, 1)),
+            next_singular_value=0.0,
+        )
+
+    partition = BlockPartition.from_cut_positions(1, ())
+    with pytest.raises(ValueError, match="real-valued"):
+        ScreenResult(
+            status=CandidateStatus.SUCCESSFUL,
+            partition=partition,
+            left_blocks=(0,),
+            right_blocks=(0,),
+            statistic=complex_matrix,
+            left_factor=np.ones((1, 1)),
+            right_factor=np.ones((1, 1)),
+            pilot_matrix=np.ones((1, 1)),
+            frozen_matrix=np.ones((1, 1)),
+        )
 
 
 def test_block_partition_construction_and_union_validation():

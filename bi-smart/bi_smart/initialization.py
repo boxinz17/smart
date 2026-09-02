@@ -8,11 +8,9 @@ block-invariant joint parameterization in Eq. ``(bismart-source-initializer)``,
 and implements the target-only safeguard in Eq.
 ``(bismart-target-only-safeguard)``.
 
-The joint optimizer itself is intentionally not completed here.  The returned
-``BISMARTState`` is the fully specified starting point consumed by
-:mod:`bi_smart.refinement`; that module implements the stated geometry and
-safeguards while leaving the manuscript's unresolved horizontal-space linear
-solve as explicit pseudocode.
+The returned ``BISMARTState`` is the fully specified starting point consumed
+by the implemented quotient Gauss--Newton geometry and safeguarded line search
+in :mod:`bi_smart.refinement`.
 """
 
 from __future__ import annotations
@@ -34,6 +32,7 @@ from .refinement import BISMARTState, fitted_target
 from .types import (
     Candidate,
     CandidateStatus,
+    DEFAULT_PINV_RCOND,
     FailureReason,
     FloatArray,
     FoldData,
@@ -46,7 +45,10 @@ from .types import (
 def _finite_matrix(value: NDArray[np.floating], *, name: str) -> FloatArray:
     """Normalize a finite, nonempty matrix for a local result object."""
 
-    result = np.asarray(value, dtype=float)
+    raw = np.asarray(value)
+    if np.iscomplexobj(raw):
+        raise ValueError(f"{name} must be real-valued; complex input is unsupported.")
+    result = np.asarray(raw, dtype=float)
     if result.ndim != 2 or 0 in result.shape:
         raise ValueError(f"{name} must be a nonempty matrix; got shape {result.shape}.")
     if not np.all(np.isfinite(result)):
@@ -345,7 +347,7 @@ def target_only_rrr(
     target_rank: int,
     label: str = "target_only_rrr",
     order_key: Sequence[Any] = (),
-    pinv_rcond: Optional[float] = None,
+    pinv_rcond: float | None = DEFAULT_PINV_RCOND,
 ) -> Candidate:
     """Compute the target-only rank-at-most-``r`` safeguard.
 
@@ -360,7 +362,9 @@ def target_only_rrr(
     subspace of the invariant tied singular-space projector.  At a zero cutoff
     it reconstructs only the uniquely identified positive-rank component.
     Unlike source-guided RRR, the paper keeps this safeguard rather than
-    declaring a tied cutoff unsuccessful.
+    declaring a tied cutoff unsuccessful.  ``pinv_rcond`` is always passed to
+    NumPy explicitly; its package default is fixed rather than inherited from
+    a NumPy-version-dependent pseudoinverse default.
     """
 
     if isinstance(target_rank, (bool, np.bool_)) or not isinstance(
@@ -372,17 +376,30 @@ def target_only_rrr(
         raise ValueError("target_rank must be positive.")
     if target_rank > min(fitting_fold.n_features, fitting_fold.n_responses):
         raise ValueError("target_rank cannot exceed min(number of predictors, responses).")
-    if pinv_rcond is not None:
-        pinv_rcond = float(pinv_rcond)
-        if not np.isfinite(pinv_rcond) or pinv_rcond < 0:
-            raise ValueError("pinv_rcond must be finite and nonnegative.")
+    # ``None`` was accepted by the initial scaffold.  Preserve that call shape
+    # while mapping it to the package's named cutoff, never NumPy's implicit
+    # and version-dependent default.
+    if pinv_rcond is None:
+        pinv_rcond = DEFAULT_PINV_RCOND
+    raw_rcond = np.asarray(pinv_rcond)
+    if np.iscomplexobj(raw_rcond):
+        raise ValueError(
+            "pinv_rcond must be real-valued; complex input is unsupported."
+        )
+    if raw_rcond.ndim != 0:
+        raise ValueError("pinv_rcond must be a scalar.")
+    pinv_rcond = float(raw_rcond)
+    if not np.isfinite(pinv_rcond) or pinv_rcond < 0:
+        raise ValueError("pinv_rcond must be finite and nonnegative.")
 
     # PSEUDOCODE 1: Compute the Moore--Penrose map.  It chooses the minimum-norm
-    # coefficient representative when the fitting design is singular.
-    if pinv_rcond is None:
-        design_pseudoinverse = np.linalg.pinv(fitting_fold.X)
-    else:
-        design_pseudoinverse = np.linalg.pinv(fitting_fold.X, rcond=pinv_rcond)
+    # coefficient representative when the fitting design is singular.  Pass
+    # the named cutoff explicitly so behavior does not depend on NumPy's
+    # version-specific default.
+    design_pseudoinverse = np.linalg.pinv(
+        fitting_fold.X,
+        rcond=pinv_rcond,
+    )
 
     # PSEUDOCODE 2: Form P_ft Y_ft without allocating P_ft itself.
     projected_response = fitting_fold.X @ (design_pseudoinverse @ fitting_fold.Y)
@@ -398,6 +415,18 @@ def target_only_rrr(
 
     # PSEUDOCODE 4: Map the fitted values back to the minimum-norm coefficient.
     coefficient = design_pseudoinverse @ truncated_response
+    design_singular_values = np.linalg.svd(
+        fitting_fold.X,
+        compute_uv=False,
+    )
+    design_cutoff = (
+        pinv_rcond * float(design_singular_values[0])
+        if design_singular_values.size
+        else 0.0
+    )
+    effective_design_rank = int(
+        np.count_nonzero(design_singular_values > design_cutoff)
+    )
     return Candidate.successful(
         label=label,
         matrix=coefficient,
@@ -405,7 +434,7 @@ def target_only_rrr(
         kind="target_only_rrr",
         metadata={
             "target_rank": target_rank,
-            "design_rank": int(np.linalg.matrix_rank(fitting_fold.X)),
+            "design_rank": effective_design_rank,
             "pinv_rcond": pinv_rcond,
         },
     )

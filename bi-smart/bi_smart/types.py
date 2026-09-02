@@ -30,6 +30,12 @@ from numpy.typing import NDArray
 
 FloatArray = NDArray[np.float64]
 
+# NumPy has changed the implicit default cutoff used by ``pinv`` across API
+# generations.  BI-SMART therefore names and stores its target-only cutoff so
+# the same configuration has the same numerical meaning on every supported
+# NumPy release.
+DEFAULT_PINV_RCOND = 1e-12
+
 
 class CandidateStatus(str, Enum):
     """Whether a paper-defined candidate passed all checks in its branch."""
@@ -58,7 +64,10 @@ class FailureReason(str, Enum):
     INVALID_INITIAL_THRESHOLDS = "invalid_initial_thresholds"
     IRREGULAR_ITERATE = "irregular_iterate"
     SINGULAR_NORMAL_EQUATIONS = "singular_normal_equations"
+    DENSE_SOLVER_LIMIT = "dense_solver_limit_exceeded"
     LINE_SEARCH = "line_search_failed"
+    # Compatibility value for diagnostics serialized by the earlier
+    # pseudocode-only scaffold.  The implemented backend no longer emits it.
     NOT_IMPLEMENTED = "not_implemented"
 
 
@@ -73,7 +82,10 @@ class NumericalFailure(RuntimeError):
 def _float_matrix(value: Any, *, name: str) -> FloatArray:
     """Convert a value to a finite, nonempty two-dimensional float array."""
 
-    array = np.asarray(value, dtype=float)
+    raw = np.asarray(value)
+    if np.iscomplexobj(raw):
+        raise ValueError(f"{name} must be real-valued; complex input is unsupported.")
+    array = np.asarray(raw, dtype=float)
     if array.ndim != 2:
         raise ValueError(f"{name} must be a two-dimensional matrix; got shape {array.shape}.")
     if 0 in array.shape:
@@ -81,6 +93,38 @@ def _float_matrix(value: Any, *, name: str) -> FloatArray:
     if not np.all(np.isfinite(array)):
         raise ValueError(f"{name} must contain only finite values.")
     return array
+
+
+def _real_float(value: Any, *, name: str) -> float:
+    """Convert one public scalar without silently dropping an imaginary part."""
+
+    raw = np.asarray(value)
+    if np.iscomplexobj(raw):
+        raise ValueError(f"{name} must be real-valued; complex input is unsupported.")
+    if raw.ndim != 0:
+        raise ValueError(f"{name} must be a scalar.")
+    return float(raw)
+
+
+def _require_orthonormal_columns(value: FloatArray, *, name: str) -> None:
+    """Reject public basis matrices that are not orthonormal to roundoff.
+
+    Source decompositions may be constructed directly by users, rather than
+    only through NumPy's SVD.  A dimension-scaled machine-precision guard is
+    deliberately used here instead of an application-level modeling
+    tolerance: these factors encode an exact Stiefel constraint.
+    """
+
+    rank = value.shape[1]
+    gram_error = float(
+        np.linalg.norm(value.T @ value - np.eye(rank, dtype=float), ord=np.inf)
+    )
+    tolerance = 64.0 * np.finfo(float).eps * max(value.shape)
+    if gram_error > tolerance:
+        raise ValueError(
+            f"{name} must have orthonormal columns; "
+            f"Gram error {gram_error:.6g} exceeds {tolerance:.6g}."
+        )
 
 
 def _nonnegative_int(value: Any, *, name: str) -> int:
@@ -267,7 +311,12 @@ class TruncatedSVD:
 
     def __post_init__(self) -> None:
         u = _float_matrix(self.u, name="u")
-        values = np.asarray(self.singular_values, dtype=float)
+        raw_values = np.asarray(self.singular_values)
+        if np.iscomplexobj(raw_values):
+            raise ValueError(
+                "singular_values must be real-valued; complex input is unsupported."
+            )
+        values = np.asarray(raw_values, dtype=float)
         vt = _float_matrix(self.vt, name="vt")
         if values.ndim != 1 or values.size < 1:
             raise ValueError("singular_values must be a nonempty vector.")
@@ -278,7 +327,10 @@ class TruncatedSVD:
         rank = values.size
         if u.shape[1] != rank or vt.shape[0] != rank:
             raise ValueError("u, singular_values, and vt have incompatible ranks.")
-        next_value = float(self.next_singular_value)
+        next_value = _real_float(
+            self.next_singular_value,
+            name="next_singular_value",
+        )
         if not np.isfinite(next_value) or next_value < 0:
             raise ValueError("next_singular_value must be finite and nonnegative.")
         if next_value > float(values[-1]):
@@ -335,6 +387,8 @@ class SourceDecomposition:
             raise ValueError("Source singular vectors are incompatible with source_shape.")
         if truncated.rank > min(shape):
             raise ValueError("The retained source rank exceeds the matrix dimensions.")
+        _require_orthonormal_columns(truncated.u, name="u")
+        _require_orthonormal_columns(truncated.vt.T, name="vt.T")
         if self.coordinate_core is None:
             core = np.diag(truncated.singular_values)
         else:
@@ -409,21 +463,33 @@ class SourceBlockLibrary:
     certified_cuts: Tuple[int, ...]
     observed_internal_gaps: FloatArray
     partitions: Tuple[BlockPartition, ...]
+    atol: float = 1e-12
+    rtol: float = 1e-10
 
     def __post_init__(self) -> None:
-        epsilon = float(self.source_error_bound)
-        c_gap = float(self.c_gap)
-        boundary_gap = float(self.boundary_gap)
-        gaps = np.asarray(self.observed_internal_gaps, dtype=float)
+        epsilon = _real_float(self.source_error_bound, name="source_error_bound")
+        c_gap = _real_float(self.c_gap, name="c_gap")
+        boundary_gap = _real_float(self.boundary_gap, name="boundary_gap")
+        raw_gaps = np.asarray(self.observed_internal_gaps)
+        if np.iscomplexobj(raw_gaps):
+            raise ValueError(
+                "observed_internal_gaps must be real-valued; "
+                "complex input is unsupported."
+            )
+        gaps = np.asarray(raw_gaps, dtype=float)
         cuts = tuple(
             _nonnegative_int(cut, name="certified cut") for cut in self.certified_cuts
         )
         partitions = tuple(self.partitions)
+        atol = _real_float(self.atol, name="atol")
+        rtol = _real_float(self.rtol, name="rtol")
 
         if not np.isfinite(epsilon) or epsilon < 0:
             raise ValueError("source_error_bound must be finite and nonnegative.")
         if not np.isfinite(c_gap) or c_gap <= 2:
             raise ValueError("c_gap must be finite and strictly larger than 2.")
+        if not np.isfinite(atol) or atol < 0 or not np.isfinite(rtol) or rtol < 0:
+            raise ValueError("atol and rtol must be finite and nonnegative.")
         if not np.isfinite(boundary_gap):
             raise ValueError("boundary_gap must be finite.")
         expected_gaps = max(self.decomposition.rank - 1, 0)
@@ -453,13 +519,34 @@ class SourceBlockLibrary:
             if not coarser_cuts < finer_cuts or len(finer_cuts - coarser_cuts) != 1:
                 raise ValueError("Each successive partition must remove exactly one cut.")
 
-        expected_boundary = boundary_gap > c_gap * epsilon
+        threshold = c_gap * epsilon
+        retained = float(self.decomposition.singular_values[-1])
+        excluded = float(self.decomposition.next_singular_value)
+        boundary_scale = max(
+            abs(retained),
+            abs(excluded),
+            abs(boundary_gap),
+            abs(threshold),
+        )
+        expected_boundary = boundary_gap - threshold > atol + rtol * boundary_scale
         if bool(self.boundary_passes) != expected_boundary:
-            raise ValueError("boundary_passes is inconsistent with the strict boundary check.")
+            raise ValueError(
+                "boundary_passes is inconsistent with the tolerance-aware "
+                "strict boundary check."
+            )
+        values = self.decomposition.singular_values
         expected_cuts = tuple(
             position
             for position, gap in enumerate(gaps, start=1)
-            if float(gap) > c_gap * epsilon
+            if float(gap) - threshold
+            > atol
+            + rtol
+            * max(
+                abs(float(values[position - 1])),
+                abs(float(values[position])),
+                abs(float(gap)),
+                abs(threshold),
+            )
         )
         if cuts != expected_cuts:
             raise ValueError("certified_cuts are inconsistent with the observed-gap rule.")
@@ -471,6 +558,8 @@ class SourceBlockLibrary:
         object.__setattr__(self, "certified_cuts", cuts)
         object.__setattr__(self, "observed_internal_gaps", gaps)
         object.__setattr__(self, "partitions", partitions)
+        object.__setattr__(self, "atol", atol)
+        object.__setattr__(self, "rtol", rtol)
 
 
 @dataclass(frozen=True)
@@ -521,6 +610,24 @@ class ScreenResult:
                 raise ValueError("A successful screen result cannot have a failure_reason.")
         elif self.failure_reason is None:
             raise ValueError("An unsuccessful screen result must provide a failure_reason.")
+
+        # Publicly constructed diagnostics must obey the same real-valued
+        # contract as matrices entering the numerical routines.  Normalize
+        # every populated field, including optional arrays on failed branches.
+        for field_name in (
+            "statistic",
+            "left_factor",
+            "right_factor",
+            "pilot_matrix",
+            "frozen_matrix",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(
+                    self,
+                    field_name,
+                    _float_matrix(value, name=f"screen.{field_name}"),
+                )
 
         object.__setattr__(self, "left_blocks", left)
         object.__setattr__(self, "right_blocks", right)
@@ -621,6 +728,16 @@ class RefinementControls:
     ``radius_half_width = J_rho``,
     ``max_backtracking_cap = B_cal``, and ``iteration_cap = T``.
 
+    ``max_dense_work_bytes``, ``gauss_newton_backend``, and
+    ``matrix_free_max_iterations`` are numerical process controls rather than
+    statistical or manuscript tuning constants.  The default ``"dense"``
+    backend retains the appendix's strict full-Jacobian numerical-rank check.
+    ``"matrix_free"`` is an explicit scalable LSQR mode, and ``"auto"`` opts
+    into that mode when the dense workspace would exceed the cap.  The
+    matrix-free mode checks algebraic injectivity, necessary compact numerical
+    screens, and solve-specific postconditions; it cannot claim every
+    near-rank-deficiency decision of the full dense SVD.
+
     Core and block-separation thresholds use the computable rule in
     ``(bismart-default-thresholds)``.  A future alternative threshold rule
     should be represented explicitly rather than hidden in this object.
@@ -633,14 +750,17 @@ class RefinementControls:
     radius_half_width: int
     max_backtracking_cap: int
     iteration_cap: int
+    max_dense_work_bytes: int = 512 * 1024**2
+    gauss_newton_backend: str = "dense"
+    matrix_free_max_iterations: Optional[int] = None
 
     def __post_init__(self) -> None:
         # PSEUDOCODE 1: Validate the Armijo and geometric-backtracking
         # constants before any branch-specific state has been constructed.
-        armijo = float(self.armijo_constant)
-        contraction = float(self.contraction)
-        initial_step = float(self.initial_step_size)
-        radius_ratio = float(self.radius_ratio)
+        armijo = _real_float(self.armijo_constant, name="armijo_constant")
+        contraction = _real_float(self.contraction, name="contraction")
+        initial_step = _real_float(self.initial_step_size, name="initial_step_size")
+        radius_ratio = _real_float(self.radius_ratio, name="radius_ratio")
         if not np.isfinite(armijo) or not 0.0 < armijo < 1.0:
             raise ValueError("armijo_constant must lie strictly between zero and one.")
         if not np.isfinite(contraction) or not 0.0 < contraction < 1.0:
@@ -663,10 +783,34 @@ class RefinementControls:
             self.iteration_cap,
             name="iteration_cap",
         )
+        max_dense_work_bytes = _nonnegative_int(
+            self.max_dense_work_bytes,
+            name="max_dense_work_bytes",
+        )
         if backtracking_cap < 1 or iteration_cap < 1:
             raise ValueError(
                 "max_backtracking_cap and iteration_cap must both be positive."
             )
+        if max_dense_work_bytes < 1:
+            raise ValueError("max_dense_work_bytes must be positive.")
+
+        # PSEUDOCODE 3: Select the linear-algebra implementation explicitly.
+        # This does not alter the appendix objective or candidate ordering.
+        if not isinstance(self.gauss_newton_backend, str):
+            raise TypeError("gauss_newton_backend must be a string.")
+        backend = self.gauss_newton_backend.strip().lower().replace("-", "_")
+        if backend not in {"auto", "dense", "matrix_free"}:
+            raise ValueError(
+                "gauss_newton_backend must be 'auto', 'dense', or 'matrix_free'."
+            )
+        iterative_cap = self.matrix_free_max_iterations
+        if iterative_cap is not None:
+            iterative_cap = _nonnegative_int(
+                iterative_cap,
+                name="matrix_free_max_iterations",
+            )
+            if iterative_cap < 1:
+                raise ValueError("matrix_free_max_iterations must be positive.")
 
         object.__setattr__(self, "armijo_constant", armijo)
         object.__setattr__(self, "contraction", contraction)
@@ -675,6 +819,9 @@ class RefinementControls:
         object.__setattr__(self, "radius_half_width", radius_half_width)
         object.__setattr__(self, "max_backtracking_cap", backtracking_cap)
         object.__setattr__(self, "iteration_cap", iteration_cap)
+        object.__setattr__(self, "max_dense_work_bytes", max_dense_work_bytes)
+        object.__setattr__(self, "gauss_newton_backend", backend)
+        object.__setattr__(self, "matrix_free_max_iterations", iterative_cap)
 
 
 @dataclass(frozen=True)
@@ -685,6 +832,8 @@ class BISMARTConfig:
     Gauss--Newton line search or trust-grid calibration.  ``refinement_controls``
     is therefore optional for exact-stage runs and must be supplied explicitly
     when ``BISMART.fit_folds(..., enable_refinement=True)`` is requested.
+    ``pinv_rcond`` is the reproducible cutoff used only by the mandatory
+    target-only pseudoinverse safeguard.
     """
 
     target_rank: int
@@ -696,6 +845,7 @@ class BISMARTConfig:
     c_gap: float = 3.0
     atol: float = 1e-12
     rtol: float = 1e-10
+    pinv_rcond: float = DEFAULT_PINV_RCOND
 
     def __post_init__(self) -> None:
         # PSEUDOCODE 1: Validate ranks and the source-error calibration.
@@ -703,7 +853,7 @@ class BISMARTConfig:
         r0 = _nonnegative_int(self.source_rank, name="source_rank")
         if r < 1 or r0 < 1 or r > r0:
             raise ValueError("Ranks must satisfy 1 <= target_rank <= source_rank.")
-        epsilon = float(self.source_error_bound)
+        epsilon = _real_float(self.source_error_bound, name="source_error_bound")
         if not np.isfinite(epsilon) or epsilon < 0:
             raise ValueError("source_error_bound must be finite and nonnegative.")
 
@@ -721,7 +871,10 @@ class BISMARTConfig:
             raise ValueError("Every budget pair must lie in [target_rank, source_rank]^2.")
         if len(set(budgets)) != len(budgets):
             raise ValueError("budget_path must not contain duplicate budget pairs.")
-        weights = tuple(float(weight) for weight in self.source_weights)
+        weights = tuple(
+            _real_float(weight, name="source weight")
+            for weight in self.source_weights
+        )
         if not weights or any(not np.isfinite(weight) or weight <= 0 for weight in weights):
             raise ValueError("source_weights must be a nonempty sequence of positive finite values.")
         if len(set(weights)) != len(weights):
@@ -731,9 +884,12 @@ class BISMARTConfig:
             raise TypeError("refinement_controls must be RefinementControls or None.")
 
         # PSEUDOCODE 3: Validate the fixed gap constant and numerical tolerances.
-        c_gap = float(self.c_gap)
-        atol = float(self.atol)
-        rtol = float(self.rtol)
+        pinv_rcond = _real_float(self.pinv_rcond, name="pinv_rcond")
+        c_gap = _real_float(self.c_gap, name="c_gap")
+        atol = _real_float(self.atol, name="atol")
+        rtol = _real_float(self.rtol, name="rtol")
+        if not np.isfinite(pinv_rcond) or pinv_rcond < 0:
+            raise ValueError("pinv_rcond must be finite and nonnegative.")
         if not np.isfinite(c_gap) or c_gap <= 2:
             raise ValueError("c_gap must be finite and strictly larger than 2.")
         if not np.isfinite(atol) or atol < 0 or not np.isfinite(rtol) or rtol < 0:
@@ -745,6 +901,7 @@ class BISMARTConfig:
         object.__setattr__(self, "budget_path", budgets)
         object.__setattr__(self, "source_weights", weights)
         object.__setattr__(self, "refinement_controls", controls)
+        object.__setattr__(self, "pinv_rcond", pinv_rcond)
         object.__setattr__(self, "c_gap", c_gap)
         object.__setattr__(self, "atol", atol)
         object.__setattr__(self, "rtol", rtol)
@@ -791,6 +948,7 @@ __all__ = [
     "BlockPartition",
     "Candidate",
     "CandidateStatus",
+    "DEFAULT_PINV_RCOND",
     "FailureReason",
     "FloatArray",
     "FoldData",
