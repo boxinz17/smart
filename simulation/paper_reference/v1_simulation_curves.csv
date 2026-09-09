@@ -1,0 +1,433 @@
+model_id,model,p,q,experiment,varying_parameter,x,method,method_label,mean,se,paper_repetitions,is_horizontal_reference,source_kind,source_pdf,pdf_page
+0,ModelI,100,50,exp1,n,200,RRR,RRR,0.02208100,0.00010149,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,400,RRR,RRR,0.01302800,0.00004872,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,600,RRR,RRR,0.01016400,0.00003080,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,800,RRR,RRR,0.00863000,0.00002904,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,1000,RRR,RRR,0.00757800,0.00002699,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,200,SRRR,SRRR,0.02226100,0.00011675,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,400,SRRR,SRRR,0.01306900,0.00005208,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,600,SRRR,SRRR,0.01017500,0.00003224,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,800,SRRR,SRRR,0.00865300,0.00003083,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,1000,SRRR,SRRR,0.00758800,0.00002664,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,200,SOFAR,SOFAR,0.02696500,0.00018319,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,400,SOFAR,SOFAR,0.01597500,0.00010956,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,600,SOFAR,SOFAR,0.01219000,0.00008928,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,800,SOFAR,SOFAR,0.01015900,0.00008423,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,1000,SOFAR,SOFAR,0.00869200,0.00005462,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,200,RSSVD,RSSVD,0.03395500,0.00023685,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,400,RSSVD,RSSVD,0.01990200,0.00012060,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,600,RSSVD,RSSVD,0.01579400,0.00011770,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,800,RSSVD,RSSVD,0.01346800,0.00010509,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,1000,RSSVD,RSSVD,0.01115900,0.00010942,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,200,SMART_fixed,SMART (fixed ranks),0.00746344,0.00012017,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,400,SMART_fixed,SMART (fixed ranks),0.00647235,0.00015083,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,600,SMART_fixed,SMART (fixed ranks),0.00608908,0.00013057,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,800,SMART_fixed,SMART (fixed ranks),0.00593892,0.00012442,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,1000,SMART_fixed,SMART (fixed ranks),0.00568994,0.00012542,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,200,SMART,SMART,0.00715496,0.00012002,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,400,SMART,SMART,0.00643910,0.00014513,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,600,SMART,SMART,0.00616572,0.00013768,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,800,SMART,SMART,0.00601660,0.00013168,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp1,n,1000,SMART,SMART,0.00574139,0.00012848,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,1,RRR,RRR,0.10952500,0.00013748,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,3,RRR,RRR,0.07030300,0.00021034,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,5,RRR,RRR,0.02208200,0.00010208,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,7,RRR,RRR,0.03021400,0.00011995,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,9,RRR,RRR,0.03582400,0.00011843,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,11,RRR,RRR,0.04024100,0.00011473,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,1,SRRR,SRRR,0.11181800,0.00015405,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,3,SRRR,SRRR,0.07311900,0.00029706,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,5,SRRR,SRRR,0.02225200,0.00011923,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,7,SRRR,SRRR,0.02998800,0.00012866,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,9,SRRR,SRRR,0.03554400,0.00013411,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,11,SRRR,SRRR,0.03989700,0.00015248,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,1,SOFAR,SOFAR,0.11137200,0.00015218,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,3,SOFAR,SOFAR,0.07402300,0.00025403,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,5,SOFAR,SOFAR,0.02700500,0.00019073,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,7,SOFAR,SOFAR,0.02778500,0.00018111,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,9,SOFAR,SOFAR,0.02765900,0.00018141,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,11,SOFAR,SOFAR,0.02771000,0.00018829,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,1,RSSVD,RSSVD,0.11375800,0.00019337,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,3,RSSVD,RSSVD,0.07872600,0.00025130,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,5,RSSVD,RSSVD,0.03363000,0.00024105,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,7,RSSVD,RSSVD,0.03329000,0.00022361,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,9,RSSVD,RSSVD,0.03295400,0.00022600,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,11,RSSVD,RSSVD,0.03258400,0.00021048,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,1,SMART_fixed,SMART (fixed ranks),0.10919670,0.00016090,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,3,SMART_fixed,SMART (fixed ranks),0.06870846,0.00018996,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,5,SMART_fixed,SMART (fixed ranks),0.00746344,0.00012017,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,7,SMART_fixed,SMART (fixed ranks),0.00869035,0.00010571,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,9,SMART_fixed,SMART (fixed ranks),0.00968013,0.00009435,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,11,SMART_fixed,SMART (fixed ranks),0.01049020,0.00008641,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,1,SMART,SMART,0.00715496,0.00012002,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,3,SMART,SMART,0.00715496,0.00012002,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,5,SMART,SMART,0.00715496,0.00012002,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,7,SMART,SMART,0.00715496,0.00012002,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,9,SMART,SMART,0.00715496,0.00012002,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp2,r_hat,11,SMART,SMART,0.00715496,0.00012002,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,0,RRR,RRR,0.02208100,0.00010149,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,3,RRR,RRR,0.02208100,0.00010149,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,5,RRR,RRR,0.02208100,0.00010149,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,7,RRR,RRR,0.02208100,0.00010149,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,10,RRR,RRR,0.02208100,0.00010149,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,15,RRR,RRR,0.02208100,0.00010149,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,20,RRR,RRR,0.02208100,0.00010149,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,0,SRRR,SRRR,0.02226100,0.00011675,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,3,SRRR,SRRR,0.02226100,0.00011675,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,5,SRRR,SRRR,0.02226100,0.00011675,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,7,SRRR,SRRR,0.02226100,0.00011675,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,10,SRRR,SRRR,0.02226100,0.00011675,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,15,SRRR,SRRR,0.02226100,0.00011675,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,20,SRRR,SRRR,0.02226100,0.00011675,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,0,SOFAR,SOFAR,0.02696500,0.00018319,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,3,SOFAR,SOFAR,0.02696500,0.00018319,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,5,SOFAR,SOFAR,0.02696500,0.00018319,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,7,SOFAR,SOFAR,0.02696500,0.00018319,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,10,SOFAR,SOFAR,0.02696500,0.00018319,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,15,SOFAR,SOFAR,0.02696500,0.00018319,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,20,SOFAR,SOFAR,0.02696500,0.00018319,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,0,RSSVD,RSSVD,0.03395500,0.00023685,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,3,RSSVD,RSSVD,0.03395500,0.00023685,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,5,RSSVD,RSSVD,0.03395500,0.00023685,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,7,RSSVD,RSSVD,0.03395500,0.00023685,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,10,RSSVD,RSSVD,0.03395500,0.00023685,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,15,RSSVD,RSSVD,0.03395500,0.00023685,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,20,RSSVD,RSSVD,0.03395500,0.00023685,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,0,SMART_fixed,SMART (fixed ranks),0.00784300,0.00010479,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,3,SMART_fixed,SMART (fixed ranks),0.00739554,0.00012138,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,5,SMART_fixed,SMART (fixed ranks),0.00722524,0.00012398,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,7,SMART_fixed,SMART (fixed ranks),0.00710139,0.00012200,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,10,SMART_fixed,SMART (fixed ranks),0.00746345,0.00012017,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,15,SMART_fixed,SMART (fixed ranks),0.00834095,0.00011136,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,20,SMART_fixed,SMART (fixed ranks),0.00920536,0.00010170,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,0,SMART,SMART,0.00715496,0.00012002,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,3,SMART,SMART,0.00715496,0.00012002,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,5,SMART,SMART,0.00715496,0.00012002,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,7,SMART,SMART,0.00715496,0.00012002,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,10,SMART,SMART,0.00715496,0.00012002,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,15,SMART,SMART,0.00715496,0.00012002,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp3,r_s,20,SMART,SMART,0.00715496,0.00012002,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0,RRR,RRR,0.02208100,0.00010149,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.01,RRR,RRR,0.02208100,0.00010149,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.02,RRR,RRR,0.02208100,0.00010149,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.05,RRR,RRR,0.02208100,0.00010149,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.1,RRR,RRR,0.02208100,0.00010149,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.5,RRR,RRR,0.02208100,0.00010149,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0,SRRR,SRRR,0.02226100,0.00011675,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.01,SRRR,SRRR,0.02226100,0.00011675,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.02,SRRR,SRRR,0.02226100,0.00011675,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.05,SRRR,SRRR,0.02226100,0.00011675,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.1,SRRR,SRRR,0.02226100,0.00011675,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.5,SRRR,SRRR,0.02226100,0.00011675,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0,SOFAR,SOFAR,0.02696500,0.00018319,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.01,SOFAR,SOFAR,0.02696500,0.00018319,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.02,SOFAR,SOFAR,0.02696500,0.00018319,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.05,SOFAR,SOFAR,0.02696500,0.00018319,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.1,SOFAR,SOFAR,0.02696500,0.00018319,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.5,SOFAR,SOFAR,0.02696500,0.00018319,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0,RSSVD,RSSVD,0.03395500,0.00023685,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.01,RSSVD,RSSVD,0.03395500,0.00023685,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.02,RSSVD,RSSVD,0.03395500,0.00023685,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.05,RSSVD,RSSVD,0.03395500,0.00023685,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.1,RSSVD,RSSVD,0.03395500,0.00023685,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.5,RSSVD,RSSVD,0.03395500,0.00023685,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0,SMART_fixed,SMART (fixed ranks),0.00468498,0.00004253,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.01,SMART_fixed,SMART (fixed ranks),0.00746345,0.00012017,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.02,SMART_fixed,SMART (fixed ranks),0.01213671,0.00026328,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.05,SMART_fixed,SMART (fixed ranks),0.01954728,0.00032821,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.1,SMART_fixed,SMART (fixed ranks),0.02819687,0.00045491,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.5,SMART_fixed,SMART (fixed ranks),0.02162862,0.00011029,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0,SMART,SMART,0.00447865,0.00006745,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.01,SMART,SMART,0.00715496,0.00012002,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.02,SMART,SMART,0.01084216,0.00020353,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.05,SMART,SMART,0.01918237,0.00034484,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.1,SMART,SMART,0.02214134,0.00013629,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+0,ModelI,100,50,exp4,sigma0,0.5,SMART,SMART,0.02168905,0.00011532,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model1.pdf,1
+1,ModelII,150,100,exp1,n,300,RRR,RRR,0.01306800,0.00004360,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,500,RRR,RRR,0.00873800,0.00002255,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,700,RRR,RRR,0.00704600,0.00001997,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,1000,RRR,RRR,0.00571300,0.00001488,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,1200,RRR,RRR,0.00517200,0.00001558,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,300,SRRR,SRRR,0.01312300,0.00004353,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,500,SRRR,SRRR,0.00874600,0.00002276,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,700,SRRR,SRRR,0.00706900,0.00002058,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,1000,SRRR,SRRR,0.00571500,0.00001598,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,1200,SRRR,SRRR,0.00517400,0.00001567,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,300,SOFAR,SOFAR,0.01694500,0.00011747,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,500,SOFAR,SOFAR,0.01104200,0.00007580,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,700,SOFAR,SOFAR,0.00874000,0.00005183,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,1000,SOFAR,SOFAR,0.00709000,0.00006018,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,1200,SOFAR,SOFAR,0.00630600,0.00005201,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,300,RSSVD,RSSVD,0.02117200,0.00011468,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,500,RSSVD,RSSVD,0.01426400,0.00008015,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,700,RSSVD,RSSVD,0.01155200,0.00007226,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,1000,RSSVD,RSSVD,0.00954600,0.00008271,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,1200,RSSVD,RSSVD,0.00875400,0.00007052,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,300,SMART_fixed,SMART (fixed ranks),0.00488539,0.00010269,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,500,SMART_fixed,SMART (fixed ranks),0.00460768,0.00011062,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,700,SMART_fixed,SMART (fixed ranks),0.00447624,0.00009443,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,1000,SMART_fixed,SMART (fixed ranks),0.00442154,0.00009908,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,1200,SMART_fixed,SMART (fixed ranks),0.00435377,0.00009777,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,300,SMART,SMART,0.00473680,0.00008941,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,500,SMART,SMART,0.00454651,0.00010055,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,700,SMART,SMART,0.00452500,0.00009848,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,1000,SMART,SMART,0.00444991,0.00010019,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp1,n,1200,SMART,SMART,0.00430862,0.00008809,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,1,RRR,RRR,0.06368000,0.00007416,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,3,RRR,RRR,0.04257700,0.00011196,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,5,RRR,RRR,0.02172400,0.00011568,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,7,RRR,RRR,0.03167800,0.00014779,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,9,RRR,RRR,0.03850900,0.00016379,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,11,RRR,RRR,0.04374500,0.00018178,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,1,SRRR,SRRR,0.06515600,0.00008123,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,3,SRRR,SRRR,0.04556300,0.00017734,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,5,SRRR,SRRR,0.02192800,0.00016698,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,7,SRRR,SRRR,0.02922600,0.00024582,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,9,SRRR,SRRR,0.03544300,0.00039553,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,11,SRRR,SRRR,0.04187400,0.00043167,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,1,SOFAR,SOFAR,0.06477500,0.00007472,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,3,SOFAR,SOFAR,0.04525000,0.00014516,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,5,SOFAR,SOFAR,0.02520200,0.00016749,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,7,SOFAR,SOFAR,0.02814900,0.00016156,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,9,SOFAR,SOFAR,0.02874100,0.00015985,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,11,SOFAR,SOFAR,0.02914600,0.00016898,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,1,RSSVD,RSSVD,0.06656400,0.00008937,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,3,RSSVD,RSSVD,0.04907700,0.00013954,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,5,RSSVD,RSSVD,0.03118700,0.00012986,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,7,RSSVD,RSSVD,0.03116000,0.00014355,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,9,RSSVD,RSSVD,0.03155400,0.00014788,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,11,RSSVD,RSSVD,0.03166600,0.00015988,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,1,SMART_fixed,SMART (fixed ranks),0.06282788,0.00007418,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,3,SMART_fixed,SMART (fixed ranks),0.03894548,0.00007115,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,5,SMART_fixed,SMART (fixed ranks),0.00488539,0.00010269,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,7,SMART_fixed,SMART (fixed ranks),0.00556313,0.00009119,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,9,SMART_fixed,SMART (fixed ranks),0.00613184,0.00008266,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,11,SMART_fixed,SMART (fixed ranks),0.00661082,0.00007714,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,1,SMART,SMART,0.00473680,0.00008941,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,3,SMART,SMART,0.00473680,0.00008941,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,5,SMART,SMART,0.00473680,0.00008941,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,7,SMART,SMART,0.00473680,0.00008941,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,9,SMART,SMART,0.00473680,0.00008941,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp2,r_hat,11,SMART,SMART,0.00473680,0.00008941,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,0,RRR,RRR,0.01306800,0.00004360,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,3,RRR,RRR,0.01306800,0.00004360,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,5,RRR,RRR,0.01306800,0.00004360,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,7,RRR,RRR,0.01306800,0.00004360,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,10,RRR,RRR,0.01306800,0.00004360,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,15,RRR,RRR,0.01306800,0.00004360,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,20,RRR,RRR,0.01306800,0.00004360,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,0,SRRR,SRRR,0.01312300,0.00004353,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,3,SRRR,SRRR,0.01312300,0.00004353,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,5,SRRR,SRRR,0.01312300,0.00004353,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,7,SRRR,SRRR,0.01312300,0.00004353,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,10,SRRR,SRRR,0.01312300,0.00004353,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,15,SRRR,SRRR,0.01312300,0.00004353,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,20,SRRR,SRRR,0.01312300,0.00004353,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,0,SOFAR,SOFAR,0.01694500,0.00011747,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,3,SOFAR,SOFAR,0.01694500,0.00011747,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,5,SOFAR,SOFAR,0.01694500,0.00011747,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,7,SOFAR,SOFAR,0.01694500,0.00011747,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,10,SOFAR,SOFAR,0.01694500,0.00011747,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,15,SOFAR,SOFAR,0.01694500,0.00011747,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,20,SOFAR,SOFAR,0.01694500,0.00011747,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,0,RSSVD,RSSVD,0.02117200,0.00011468,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,3,RSSVD,RSSVD,0.02117200,0.00011468,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,5,RSSVD,RSSVD,0.02117200,0.00011468,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,7,RSSVD,RSSVD,0.02117200,0.00011468,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,10,RSSVD,RSSVD,0.02117200,0.00011468,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,15,RSSVD,RSSVD,0.02117200,0.00011468,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,20,RSSVD,RSSVD,0.02117200,0.00011468,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,0,SMART_fixed,SMART (fixed ranks),0.00509193,0.00007638,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,3,SMART_fixed,SMART (fixed ranks),0.00484373,0.00008706,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,5,SMART_fixed,SMART (fixed ranks),0.00472431,0.00008965,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,7,SMART_fixed,SMART (fixed ranks),0.00464924,0.00008880,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,10,SMART_fixed,SMART (fixed ranks),0.00488539,0.00010269,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,15,SMART_fixed,SMART (fixed ranks),0.00518304,0.00009671,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,20,SMART_fixed,SMART (fixed ranks),0.00547433,0.00008894,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,0,SMART,SMART,0.00473680,0.00008941,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,3,SMART,SMART,0.00473680,0.00008941,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,5,SMART,SMART,0.00473680,0.00008941,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,7,SMART,SMART,0.00473680,0.00008941,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,10,SMART,SMART,0.00473680,0.00008941,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,15,SMART,SMART,0.00473680,0.00008941,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp3,r_s,20,SMART,SMART,0.00473680,0.00008941,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0,RRR,RRR,0.01306800,0.00004360,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.01,RRR,RRR,0.01306800,0.00004360,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.02,RRR,RRR,0.01306800,0.00004360,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.05,RRR,RRR,0.01306800,0.00004360,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.1,RRR,RRR,0.01306800,0.00004360,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.5,RRR,RRR,0.01306800,0.00004360,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0,SRRR,SRRR,0.01312300,0.00004353,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.01,SRRR,SRRR,0.01312300,0.00004353,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.02,SRRR,SRRR,0.01312300,0.00004353,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.05,SRRR,SRRR,0.01312300,0.00004353,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.1,SRRR,SRRR,0.01312300,0.00004353,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.5,SRRR,SRRR,0.01312300,0.00004353,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0,SOFAR,SOFAR,0.01694500,0.00011747,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.01,SOFAR,SOFAR,0.01694500,0.00011747,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.02,SOFAR,SOFAR,0.01694500,0.00011747,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.05,SOFAR,SOFAR,0.01694500,0.00011747,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.1,SOFAR,SOFAR,0.01694500,0.00011747,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.5,SOFAR,SOFAR,0.01694500,0.00011747,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0,RSSVD,RSSVD,0.02117200,0.00011468,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.01,RSSVD,RSSVD,0.02117200,0.00011468,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.02,RSSVD,RSSVD,0.02117200,0.00011468,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.05,RSSVD,RSSVD,0.02117200,0.00011468,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.1,RSSVD,RSSVD,0.02117200,0.00011468,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.5,RSSVD,RSSVD,0.02117200,0.00011468,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0,SMART_fixed,SMART (fixed ranks),0.00219864,0.00001895,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.01,SMART_fixed,SMART (fixed ranks),0.00488539,0.00010269,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.02,SMART_fixed,SMART (fixed ranks),0.00826411,0.00016962,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.05,SMART_fixed,SMART (fixed ranks),0.01408151,0.00021849,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.1,SMART_fixed,SMART (fixed ranks),0.02024260,0.00027014,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.5,SMART_fixed,SMART (fixed ranks),0.01343550,0.00004996,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0,SMART,SMART,0.00220741,0.00003602,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.01,SMART,SMART,0.00473680,0.00008941,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.02,SMART,SMART,0.00767231,0.00014673,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.05,SMART,SMART,0.01265112,0.00013320,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.1,SMART,SMART,0.01321134,0.00005169,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+1,ModelII,150,100,exp4,sigma0,0.5,SMART,SMART,0.01314697,0.00004419,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model2.pdf,1
+2,ModelIII,300,200,exp1,n,500,RRR,RRR,0.00780700,0.00001976,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,700,RRR,RRR,0.00568600,0.00001311,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,1000,RRR,RRR,0.00437800,0.00001031,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,1200,RRR,RRR,0.00388700,0.00000825,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,1500,RRR,RRR,0.00339900,0.00000659,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,500,SRRR,SRRR,0.00794300,0.00003906,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,700,SRRR,SRRR,0.00570600,0.00001369,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,1000,SRRR,SRRR,0.00438800,0.00001094,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,1200,SRRR,SRRR,0.00389500,0.00000880,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,1500,SRRR,SRRR,0.00340200,0.00000724,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,500,SOFAR,SOFAR,0.01021200,0.00005919,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,700,SOFAR,SOFAR,0.00753600,0.00005020,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,1000,SOFAR,SOFAR,0.00577500,0.00004551,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,1200,SOFAR,SOFAR,0.00517100,0.00004365,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,1500,SOFAR,SOFAR,0.00449800,0.00004830,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,500,RSSVD,RSSVD,0.01307200,0.00005476,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,700,RSSVD,RSSVD,0.00979600,0.00004870,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,1000,RSSVD,RSSVD,0.00763000,0.00003442,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,1200,RSSVD,RSSVD,0.00686600,0.00003118,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,1500,RSSVD,RSSVD,0.00607900,0.00003328,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,500,SMART_fixed,SMART (fixed ranks),0.00337258,0.00007417,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,700,SMART_fixed,SMART (fixed ranks),0.00310978,0.00006128,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,1000,SMART_fixed,SMART (fixed ranks),0.00318651,0.00007030,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,1200,SMART_fixed,SMART (fixed ranks),0.00299915,0.00006757,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,1500,SMART_fixed,SMART (fixed ranks),0.00304475,0.00006713,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,500,SMART,SMART,0.00327522,0.00006787,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,700,SMART,SMART,0.00312365,0.00006002,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,1000,SMART,SMART,0.00321763,0.00007226,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,1200,SMART,SMART,0.00300181,0.00006571,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp1,n,1500,SMART,SMART,0.00294244,0.00005444,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,1,RRR,RRR,0.03352500,0.00002743,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,3,RRR,RRR,0.02734000,0.00004238,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,5,RRR,RRR,0.02314600,0.00005739,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,7,RRR,RRR,0.02511900,0.00005697,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,9,RRR,RRR,0.02679300,0.00005472,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,11,RRR,RRR,0.02830700,0.00005527,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,1,SRRR,SRRR,0.03459300,0.00003355,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,3,SRRR,SRRR,0.03119200,0.00006507,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,5,SRRR,SRRR,0.02860600,0.00007214,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,7,SRRR,SRRR,0.02909100,0.00006812,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,9,SRRR,SRRR,0.02956700,0.00006739,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,11,SRRR,SRRR,0.03005400,0.00006869,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,1,SOFAR,SOFAR,0.03420900,0.00003130,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,3,SOFAR,SOFAR,0.02917300,0.00005318,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,5,SOFAR,SOFAR,0.02577600,0.00007429,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,7,SOFAR,SOFAR,0.02600900,0.00007289,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,9,SOFAR,SOFAR,0.02609500,0.00007284,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,11,SOFAR,SOFAR,0.02616300,0.00007153,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,1,RSSVD,RSSVD,0.03527300,0.00003584,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,3,RSSVD,RSSVD,0.03181100,0.00005990,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,5,RSSVD,RSSVD,0.02931400,0.00006256,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,7,RSSVD,RSSVD,0.02931000,0.00006103,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,9,RSSVD,RSSVD,0.02925500,0.00006301,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,11,RSSVD,RSSVD,0.02926500,0.00006352,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,1,SMART_fixed,SMART (fixed ranks),0.03124441,0.00002457,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,3,SMART_fixed,SMART (fixed ranks),0.01937786,0.00002835,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,5,SMART_fixed,SMART (fixed ranks),0.00337258,0.00007417,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,7,SMART_fixed,SMART (fixed ranks),0.00373081,0.00006613,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,9,SMART_fixed,SMART (fixed ranks),0.00393656,0.00006460,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,11,SMART_fixed,SMART (fixed ranks),0.00416692,0.00006009,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,1,SMART,SMART,0.00327522,0.00006787,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,3,SMART,SMART,0.00327522,0.00006787,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,5,SMART,SMART,0.00327522,0.00006787,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,7,SMART,SMART,0.00327522,0.00006787,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,9,SMART,SMART,0.00327522,0.00006787,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp2,r_hat,11,SMART,SMART,0.00327522,0.00006787,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,0,RRR,RRR,0.00780700,0.00001976,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,3,RRR,RRR,0.00780700,0.00001976,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,5,RRR,RRR,0.00780700,0.00001976,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,7,RRR,RRR,0.00780700,0.00001976,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,10,RRR,RRR,0.00780700,0.00001976,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,15,RRR,RRR,0.00780700,0.00001976,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,20,RRR,RRR,0.00780700,0.00001976,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,0,SRRR,SRRR,0.00794300,0.00003906,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,3,SRRR,SRRR,0.00794300,0.00003906,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,5,SRRR,SRRR,0.00794300,0.00003906,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,7,SRRR,SRRR,0.00794300,0.00003906,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,10,SRRR,SRRR,0.00794300,0.00003906,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,15,SRRR,SRRR,0.00794300,0.00003906,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,20,SRRR,SRRR,0.00794300,0.00003906,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,0,SOFAR,SOFAR,0.01021200,0.00005919,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,3,SOFAR,SOFAR,0.01021200,0.00005919,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,5,SOFAR,SOFAR,0.01021200,0.00005919,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,7,SOFAR,SOFAR,0.01021200,0.00005919,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,10,SOFAR,SOFAR,0.01021200,0.00005919,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,15,SOFAR,SOFAR,0.01021200,0.00005919,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,20,SOFAR,SOFAR,0.01021200,0.00005919,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,0,RSSVD,RSSVD,0.01307200,0.00005476,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,3,RSSVD,RSSVD,0.01307200,0.00005476,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,5,RSSVD,RSSVD,0.01307200,0.00005476,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,7,RSSVD,RSSVD,0.01307200,0.00005476,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,10,RSSVD,RSSVD,0.01307200,0.00005476,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,15,RSSVD,RSSVD,0.01307200,0.00005476,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,20,RSSVD,RSSVD,0.01307200,0.00005476,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,0,SMART_fixed,SMART (fixed ranks),0.00341837,0.00006217,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,3,SMART_fixed,SMART (fixed ranks),0.00331419,0.00006658,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,5,SMART_fixed,SMART (fixed ranks),0.00325829,0.00006832,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,7,SMART_fixed,SMART (fixed ranks),0.00322614,0.00006777,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,10,SMART_fixed,SMART (fixed ranks),0.00337258,0.00007417,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,15,SMART_fixed,SMART (fixed ranks),0.00342917,0.00007238,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,20,SMART_fixed,SMART (fixed ranks),0.00348885,0.00007042,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,0,SMART,SMART,0.00327522,0.00006787,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,3,SMART,SMART,0.00327522,0.00006787,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,5,SMART,SMART,0.00327522,0.00006787,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,7,SMART,SMART,0.00327522,0.00006787,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,10,SMART,SMART,0.00327522,0.00006787,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,15,SMART,SMART,0.00327522,0.00006787,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp3,r_s,20,SMART,SMART,0.00327522,0.00006787,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0,RRR,RRR,0.00780700,0.00001976,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.01,RRR,RRR,0.00780700,0.00001976,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.02,RRR,RRR,0.00780700,0.00001976,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.05,RRR,RRR,0.00780700,0.00001976,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.1,RRR,RRR,0.00780700,0.00001976,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.5,RRR,RRR,0.00780700,0.00001976,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0,SRRR,SRRR,0.00794300,0.00003906,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.01,SRRR,SRRR,0.00794300,0.00003906,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.02,SRRR,SRRR,0.00794300,0.00003906,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.05,SRRR,SRRR,0.00794300,0.00003906,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.1,SRRR,SRRR,0.00794300,0.00003906,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.5,SRRR,SRRR,0.00794300,0.00003906,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0,SOFAR,SOFAR,0.01021200,0.00005919,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.01,SOFAR,SOFAR,0.01021200,0.00005919,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.02,SOFAR,SOFAR,0.01021200,0.00005919,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.05,SOFAR,SOFAR,0.01021200,0.00005919,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.1,SOFAR,SOFAR,0.01021200,0.00005919,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.5,SOFAR,SOFAR,0.01021200,0.00005919,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0,RSSVD,RSSVD,0.01307200,0.00005476,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.01,RSSVD,RSSVD,0.01307200,0.00005476,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.02,RSSVD,RSSVD,0.01307200,0.00005476,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.05,RSSVD,RSSVD,0.01307200,0.00005476,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.1,RSSVD,RSSVD,0.01307200,0.00005476,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.5,RSSVD,RSSVD,0.01307200,0.00005476,100,true,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0,SMART_fixed,SMART (fixed ranks),0.00090294,0.00001104,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.01,SMART_fixed,SMART (fixed ranks),0.00337258,0.00007417,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.02,SMART_fixed,SMART (fixed ranks),0.00551746,0.00010432,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.05,SMART_fixed,SMART (fixed ranks),0.00995494,0.00016512,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.1,SMART_fixed,SMART (fixed ranks),0.01239914,0.00028868,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.5,SMART_fixed,SMART (fixed ranks),0.00883789,0.00003442,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0,SMART,SMART,0.00096745,0.00001627,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.01,SMART,SMART,0.00327522,0.00006787,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.02,SMART,SMART,0.00549985,0.00010872,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.05,SMART,SMART,0.00786918,0.00005321,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.1,SMART,SMART,0.00784309,0.00003569,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1
+2,ModelIII,300,200,exp4,sigma0,0.5,SMART,SMART,0.00792022,0.00002357,100,false,digitized_pdf_vector,v1/fig_smart/simulation_model3.pdf,1

@@ -21,11 +21,16 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install smart package and test dependencies
+      - name: Install project packages and test dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -e ./smart[test]
+          pip install -e ./bi-smart[test]
 
       - name: Run pytest
-        working-directory: smart
-        run: pytest -q
+        # The two package suites both use a top-level ``tests`` package, so
+        # collect them in separate Python processes to avoid import collisions.
+        run: |
+          python -m pytest -q smart/tests
+          python -m pytest -q bi-smart/tests
+          python -m pytest -q simulation/tests

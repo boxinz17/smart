@@ -7,6 +7,7 @@ from .initialization import (
     InitializationResult,
     JointParameterState,
     initialize_restricted_rrr,
+    restricted_rrr,
     target_only_rrr,
 )
 from .refinement import (
@@ -70,6 +71,7 @@ __all__ = [
     "gaussian_source_error_bound",
     "initialize_restricted_rrr",
     "quotient_gauss_newton_direction",
+    "restricted_rrr",
     "run_block_screen",
     "score_and_select_candidates",
     "solve_quotient_gauss_newton",

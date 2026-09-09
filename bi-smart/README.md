@@ -51,6 +51,37 @@ python -c "import bi_smart; print(bi_smart.__version__)"
 Unlike the current `smart` package, this scaffold deliberately exports
 `__version__`, so the command above prints `0.1.0.dev0`.
 
+## Full-sample restricted-RRR pilot
+
+The package also exposes a deliberately minimal estimator for the initial
+simulation pilot.  It uses the complete target sample once and fits rank-`r`
+RRR inside the leading `r0` left and right singular subspaces of the observed
+source matrix:
+
+```python
+from bi_smart import restricted_rrr
+
+fit = restricted_rrr(
+    X,
+    Y,
+    C0_tilde,
+    target_rank=5,
+    source_rank=10,
+)
+
+if not fit.successful:
+    raise RuntimeError(
+        f"{fit.candidate.failure_reason}: {fit.candidate.message}"
+    )
+C_hat = fit.coefficient
+```
+
+This entry point intentionally does **not** run the block screen, source-error
+or Wedin gates, validation selector, safeguards, or Gauss--Newton refinement.
+It records the observed source-boundary and RRR cutoff gaps as diagnostics but
+does not use them to select among estimators.  The structural ranks must obey
+`1 <= target_rank <= source_rank <= min(p, q)`.
+
 ## Quick start
 
 The three `FoldData` objects must be statistically independent; the package

@@ -465,6 +465,12 @@ def test_quotient_solver_recovers_a_known_horizontal_direction() -> None:
     )
     assert gn_norm_squared > 0.0
     assert derivative == pytest.approx(-gn_norm_squared, rel=2e-10, abs=2e-12)
+    assert diagnostics.gauss_newton_norm_squared == pytest.approx(
+        gn_norm_squared, rel=2e-10, abs=2e-12
+    )
+    assert diagnostics.as_metadata()["gn_norm_squared"] == pytest.approx(
+        gn_norm_squared, rel=2e-10, abs=2e-12
+    )
 
     for factor, factor_direction in (
         (state.U0, result.direction.U0),
@@ -661,6 +667,70 @@ def test_matrix_free_jacobian_and_adjoint_satisfy_duality() -> None:
     )
 
 
+def test_quotient_solver_rejects_unknown_backend_directly() -> None:
+    """The public solver validates its backend independently of controls."""
+
+    state, X, omega = _regular_one_block_problem()
+    with pytest.raises(ValueError, match="solver_backend"):
+        solve_quotient_gauss_newton(
+            state,
+            X,
+            X @ fitted_target(state),
+            fitted_source(state),
+            omega,
+            solver_backend="not-a-backend",
+        )
+
+
+def test_auto_solver_uses_dense_backend_when_workspace_fits() -> None:
+    """Auto retains the rank-revealing reference below its memory cap."""
+
+    state, X, omega = _regular_one_block_problem()
+    result = solve_quotient_gauss_newton(
+        state,
+        X,
+        X @ fitted_target(state),
+        fitted_source(state),
+        omega,
+        solver_backend="auto",
+    )
+
+    assert result.diagnostics.solver_backend == "dense"
+    assert result.diagnostics.jacobian_rank == (
+        result.diagnostics.quotient_dimension
+    )
+
+
+def test_matrix_free_iteration_limit_is_a_local_singular_system_failure() -> None:
+    """An unconverged LSQR call fails only its current refinement solve."""
+
+    state, X, omega = _regular_one_block_problem()
+    target_perturbation = np.arange(
+        X.shape[0] * state.V0.shape[0], dtype=float
+    ).reshape(X.shape[0], state.V0.shape[0])
+    source_perturbation = np.arange(
+        state.U0.shape[0] * state.V0.shape[0], dtype=float
+    ).reshape(state.U0.shape[0], state.V0.shape[0])
+    Y = X @ fitted_target(state) + 0.01 * target_perturbation
+    observed_source = fitted_source(state) + 0.005 * source_perturbation
+
+    with pytest.raises(NumericalFailure) as error:
+        solve_quotient_gauss_newton(
+            state,
+            X,
+            Y,
+            observed_source,
+            omega,
+            solver_backend="matrix_free",
+            matrix_free_max_iterations=1,
+        )
+
+    assert error.value.reason is FailureReason.SINGULAR_NORMAL_EQUATIONS
+    assert "did not meet its residual certificate in 1 iterations" in str(
+        error.value
+    )
+
+
 def test_matrix_free_solver_matches_dense_and_auto_bypasses_dense_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -691,6 +761,23 @@ def test_matrix_free_solver_matches_dense_and_auto_bypasses_dense_cap(
     _assert_directions_allclose(
         matrix_free.direction, dense.direction, atol=2e-9, rtol=2e-7
     )
+    dense_norm_squared = gauss_newton_inner_product(
+        state, dense.direction, dense.direction, X, omega
+    )
+    matrix_free_norm_squared = gauss_newton_inner_product(
+        state, matrix_free.direction, matrix_free.direction, X, omega
+    )
+    assert dense.diagnostics.gauss_newton_norm_squared == pytest.approx(
+        dense_norm_squared, rel=2e-10, abs=2e-12
+    )
+    assert matrix_free.diagnostics.gauss_newton_norm_squared == pytest.approx(
+        matrix_free_norm_squared, rel=2e-10, abs=2e-12
+    )
+    assert matrix_free.diagnostics.gauss_newton_norm_squared == pytest.approx(
+        dense.diagnostics.gauss_newton_norm_squared,
+        rel=5e-7,
+        abs=2e-10,
+    )
     assert matrix_free.diagnostics.solver_backend == "matrix_free"
     assert matrix_free.diagnostics.rank_certificate == (
         "algebraic_injectivity_plus_necessary_numerical_screens"
@@ -701,6 +788,16 @@ def test_matrix_free_solver_matches_dense_and_auto_bypasses_dense_cap(
     assert matrix_free.diagnostics.largest_singular_value is None
     assert matrix_free.diagnostics.smallest_retained_singular_value is None
     assert matrix_free.diagnostics.structural_quotient_rank == 11
+    assert matrix_free.diagnostics.reduced_design_rank_tolerance is not None
+    assert (
+        matrix_free.diagnostics.reduced_design_smallest_singular_value
+        > matrix_free.diagnostics.reduced_design_rank_tolerance
+    )
+    assert matrix_free.diagnostics.compact_rank_tolerance is not None
+    assert (
+        matrix_free.diagnostics.compact_smallest_singular_value
+        > matrix_free.diagnostics.compact_rank_tolerance
+    )
 
     # The matrix-free path must not accidentally call the dense helper that
     # materializes all gauge coordinates.  A one-byte dense cap forces auto

@@ -280,6 +280,22 @@ def test_wedin_gate_treats_a_tolerance_sized_shortfall_as_equality():
     assert not literal.passes
     assert literal.failing_blocks == (0,)
 
+    # The tolerance is a roundoff guard, not a relaxation of the statistical
+    # gate: a shortfall beyond the local atol/rtol margin must still fail.
+    outside_margin = compute_source_decomposition(
+        np.diag([5.0 - 1e-9, 0.0]),
+        source_rank=1,
+    )
+    genuinely_below = evaluate_wedin_gate(
+        outside_margin,
+        partition,
+        1.0,
+        atol=0.0,
+        rtol=1e-10,
+    )
+    assert not genuinely_below.passes
+    assert genuinely_below.failing_blocks == (0,)
+
 
 @pytest.mark.parametrize(
     ("tolerance_name", "invalid_value", "message"),

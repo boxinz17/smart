@@ -211,6 +211,56 @@ def test_refinement_grid_produces_certified_iterates_and_keeps_safeguards() -> N
     np.testing.assert_allclose(result.coefficient, target, atol=1e-11)
 
 
+def test_estimator_forwards_forced_matrix_free_backend_metadata() -> None:
+    """Refinement controls select matrix-free GN and expose its certificate."""
+
+    observed_source = np.diag([9.0, 6.0, 3.0, 0.0])
+    target = np.diag([4.0, 0.0, 2.0, 0.0])
+    base = _config()
+    config = BISMARTConfig(
+        target_rank=base.target_rank,
+        source_rank=base.source_rank,
+        source_error_bound=base.source_error_bound,
+        budget_path=base.budget_path,
+        source_weights=base.source_weights,
+        refinement_controls=RefinementControls(
+            armijo_constant=1e-4,
+            contraction=0.5,
+            initial_step_size=1.0,
+            radius_ratio=2.0,
+            radius_half_width=0,
+            max_backtracking_cap=1,
+            iteration_cap=1,
+            gauss_newton_backend="matrix_free",
+            matrix_free_max_iterations=20,
+        ),
+    )
+
+    result = BISMART(observed_source, config).fit_folds(
+        *_folds_for_target(target), enable_refinement=True
+    )
+    refinements = [
+        candidate
+        for candidate in result.candidates
+        if candidate.kind == "refinement"
+    ]
+
+    assert refinements
+    assert all(
+        candidate.metadata["gn_solver_backend"] == "matrix_free"
+        for candidate in refinements
+    )
+    assert all(
+        candidate.metadata["gn_jacobian_rank"] is None
+        for candidate in refinements
+    )
+    assert all(
+        candidate.metadata["gn_structural_quotient_rank"]
+        == candidate.metadata["gn_quotient_dimension"]
+        for candidate in refinements
+    )
+
+
 def test_complete_refinement_grid_retains_t1_through_t_and_exact_order() -> None:
     """A regular run follows every deterministic grid axis before safeguards."""
 

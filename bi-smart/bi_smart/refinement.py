@@ -71,13 +71,15 @@ class GaussNewtonDiagnostics:
     """Numerical certificate for one quotient Gauss--Newton direction.
 
     The dimensions are mathematical invariants of the fixed-support quotient.
-    The remaining fields expose every tolerance-sensitive decision made by the
-    selected solver, which is useful when a research run treats one calibrated
-    refinement call as unsuccessful.  ``rank_certificate`` distinguishes the
-    dense residual-Jacobian SVD from the matrix-free structural and necessary
-    numerical screens.  The three generic SVD fields are ``None`` for the
-    matrix-free backend because its compact spectra are not spectra of the
-    complete Jacobian.
+    ``gauss_newton_norm_squared`` is ``<xi, xi>_GN = ||J xi||^2``; half of it
+    is the full-step quadratic-model reduction used by convergence-aware
+    callers.  The remaining fields expose every tolerance-sensitive decision
+    made by the selected solver, which is useful when a research run treats one
+    calibrated refinement call as unsuccessful.  ``rank_certificate``
+    distinguishes the dense residual-Jacobian SVD from the matrix-free
+    structural and necessary numerical screens.  The three generic SVD fields
+    are ``None`` for the matrix-free backend because its compact spectra are
+    not spectra of the complete Jacobian.
     """
 
     tangent_dimension: int
@@ -96,19 +98,24 @@ class GaussNewtonDiagnostics:
     tangency_error: float
     horizontality_error: float
     descent_identity_error: float
+    gauss_newton_norm_squared: float
     solver_backend: str = "dense"
     solver_iterations: int = 0
     solver_stop_reason: str = "dense_svd"
     condition_estimate: float | None = None
     rank_certificate: str = "dense_residual_jacobian_svd"
     structural_quotient_rank: int | None = None
+    reduced_design_rank_tolerance: float | None = None
+    reduced_design_largest_singular_value: float | None = None
+    reduced_design_smallest_singular_value: float | None = None
     operator_scale_lower_bound: float | None = None
-    source_sensitivity_upper_bound: float | None = None
-    target_sensitivity_upper_bound: float | None = None
     compact_jacobian_rank: int | None = None
     compact_quotient_dimension: int | None = None
+    compact_rank_tolerance: float | None = None
+    compact_largest_singular_value: float | None = None
+    compact_smallest_singular_value: float | None = None
     estimated_compact_work_bytes: int | None = None
-    normal_source_sensitivity_upper_bound: float | None = None
+    ambient_normal_sensitivity_upper_bound: float | None = None
     full_rank_tolerance_lower_bound: float | None = None
 
     def as_metadata(self) -> dict[str, int | float | str | None]:
@@ -133,26 +140,37 @@ class GaussNewtonDiagnostics:
             "gn_tangency_error": self.tangency_error,
             "gn_horizontality_error": self.horizontality_error,
             "gn_descent_identity_error": self.descent_identity_error,
+            "gn_norm_squared": self.gauss_newton_norm_squared,
             "gn_solver_backend": self.solver_backend,
             "gn_solver_iterations": self.solver_iterations,
             "gn_solver_stop_reason": self.solver_stop_reason,
             "gn_condition_estimate": self.condition_estimate,
             "gn_rank_certificate": self.rank_certificate,
             "gn_structural_quotient_rank": self.structural_quotient_rank,
+            "gn_reduced_design_rank_tolerance": (
+                self.reduced_design_rank_tolerance
+            ),
+            "gn_reduced_design_largest_singular_value": (
+                self.reduced_design_largest_singular_value
+            ),
+            "gn_reduced_design_smallest_singular_value": (
+                self.reduced_design_smallest_singular_value
+            ),
             "gn_operator_scale_lower_bound": self.operator_scale_lower_bound,
-            "gn_source_sensitivity_upper_bound": (
-                self.source_sensitivity_upper_bound
-            ),
-            "gn_target_sensitivity_upper_bound": (
-                self.target_sensitivity_upper_bound
-            ),
             "gn_compact_jacobian_rank": self.compact_jacobian_rank,
             "gn_compact_quotient_dimension": self.compact_quotient_dimension,
+            "gn_compact_rank_tolerance": self.compact_rank_tolerance,
+            "gn_compact_largest_singular_value": (
+                self.compact_largest_singular_value
+            ),
+            "gn_compact_smallest_singular_value": (
+                self.compact_smallest_singular_value
+            ),
             "gn_estimated_compact_work_bytes": (
                 self.estimated_compact_work_bytes
             ),
-            "gn_normal_source_sensitivity_upper_bound": (
-                self.normal_source_sensitivity_upper_bound
+            "gn_ambient_normal_sensitivity_upper_bound": (
+                self.ambient_normal_sensitivity_upper_bound
             ),
             "gn_full_rank_tolerance_lower_bound": (
                 self.full_rank_tolerance_lower_bound
@@ -1652,9 +1670,11 @@ def _matrix_free_compact_rank_screen(
        supports, and ``omega``.  This represents a true restriction of the
        full derivative and captures span/normal target cancellation.
     3. Materialize and SVD only this compact Jacobian.  Its size depends on
-       ``r0``, selected dimensions, and ``min(n,r0)``, never on ``p`` or ``q``.
+       ``r0``, selected dimensions, and ``min(n,r0+1)``, never on ambient
+       ``p`` or ``q``.
     4. Require its numerical rank to equal
-       ``r0^2 + r(k_u + k_v - r)``.
+       ``r0(p_c + q_c - r0) + r(k_u + k_v - r)``, where ``p_c`` and ``q_c``
+       are the compact embedding dimensions (each ``r0`` or ``r0+1``).
 
     This is a rigorous *necessary* screen for the full dense rank policy.  The
     compact operator is a restriction, so its smallest quotient singular
@@ -1800,7 +1820,7 @@ def _matrix_free_compact_rank_screen(
     # below.  For U0, the target scale depends on Xw; one deterministic unit
     # w perpendicular to U0 still supplies a valid (possibly non-sharp) bound
     # without constructing a p-by-p orthogonal complement.
-    normal_source_upper_bounds: list[float] = []
+    ambient_normal_upper_bounds: list[float] = []
     if state.U0.shape[0] > source_rank:
         assert left_normal_vector is not None
         target_normal_scale = float(
@@ -1819,7 +1839,7 @@ def _matrix_free_compact_rank_screen(
             @ state.A.T
         )
         left_normal_eigenvalues = np.linalg.eigvalsh(left_normal_gram)
-        normal_source_upper_bounds.append(
+        ambient_normal_upper_bounds.append(
             float(np.sqrt(max(float(left_normal_eigenvalues[0]), 0.0)))
         )
         operator_norm_lower_bound = max(
@@ -1833,15 +1853,15 @@ def _matrix_free_compact_rank_screen(
             + target_design.T @ target_design / X.shape[0]
         )
         right_normal_eigenvalues = np.linalg.eigvalsh(right_normal_gram)
-        normal_source_upper_bounds.append(
+        ambient_normal_upper_bounds.append(
             float(np.sqrt(max(float(right_normal_eigenvalues[0]), 0.0)))
         )
         operator_norm_lower_bound = max(
             operator_norm_lower_bound,
             float(np.sqrt(max(float(right_normal_eigenvalues[-1]), 0.0))),
         )
-    normal_source_upper_bound = (
-        min(normal_source_upper_bounds) if normal_source_upper_bounds else None
+    ambient_normal_upper_bound = (
+        min(ambient_normal_upper_bounds) if ambient_normal_upper_bounds else None
     )
     full_rank_tolerance_lower_bound = _rank_tolerance(
         operator_norm_lower_bound,
@@ -1858,13 +1878,13 @@ def _matrix_free_compact_rank_screen(
             "dense Jacobian cannot satisfy its numerical-rank policy",
         )
     if (
-        normal_source_upper_bound is not None
-        and normal_source_upper_bound <= full_rank_tolerance_lower_bound
+        ambient_normal_upper_bound is not None
+        and ambient_normal_upper_bound <= full_rank_tolerance_lower_bound
     ):
         raise NumericalFailure(
             FailureReason.SINGULAR_NORMAL_EQUATIONS,
-            "a source-normal horizontal direction has Rayleigh upper bound "
-            f"{normal_source_upper_bound:.3e}, not above the full-rank "
+            "an ambient-normal horizontal direction has Rayleigh upper bound "
+            f"{ambient_normal_upper_bound:.3e}, not above the full-rank "
             "threshold lower bound "
             f"{full_rank_tolerance_lower_bound:.3e}; the full dense Jacobian "
             "cannot satisfy its numerical-rank policy",
@@ -1876,7 +1896,7 @@ def _matrix_free_compact_rank_screen(
         compact_largest,
         compact_smallest,
         compact_work_bytes,
-        normal_source_upper_bound,
+        ambient_normal_upper_bound,
         full_rank_tolerance_lower_bound,
         operator_norm_lower_bound,
     )
@@ -2205,6 +2225,7 @@ def _solve_dense_quotient_gauss_newton(
         tangency_error=tangency_error,
         horizontality_error=float(horizontality_error),
         descent_identity_error=descent_error,
+        gauss_newton_norm_squared=float(gn_norm_squared),
     )
     return GaussNewtonResult(direction=direction, diagnostics=diagnostics)
 
@@ -2298,7 +2319,7 @@ def _solve_matrix_free_quotient_gauss_newton(
         compact_largest,
         compact_smallest,
         compact_work_bytes,
-        normal_source_upper_bound,
+        ambient_normal_upper_bound,
         full_rank_tolerance_lower_bound,
         operator_norm_lower_bound,
     ) = _matrix_free_compact_rank_screen(
@@ -2505,8 +2526,8 @@ def _solve_matrix_free_quotient_gauss_newton(
         dense_work_limit_bytes=dense_work_limit,
         # LSQR cannot report a complete numerical rank without effectively
         # rebuilding the dense SVD.  Keep that field honest; the separately
-        # reported structural rank and invariant scale screen are the
-        # matrix-free certificate.
+        # reported algebraic, compact, ambient-normal, and solve-specific
+        # checks are the matrix-free certificate.
         jacobian_rank=None,
         rank_tolerance=None,
         largest_singular_value=None,
@@ -2516,6 +2537,7 @@ def _solve_matrix_free_quotient_gauss_newton(
         tangency_error=tangency_error,
         horizontality_error=float(horizontality_error),
         descent_identity_error=descent_error,
+        gauss_newton_norm_squared=float(gn_norm_squared),
         solver_backend="matrix_free",
         solver_iterations=iterative.iterations,
         solver_stop_reason=iterative.stop_reason,
@@ -2525,10 +2547,16 @@ def _solve_matrix_free_quotient_gauss_newton(
             "_and_rhs_postchecks"
         ),
         structural_quotient_rank=certified_rank,
+        reduced_design_rank_tolerance=reduced_rank_tolerance,
+        reduced_design_largest_singular_value=reduced_largest,
+        reduced_design_smallest_singular_value=reduced_smallest,
         compact_jacobian_rank=compact_rank,
         compact_quotient_dimension=compact_quotient_dimension,
+        compact_rank_tolerance=compact_rank_tolerance,
+        compact_largest_singular_value=compact_largest,
+        compact_smallest_singular_value=compact_smallest,
         estimated_compact_work_bytes=compact_work_bytes,
-        normal_source_sensitivity_upper_bound=normal_source_upper_bound,
+        ambient_normal_sensitivity_upper_bound=ambient_normal_upper_bound,
         full_rank_tolerance_lower_bound=full_rank_tolerance_lower_bound,
         operator_scale_lower_bound=operator_norm_lower_bound,
     )

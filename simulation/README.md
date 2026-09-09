@@ -14,6 +14,7 @@ From the repository root:
 python -m venv .venv
 source .venv/bin/activate          # on Windows: .venv\Scripts\activate
 pip install -e ./smart
+pip install -e './bi-smart[test]'
 pip install -r requirements.txt
 ```
 
@@ -75,6 +76,95 @@ python run_SMARTCV.py  <model_id> <exp_id> <rd_seed_id>     # supports exp_id in
 These produce `SMART_result_*.pkl` and `SMARTCV_result_*.pkl` files under
 `result/<model>/<exp>/`. The package default `gamma=2.0` matches the value used for
 the paper's main figures.
+
+### Full-sample restricted-RRR pilot
+
+`run_restricted_rrr.py` regenerates the same synthetic sample and fits exactly
+one rank-constrained coefficient inside the supplied leading source subspaces.
+It uses all target observations and performs no screening, data splitting,
+candidate selection, fallback, or iterative refinement.
+
+```bash
+python run_restricted_rrr.py 0 0 0
+python run_restricted_rrr.py 0 0 0 --setting-index 0
+python run_restricted_rrr.py 0 3 0 --dry-run
+```
+
+Experiment 1 and Experiment 4 are directly applicable with target/source ranks
+`(5, 10)`.  Cells with target rank larger than source rank (Experiment 2 at
+`r=11`, and Experiment 3 at `r_s=0` or `3`) are recorded as inapplicable;
+the runner never clamps a rank or silently substitutes another estimator.
+
+### Full-sample restricted-RRR plus Gauss--Newton pilot
+
+`run_restricted_rrr_gauss_newton.py` starts from exactly the preceding
+full-sample restricted RRR and independently refines it for each source weight.
+It stores every accepted iterate from `t=0` until numerical convergence or the
+hard cap `T`; `t=0` is always the restricted-RRR anchor. Simulation truth is
+used to attach a Frobenius error to every stored iterate, but it is never used
+to choose an omega or stopping iteration.
+
+The default pilot uses `omega=(0.01, 0.1, 1, 10, 100)`, ten iterations, the
+matrix-free quotient solver, initial step one, contraction `0.5`, Armijo
+constant `1e-4`, and at most twenty line-search trials. The trust radius is the
+observable scale
+
+```text
+sqrt(||C_rrr||_F^2 + omega ||C0_rank-source-rank||_F^2).
+```
+
+Before each line search, the runner computes the certified Gauss--Newton
+quadratic-model reduction
+
+```text
+Delta_GN = 0.5 * <xi, xi>_GN = 0.5 * ||J xi||^2.
+```
+
+It stops successfully at the current iterate when
+`Delta_GN <= stopping_atol + stopping_rtol * objective`, with defaults
+`stopping_atol=1e-12` and `stopping_rtol=1e-10`. This observable stationarity
+rule does not use the simulation truth. Checking before backtracking also keeps
+a tiny step forced by a safeguard from being mislabeled as convergence. The
+iteration cap remains a hard maximum.
+
+Run the default grid, a single weight, or change the radius by an explicit
+multiplier:
+
+```bash
+python run_restricted_rrr_gauss_newton.py 0 0 0
+python run_restricted_rrr_gauss_newton.py 0 0 0 --setting-index 0 --omega 10
+python run_restricted_rrr_gauss_newton.py 0 3 0 --trust-radius-multiplier 2
+python run_restricted_rrr_gauss_newton.py 0 0 0 --stopping-rtol 1e-8
+python run_restricted_rrr_gauss_newton.py 0 0 0 --no-convergence-stopping
+```
+
+For a simulation-only noise calibration, `--omega-rule gaussian-noise` uses
+the known DGP noise scales
+`omega = sigma^2 / (n sigma0^2)`, where `sigma=0.5`. This option is explicitly
+oracle-calibrated from simulation noise parameters, although it does not use
+the true coefficient matrix. When `sigma0=0`, the corresponding weight is
+infinite; the runner records the `t=0` anchor and skips finite Gauss--Newton
+steps rather than substituting a large arbitrary number.
+
+```bash
+python run_restricted_rrr_gauss_newton.py 0 3 0 --omega-rule gaussian-noise
+```
+
+Each `(setting, omega, seed)` has its own `RestrictedRRRGN_result_*.pkl`, so it
+cannot overwrite the restricted-RRR pilot. If refinement fails, the top-level
+estimate falls back to the retained `t=0` RRR anchor, while the failed path and
+accepted partial iterates remain available for diagnosis. The fields
+`refinement_success=False` and `used_t0_fallback=True` distinguish this case
+from a completed GN path. Successful paths record whether they stopped through
+the GN decrement or reached the iteration cap in `refinement_converged` and
+`refinement_termination_reason`. For exact source noise, refinement is
+deliberately not attempted, so `refinement_success=None` and
+`used_t0_fallback=False`.
+One weight never affects another. On resume, an existing file is skipped only
+if its setting, seed, weight rule, and all numerical controls match; use
+`--force` to replace an intentionally changed run. This deliberately minimal
+runner still performs no screening, Wedin gate, data split, cross-weight
+selection, or target-only fallback.
 
 ## 6. HPC orchestration (optional)
 

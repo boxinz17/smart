@@ -22,6 +22,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .linalg import (
+    DEFAULT_ATOL,
+    DEFAULT_RTOL,
     comparison_tolerance,
     deterministic_rank_at_most_approximation,
     spd_inverse_sqrt,
@@ -86,6 +88,124 @@ class InitializationResult:
         """Whether all restricted-RRR and state-lifting checks passed."""
 
         return self.candidate.status is CandidateStatus.SUCCESSFUL
+
+    @property
+    def coefficient(self) -> Optional[FloatArray]:
+        """Return the fitted coefficient, or ``None`` after a numerical failure.
+
+        ``InitializationResult`` predates the direct full-sample API and stores
+        its coefficient on ``candidate.matrix``.  This read-only convenience
+        property gives simulation code the natural ``result.coefficient``
+        spelling without creating a second result type or duplicating the
+        candidate's success/failure bookkeeping.
+        """
+
+        return self.candidate.matrix
+
+
+@dataclass(frozen=True)
+class _RestrictedRRRSolution:
+    """Private algebraic output shared by screened and full-span RRR calls."""
+
+    coefficient: FloatArray
+    coordinate_matrix: FloatArray
+
+
+def _solve_restricted_rrr_coordinates(
+    fitting_fold: FoldData,
+    left_basis: FloatArray,
+    right_basis: FloatArray,
+    *,
+    target_rank: int,
+    atol: float,
+    rtol: float,
+    metadata: dict[str, Any],
+) -> _RestrictedRRRSolution:
+    """Solve restricted RRR in fixed left and right source coordinates.
+
+    This is the numerical core of both public entry points in this module.
+    The bases may describe a screened union of source blocks or the complete
+    leading source spans.  The routine deliberately knows nothing about
+    screening, source certificates, Wedin gates, or validation folds.
+
+    ``metadata`` is populated as each algebraic object becomes available.  If
+    a strict check raises :class:`NumericalFailure`, callers can therefore
+    serialize useful diagnostics for the failed fit as well as successful
+    ones.
+
+    PSEUDOCODE
+    ----------
+    1. Form ``G = U.T @ (X.T @ X / n) @ U`` and require ``G`` to be
+       numerically positive definite.
+    2. Form ``M = G^(-1/2) @ U.T @ (X.T @ Y / n) @ V``.
+    3. Require a positive, strict rank-``target_rank`` cutoff and replace
+       ``M`` by its rank-``target_rank`` truncation ``M_r``.
+    4. Unwhiten ``Gamma = G^(-1/2) @ M_r`` and reconstruct
+       ``C_hat = U @ Gamma @ V.T``.
+    """
+
+    n = fitting_fold.n_samples
+
+    # PSEUDOCODE 1: Record the entire reduced spectrum before applying the
+    # common strict-SPD policy.  In particular, a singular design remains an
+    # auditable unsuccessful fit instead of being silently pseudoinverted.
+    fitting_gram = (fitting_fold.X.T @ fitting_fold.X) / n
+    selected_gram = left_basis.T @ fitting_gram @ left_basis
+    symmetric_gram = 0.5 * (selected_gram + selected_gram.T)
+    gram_eigenvalues = np.linalg.eigvalsh(symmetric_gram)
+    metadata["reduced_gram_eigenvalues"] = tuple(
+        float(value) for value in gram_eigenvalues
+    )
+    smallest_gram_eigenvalue = float(gram_eigenvalues[0])
+    largest_gram_eigenvalue = float(gram_eigenvalues[-1])
+    metadata["reduced_gram_condition"] = (
+        largest_gram_eigenvalue / smallest_gram_eigenvalue
+        if smallest_gram_eigenvalue > 0.0
+        else float("inf")
+    )
+    inverse_sqrt = spd_inverse_sqrt(
+        selected_gram,
+        atol=atol,
+        rtol=rtol,
+    )
+
+    # PSEUDOCODE 2--3: Whiten the reduced cross-covariance.  Store the full
+    # thin spectrum before enforcing the strict cutoff so zero/tied failures
+    # still report the values that caused them.
+    cross_covariance = (fitting_fold.X.T @ fitting_fold.Y) / n
+    whitened = inverse_sqrt @ left_basis.T @ cross_covariance @ right_basis
+    whitened_singular_values = np.linalg.svd(whitened, compute_uv=False)
+    retained = float(whitened_singular_values[target_rank - 1])
+    excluded = (
+        float(whitened_singular_values[target_rank])
+        if target_rank < whitened_singular_values.size
+        else 0.0
+    )
+    metadata.update(
+        {
+            "whitened_singular_values": tuple(
+                float(value) for value in whitened_singular_values
+            ),
+            "rrr_retained_singular_value": retained,
+            "rrr_next_singular_value": excluded,
+            "rrr_cutoff_gap": retained - excluded,
+        }
+    )
+    whitened_svd = strict_truncated_svd(
+        whitened,
+        target_rank,
+        atol=atol,
+        rtol=rtol,
+    )
+
+    # PSEUDOCODE 4: Unwhiten only after the two strict checks pass.  Avoiding a
+    # generic inverse here preserves the same SPD policy as screened BI-SMART.
+    coordinate_matrix = inverse_sqrt @ whitened_svd.approximation
+    coefficient = left_basis @ coordinate_matrix @ right_basis.T
+    return _RestrictedRRRSolution(
+        coefficient=coefficient,
+        coordinate_matrix=coordinate_matrix,
+    )
 
 
 def _failed_initialization(
@@ -250,17 +370,15 @@ def initialize_restricted_rrr(
 
     U_selected = U0[:, np.asarray(left_indices, dtype=int)]
     V_selected = V0[:, np.asarray(right_indices, dtype=int)]
-    n = fitting_fold.n_samples
-
-    # PSEUDOCODE 1--2: Strictly certify and invert-square-root the selected
-    # fitting design.  A failed check omits only this RRR/refinement branch.
-    fitting_gram = (fitting_fold.X.T @ fitting_fold.X) / n
-    selected_gram = U_selected.T @ fitting_gram @ U_selected
     try:
-        inverse_sqrt = spd_inverse_sqrt(
-            selected_gram,
+        solution = _solve_restricted_rrr_coordinates(
+            fitting_fold,
+            U_selected,
+            V_selected,
+            target_rank=target_rank,
             atol=atol,
             rtol=rtol,
+            metadata=metadata,
         )
     except NumericalFailure as failure:
         return _failed_initialization(
@@ -271,28 +389,8 @@ def initialize_restricted_rrr(
             metadata=metadata,
         )
 
-    # PSEUDOCODE 3: Form the paper's whitened k_u-by-k_v cross-covariance and
-    # enforce its strict, nonzero rank-r cutoff.
-    cross_covariance = (fitting_fold.X.T @ fitting_fold.Y) / n
-    whitened = inverse_sqrt @ U_selected.T @ cross_covariance @ V_selected
-    try:
-        whitened_svd = strict_truncated_svd(
-            whitened,
-            target_rank,
-            atol=atol,
-            rtol=rtol,
-        )
-    except NumericalFailure as failure:
-        return _failed_initialization(
-            label=label,
-            reason=failure.reason,
-            message=str(failure),
-            order_key=order_key,
-            metadata=metadata,
-        )
-
-    coordinate_matrix = inverse_sqrt @ whitened_svd.approximation
-    coefficient = U_selected @ coordinate_matrix @ V_selected.T
+    coordinate_matrix = solution.coordinate_matrix
+    coefficient = solution.coefficient
 
     # PSEUDOCODE 4--5: Take a compact factorization of the *unwhitened*
     # coordinate solution, then embed its factors into r0 source coordinates.
@@ -338,6 +436,181 @@ def initialize_restricted_rrr(
         candidate=candidate,
         state=state,
         coordinate_matrix=coordinate_matrix,
+    )
+
+
+def restricted_rrr(
+    X: NDArray[np.floating],
+    Y: NDArray[np.floating],
+    observed_source: NDArray[np.floating],
+    target_rank: int,
+    source_rank: int,
+    *,
+    atol: float = DEFAULT_ATOL,
+    rtol: float = DEFAULT_RTOL,
+) -> InitializationResult:
+    """Fit full-sample RRR inside the leading observed-source subspaces.
+
+    This deliberately small API implements the first simulation pilot rather
+    than the complete candidate-generating BI-SMART procedure.  Given a target
+    sample ``(X, Y)`` and observed source coefficient ``observed_source``, it
+    solves
+
+    ``min ||Y - X U0 Gamma V0.T||_F^2  subject to rank(Gamma) <= target_rank``,
+
+    where ``U0`` and ``V0`` contain the leading ``source_rank`` singular
+    vectors of ``observed_source``.  All target observations are used once for
+    this fit.  The routine performs no screen, source-error certification,
+    Wedin gate, candidate selection, fallback, or Gauss--Newton refinement.
+
+    Parameters
+    ----------
+    X, Y:
+        Target design and response matrices with shapes ``(n, p)`` and
+        ``(n, q)``.
+    observed_source:
+        Observed source coefficient matrix with shape ``(p, q)``.
+    target_rank:
+        Rank ``r`` imposed on the reduced coordinate coefficient.
+    source_rank:
+        Number ``r0`` of leading observed-source directions retained on both
+        sides.  This pilot requires ``1 <= target_rank <= source_rank``.
+    atol, rtol:
+        Nonnegative numerical tolerances for the positive-definite reduced
+        design check and strict rank-``r`` cutoff.
+
+    Returns
+    -------
+    InitializationResult
+        On success, ``result.coefficient`` is the fitted ``p``-by-``q``
+        coefficient.  A singular reduced design, zero retained component, or
+        unresolved rank cutoff produces ``result.successful == False`` and an
+        explicit failure reason on ``result.candidate``.  Malformed inputs
+        raise ``TypeError`` or ``ValueError`` immediately.
+
+    PSEUDOCODE
+    ----------
+    1. Validate and pair every row of ``X`` and ``Y``.
+    2. Compute the leading rank-``source_rank`` SVD of ``observed_source``;
+       record, but do not gate on, its truncation gap.
+    3. Call the common restricted-RRR core with *all* retained left and right
+       source directions.
+    4. Lift the fitted coordinate matrix into a one-block state solely so the
+       result has the same representation as screened RRR initializations.
+    """
+
+    # PSEUDOCODE 1: Normalize the complete target sample through the package's
+    # public fold value object.  Despite its historical name, no split occurs.
+    fitting_fold = FoldData(X=X, Y=Y, name="full_sample")
+    source_matrix = _finite_matrix(observed_source, name="observed_source")
+    if source_matrix.shape != (
+        fitting_fold.n_features,
+        fitting_fold.n_responses,
+    ):
+        raise ValueError(
+            "observed_source must have shape "
+            f"({fitting_fold.n_features}, {fitting_fold.n_responses}); "
+            f"got {source_matrix.shape}."
+        )
+
+    if isinstance(source_rank, (bool, np.bool_)) or not isinstance(
+        source_rank, (int, np.integer)
+    ):
+        raise TypeError("source_rank must be an integer.")
+    source_rank = int(source_rank)
+    maximum_source_rank = min(source_matrix.shape)
+    if source_rank < 1 or source_rank > maximum_source_rank:
+        raise ValueError(
+            f"source_rank must lie in [1, {maximum_source_rank}]."
+        )
+    if isinstance(target_rank, (bool, np.bool_)) or not isinstance(
+        target_rank, (int, np.integer)
+    ):
+        raise TypeError("target_rank must be an integer.")
+    target_rank = int(target_rank)
+    if target_rank < 1 or target_rank > source_rank:
+        raise ValueError("target_rank must lie in [1, source_rank].")
+
+    # Validate tolerances before running an SVD so invalid public controls fail
+    # deterministically even on data that would later trigger another branch.
+    comparison_tolerance(0.0, atol=atol, rtol=rtol)
+
+    # PSEUDOCODE 2: This is a plain truncated SVD.  In particular, the pilot
+    # records a tied source boundary but intentionally does not invoke the
+    # complete procedure's source-certificate boundary veto.
+    source_svd = truncated_svd(source_matrix, source_rank)
+    source = SourceDecomposition(
+        u=source_svd.u,
+        singular_values=source_svd.singular_values,
+        vt=source_svd.vt,
+        next_singular_value=source_svd.next_singular_value,
+        source_shape=source_matrix.shape,
+    )
+    metadata: dict[str, Any] = {
+        "method": "full_sample_restricted_rrr",
+        "n_samples": fitting_fold.n_samples,
+        "n_features": fitting_fold.n_features,
+        "n_responses": fitting_fold.n_responses,
+        "target_rank": target_rank,
+        "source_rank": source_rank,
+        "source_singular_values": tuple(
+            float(value) for value in source.singular_values
+        ),
+        "source_next_singular_value": float(source.next_singular_value),
+        "source_boundary_gap": float(
+            source.singular_values[-1] - source.next_singular_value
+        ),
+        "atol": float(atol),
+        "rtol": float(rtol),
+    }
+
+    # PSEUDOCODE 3: Use every retained source direction; there is no block
+    # screen and hence no support-selection state to carry between samples.
+    try:
+        solution = _solve_restricted_rrr_coordinates(
+            fitting_fold,
+            source.left_vectors,
+            source.right_vectors,
+            target_rank=target_rank,
+            atol=float(atol),
+            rtol=float(rtol),
+            metadata=metadata,
+        )
+    except NumericalFailure as failure:
+        return _failed_initialization(
+            label="full_sample/restricted_rrr",
+            reason=failure.reason,
+            message=str(failure),
+            order_key=(),
+            metadata=metadata,
+        )
+
+    # PSEUDOCODE 4: The direct estimator itself needs only ``coefficient``.
+    # Build the established joint-state representation as well so downstream
+    # diagnostics can reuse ``fitted_target``/``fitted_source`` without a
+    # special case.  Its sole source block is the complete retained core.
+    coordinate_svd = truncated_svd(solution.coordinate_matrix, target_rank)
+    assert source.coordinate_core is not None
+    state = BISMARTState(
+        U0=source.left_vectors,
+        V0=source.right_vectors,
+        A=coordinate_svd.u,
+        B=coordinate_svd.vt.T,
+        H=np.diag(coordinate_svd.singular_values),
+        G_blocks=(source.coordinate_core.copy(),),
+        active_u=np.ones(source_rank, dtype=bool),
+        active_v=np.ones(source_rank, dtype=bool),
+    )
+    candidate = Candidate.successful(
+        label="full_sample/restricted_rrr",
+        matrix=solution.coefficient,
+        kind="restricted_rrr",
+        metadata=metadata,
+    )
+    return InitializationResult(
+        candidate=candidate,
+        state=state,
+        coordinate_matrix=solution.coordinate_matrix,
     )
 
 
@@ -438,11 +711,6 @@ def target_only_rrr(
             "pinv_rcond": pinv_rcond,
         },
     )
-
-
-# A short alias mirrors the mathematical stage name and is convenient for
-# callers that do not need the longer imperative name.
-restricted_rrr = initialize_restricted_rrr
 
 
 __all__ = [
