@@ -408,6 +408,8 @@ def main(argv=None):
     parser.add_argument('--setting-index',type=int,help='Original paper-grid index; requires one model and experiment')
     parser.add_argument('--iteration-budgets',type=int,nargs='+',default=[500,1000,2000,4000,8000])
     parser.add_argument('--checkpoint-interval',type=int,default=250)
+    parser.add_argument('--stationarity-tol',type=float,default=1e-6,
+        help='Positive constrained stationarity tolerance for early stopping (checked every iteration)')
     parser.add_argument('--init-penalties',type=external_runner.old_runner._float_grid,default=(.03,))
     parser.add_argument('--penalties-u',type=external_runner.old_runner._float_grid,default=(.0025,.01,.04))
     parser.add_argument('--penalties-v',type=external_runner.old_runner._float_grid,default=(.0025,.01,.04))
@@ -419,7 +421,8 @@ def main(argv=None):
             or len(set(args.models)) != len(args.models) or len(set(args.experiments)) != len(args.experiments)):
         parser.error('Require unique valid models, experiments, seed IDs and positive workers/seed count')
     config = RunnerConfig(iteration_budgets=tuple(args.iteration_budgets),checkpoint_interval=args.checkpoint_interval,
-        init_penalties=args.init_penalties,penalties_u=args.penalties_u,penalties_v=args.penalties_v)
+        init_penalties=args.init_penalties,penalties_u=args.penalties_u,penalties_v=args.penalties_v,
+        stationarity_tol=args.stationarity_tol)
     try:
         config.validate()
     except ValueError as error:

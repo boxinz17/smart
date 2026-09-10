@@ -3,8 +3,9 @@
 Connect with `ssh discovery`. The deployment is under
 `$HOME/projects/smart`; the Python environment is `$HOME/envs/smart`.
 Use Slurm for environment installation and, when authorized, simulations.
-Packages are installed and both array and GNU Parallel pool launchers are available. Simulations,
-tests, smoke checks, and comparisons remain stopped until requested.
+Packages are installed and both array and GNU Parallel pool launchers are available.
+The dedicated budget-study launcher below supports the full paper grid for
+SparseSMART. No launcher reinstalls packages or fits competing methods.
 
 The configuration was checked for account `mkolar_1314` and partition `main`.
 Python jobs load `gcc/13.3.0` and `python/3.12.8`. Installation additionally
@@ -74,7 +75,73 @@ module load "${SMART_R_MODULE:-r/4.4.3}"
 export R_LIBS_USER="${R_LIBS_USER:-$VENV/R/library}"
 ```
 
-## Submit simulations later
+## Full paper grid budget study
+
+Use `submit_budget_study.sh` for `run_sparse_smart_budget_study.py`, whose named
+arguments and batch manifests differ from the per-seed runners supported by
+the generic `submit.sh` below. Preview the complete study on Discovery:
+
+```bash
+cd "$HOME/projects/smart"
+bash hpc/discovery/submit_budget_study.sh --workers 32 \
+  --time 24:00:00 --mem 8G --stationarity-tol 1e-6 --dry-run
+```
+
+The dedicated launcher's defaults are **all three models, all four paper
+experiments, all settings, and saved seed IDs 0–99**. Its plan contains 7,200
+cases: 6,300 applicable fits and 900 explicit inapplicable records. The current
+estimator cannot fit target rank 11 with source rank 10, or target rank 5 with
+source rank 0/3. These cases remain visible in the report; they are not silently
+dropped or fitted using a different method.
+
+Each applicable case tunes the nine left/right penalty pairs from
+`{0.0025, 0.01, 0.04}`, with initialization penalty `0.03`, using all paper-grid
+training rows and 100 independent validation rows. This is 56,700 continuous
+trajectories. It compares budgets **500, 1,000, 2,000, 4,000, and 8,000**, retaining
+checkpoints every 250 updates. The optimizer checks constrained stationarity
+every iteration and stops early at tolerance `1e-6`, including its proximal
+uncertainty allowance. The maximum budget is a limit, not a convergence claim;
+validation selection and optimization convergence are reported separately.
+`--iteration-budgets`, `--checkpoint-interval`, `--stationarity-tol`,
+`--init-penalties`, `--penalties-u`, and `--penalties-v` make these choices explicit.
+
+`--dry-run` creates a source snapshot, `study-plan.json`, `work-items.tsv`,
+submission metadata, and an archive copy, but does not submit a job or fit
+anything. Remove `--dry-run` to submit that scope. Use `--models`,
+`--experiments`, `--seeds`, and `--setting-index` to request a smaller scope;
+`--setting-index` requires one model and one experiment. Indices are zero-based.
+
+`--workers N` is required: choose the concurrency for each submission based on
+cluster availability, for example 16, 32, 64, or 128. It is independent of the
+number of seeds and cases. `budget_pool.sbatch` uses GNU Parallel to dispatch
+one single-CPU Slurm step per model/experiment/setting/seed case. Workers use
+`--workers 1` internally. This is one Slurm job, not `N` separate batch jobs.
+Slurm distributes its requested CPU slots across suitable nodes, with no fixed
+node count. For example, 32 workers at the default 8 GB per CPU request
+**32 CPUs and 256 GB of aggregate memory**. The 24-hour limit covers the entire
+queue and final audit, not each case. These resource choices are adjustable;
+the small pilot does not predict full-grid runtime. Slurm grants the requested
+allocation before starting the pool; it stays fixed while the queue drains.
+
+Every worker has a separate `tasks/<task-id>/results` manifest/output root.
+After workers finish, the controller assembles `results/`, preserving complete,
+partial, failed, inapplicable, and missing outcomes, then runs the existing
+summary with `--manifest-scope`. `aggregation-report.json`, the study manifest,
+stage exit codes, worker logs, and GNU Parallel job log distinguish execution
+failures from scientific outcomes. No separate processes write one shared
+runner manifest. Source and seed hashes remain attached to the results.
+
+Completed-cell artifacts are copied to the durable archive. Checkpoint states
+are held in memory until that cell's trajectories finish; an interrupted cell
+must restart. The launcher does not automatically resubmit a timed-out queue.
+Provision storage for all checkpoint records and archive copies, and inspect
+the report's coverage before treating the campaign as complete. The full-grid
+audit bounds its regenerated-data cache instead of retaining every dataset.
+
+See the [budget-study guide](../../simulation/SPARSE_SMART_V05_BUDGET_STUDY.md)
+for selection, early stopping, and interpretation details.
+
+## Other per-seed simulations
 
 The commands below are for future use after simulation runs are authorized.
 Initial runs will use the new methods and compare their saved results with
@@ -173,11 +240,11 @@ extraction. These are approximate figure aggregates from 100 repetitions,
 not paired per-seed observations. Comparisons must retain differences in
 sample budgets, tuning procedures, and parameter meanings.
 
-The external-validation summarizers also verify the hashes of the original
-paper PDFs. After retrieving the archived results, run those summarizers from
-the local manuscript repository layout where the PDFs and provenance paths
-are available. The software-only Discovery checkout does not supply that
-layout. No summarizer or comparison is part of package installation.
+The external-validation summarizers verify the committed CSV and provenance.
+They also verify original paper PDFs when those files are available; absent
+PDFs are recorded as unavailable, so the software-only Discovery checkout can
+use the saved curves. See the [paper-reference guide](../../simulation/paper_reference/README.md).
+No summarizer or comparison is part of package installation.
 
 ## Results and provenance
 

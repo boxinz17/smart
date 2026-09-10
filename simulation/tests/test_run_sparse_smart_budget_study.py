@@ -126,6 +126,7 @@ def test_continuous_runner_fits_once_and_saves_independently_reconstructible_che
     assert calls['fits'] == 1
     assert calls['options']['iterations'] == 4 and calls['options']['iteration_budgets'] == (2,4)
     assert calls['options']['checkpoint_execution'] == 'continuous' and calls['options']['checkpoint_interval'] == 1
+    assert calls['options']['stationarity_tol'] == CONFIG.stationarity_tol
     assert calls['options']['support_limits'] is None and not calls['options']['enforce_source_accuracy']
     assert calls['training'][0].shape == (6,4) and calls['validation'][0].shape == (100,4)
     np.testing.assert_array_equal(calls['training'][0],data(n=6,p=4,q=3,random_seed=123)['X'])
@@ -230,10 +231,24 @@ def test_one_cell_smoke_selection_uses_original_grid_index(tmp_path,capsys):
     assert runner.experiment_settings(0,3)[5].sigma0 == .5
 
 
+def test_full_grid_dry_run_declares_all_cases_and_early_stop_tolerance(tmp_path,capsys):
+    assert runner.main(['--models','0','1','2','--experiments','0','1','2','3',
+        '--profile','full','--seed-count','100','--stationarity-tol','2e-6',
+        '--output-root',str(tmp_path/'new'),'--dry-run']) == 0
+    manifest = json.loads(capsys.readouterr().out)
+    assert manifest['expected_cells'] == 7200
+    assert manifest['expected_applicable'] == 6300 and manifest['expected_inapplicable'] == 900
+    assert manifest['configuration']['iteration_budgets'][-1] == 8000
+    assert manifest['configuration']['stationarity_tol'] == 2e-6
+    assert not (tmp_path/'new').exists()
+
+
 @pytest.mark.parametrize('args',[
     ['--seed-ids','3','3'],['--seed-count','0'],['--seed-count','101'],['--checkpoint-interval','0'],
     ['--iteration-budgets','1000','500'],['--iteration-budgets','500','500'],
     ['--models','0','0'],['--experiments','0'],['--setting-index','3'],['--workers','0'],
+    ['--stationarity-tol','0'],['--stationarity-tol','-1'],
+    ['--stationarity-tol','nan'],['--stationarity-tol','inf'],
 ])
 def test_invalid_cli_fails_before_writing(tmp_path,args):
     with pytest.raises(SystemExit):

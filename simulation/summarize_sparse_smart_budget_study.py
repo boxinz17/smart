@@ -6,7 +6,7 @@ truth is used only to audit descriptive errors, never to choose a budget.
 from __future__ import annotations
 
 import argparse
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from dataclasses import asdict
 import hashlib
 import json
@@ -30,6 +30,29 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_ROOT = HERE / "result" / "sparse_smart_budget_study"
 DIFFICULT_SETTINGS = ((2, "rs=5"), (2, "rs=7"), (3, "sigma0=0.5"))
 DEFAULT_BUDGETS = (500, 1000, 2000, 4000, 8000)
+
+
+class _RegeneratedDataCache(OrderedDict):
+    """Bound retained audit arrays while counting every distinct dataset key."""
+
+    def __init__(self, max_entries=16):
+        super().__init__()
+        if type(max_entries) is not int or max_entries < 1:
+            raise ValueError("max_entries must be a positive integer")
+        self.max_entries = max_entries
+        self.seen_keys = set()
+
+    def __getitem__(self, key):
+        value = super().__getitem__(key)
+        self.move_to_end(key)
+        return value
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        self.move_to_end(key)
+        self.seen_keys.add(key)
+        while len(self) > self.max_entries:
+            self.popitem(last=False)
 
 
 def _require(condition, message):
@@ -552,7 +575,7 @@ def summarize(result_root=DEFAULT_ROOT, *, model_ids=(0,1,2),seed_ids=(0,1,2,3,4
                               ("expected_inapplicable", len(requested)*len(seed_ids)-expected_applicable)):
             if key in manifest:
                 _require(manifest[key] == expected, "Manifest applicability/count mismatch")
-    cells,files,cache,configs = [],[],{},set()
+    cells,files,cache,configs = [],[],_RegeneratedDataCache(),set()
     implementations = {True: set(), False: set()}
     generator = generate_data_fn
     budgets = tuple(manifest["configuration"]["iteration_budgets"]) if manifest else None
@@ -606,7 +629,7 @@ def summarize(result_root=DEFAULT_ROOT, *, model_ids=(0,1,2),seed_ids=(0,1,2,3,4
         expected_inapplicable_cells=sum(not c["applicable"] for c in cells),
         recorded_inapplicable_cells=sum(not c["applicable"] and not c["missing"] for c in cells),
         missing_inapplicable_cells=sum(not c["applicable"] and c["missing"] for c in cells),
-        regenerated_unique_datasets=len(cache),verified_factor_states=sum(c.get("verified_factor_states",0) for c in cells),
+        regenerated_unique_datasets=len(cache.seen_keys),verified_factor_states=sum(c.get("verified_factor_states",0) for c in cells),
         configurations=[json.loads(c) for c in configs],
         implementation_fingerprints=sorted(set.union(*implementations.values())),
         implementation_fingerprints_by_applicability={"applicable" if key else "inapplicable": sorted(values)

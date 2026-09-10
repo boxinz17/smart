@@ -164,6 +164,71 @@ def test_complete_record_audits_factors_and_cumulative_winners(tmp_path):
     assert report['per_model'][0]['transitions'][0]['paired_validation_gain']['n']==0
 
 
+def test_regenerated_data_cache_evicts_lru_arrays_and_preserves_unique_count():
+    setting=SimulationSetting(5,4,3,.01,1,2,'small')
+    config=runner.RunnerConfig()
+    calls=[]
+
+    def counted_generator(**kwargs):
+        calls.append(kwargs['random_seed'])
+        return generator(**kwargs)
+
+    cache=summary._RegeneratedDataCache(max_entries=2)
+    first=summary._data(setting,11,config,cache,counted_generator)
+    second=deepcopy(summary._data(setting,22,config,cache,counted_generator))
+    assert summary._data(setting,11,config,cache,counted_generator) is first
+    summary._data(setting,33,config,cache,counted_generator)
+    assert len(cache)==2 and {key[4] for key in cache}=={11,33}
+    regenerated=summary._data(setting,22,config,cache,counted_generator)
+    assert calls==[11,22,33,22] and len(cache)==2 and len(cache.seen_keys)==3
+    for key,value in second.items():
+        if isinstance(value,np.ndarray):
+            np.testing.assert_array_equal(regenerated[key],value)
+        else:
+            assert regenerated[key]==value
+
+
+def test_cache_eviction_preserves_complete_audit_report_byte_for_byte(tmp_path,monkeypatch):
+    # The two source-rank settings share each seed's generated data but have
+    # separate fitted records. Capacity one must regenerate them on the revisit.
+    for seed in (0,1,2):
+        base=fixture(seed)
+        write(tmp_path,base)
+        changed=deepcopy(base)
+        setting=experiment_settings(0,2)[3]
+        config=runner.RunnerConfig(iteration_budgets=(2,4,8),checkpoint_interval=2,
+            penalties_u=(.0025,.01),penalties_v=(.0025,))
+        changed['setting']=asdict(setting)
+        changed['configuration']=_json_value(runner.resolved_configuration(setting,config))
+        identity={key:changed[key] for key in ('schema_version','method','model','experiment','rd_seed_id',
+            'random_seed','setting','configuration','generator_arguments')}
+        changed['configuration_fingerprint']=_digest_json(identity)
+        write(tmp_path,changed)
+
+    cache_type=summary._RegeneratedDataCache
+    retained=[]
+    calls=[]
+
+    def counted_generator(**kwargs):
+        calls.append(kwargs['random_seed'])
+        return generator(**kwargs)
+
+    def use_capacity(capacity):
+        cache=cache_type(max_entries=capacity)
+        retained.append(cache)
+        monkeypatch.setattr(summary,'_RegeneratedDataCache',lambda:cache)
+        return summary.summarize(tmp_path,model_ids=(0,),seed_ids=(0,1,2),generate_data_fn=counted_generator)
+
+    unbounded_report=use_capacity(16)
+    assert len(calls)==3
+    calls.clear()
+    bounded_report=use_capacity(1)
+    assert len(calls)==6 and len(retained[-1])==1
+    assert bounded_report['regenerated_unique_datasets']==3
+    assert bounded_report['recorded_cells']==6 and bounded_report['verified_factor_states']==60
+    assert json.dumps(bounded_report,sort_keys=True)==json.dumps(unbounded_report,sort_keys=True)
+
+
 def test_failed_extension_retains_earlier_minimum_without_plateau_evidence(tmp_path):
     write(tmp_path,fixture(stops={0:3,1:3}))
     cell=run(tmp_path)['cells'][0]

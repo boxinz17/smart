@@ -70,8 +70,21 @@ Optimization diagnostics remain separate: objective change, parameter
 movement, constrained mapping displacement, inner-solve uncertainty, strict
 stationarity, and precision limitation. Interval objective changes sum the
 stable per-step differences, avoiding subtraction of large objective totals.
-The stationarity tolerance stays at 1e-6. Statistical stabilization does not
-automatically imply numerical convergence.
+The stationarity tolerance defaults to 1e-6 and is configurable with
+`--stationarity-tol`. The optimizer checks the constrained residual, including
+the proximal-solve uncertainty allowance, every iteration. It stops early
+when that residual meets the tolerance, retaining the terminal state even
+between scheduled checkpoints. That stationary endpoint covers later caps;
+an earlier validation-selected iterate is still distinguished from the
+stationary terminal iterate. Statistical stabilization does not automatically
+imply numerical convergence. A small validation gain or parameter step alone
+does not trigger early stopping.
+
+The maximum budget of 8,000 allows longer trajectories than the 2,000-update
+Discovery pilot; it is not a guarantee that every setting converges. Keep the
+500/1,000/2,000/4,000/8,000 cap comparisons to measure the benefit of the extra
+updates. Do not loosen the stationarity tolerance solely to relabel a
+budget-limited or precision-limited fit as converged.
 
 ## Commands
 
@@ -172,6 +185,38 @@ from validation-gain denominators. A recorded inapplicable cell is neither a
 missing record nor an unresolved optimization cap. A missing inapplicable
 record is reported explicitly. An entirely inapplicable scope has no budget
 gain comparisons and requires no fits.
+
+## Full paper grid on Discovery
+
+Use the dedicated [Discovery budget launcher](../hpc/discovery/README.md#full-paper-grid-budget-study)
+for a distributed study. The Python runner's `--workers` option alone creates
+processes on one node; it does not distribute work across Slurm nodes.
+
+The full grid contains three models and four experiments, with 5 sample-size,
+6 fitted-target-rank, 7 fitted-source-rank, and 6 source-noise settings per
+model. With saved seed IDs 0–99, it declares 7,200 cases. The current estimator
+requires `1 <= target_rank <= source_rank`, so 900 cases are explicitly
+inapplicable: target rank 11 with source rank 10, and source ranks 0/3 with
+target rank 5. These constraints also occur in the initializer and source
+chart. Fitting those cases would require a declared method extension, not
+simply removal of the runner checks.
+
+The remaining 6,300 cases each use nine penalty combinations by default:
+56,700 continuous trajectories, each capped at 8,000 updates with stationarity
+stopping enabled. The five budgets are views of each trajectory, not five
+independent fits. Each case uses its paper-grid training sample size and 100
+independent validation observations. Fitted rank changes do not change the
+generator's true ranks, which remain 5 and 10.
+
+The distributed launcher creates one manifest/output root per case and then
+assembles a single study root for `--manifest-scope` auditing. It retains
+inapplicable, missing, and failed cases explicitly. Do not point independent
+driver processes at one shared output root. The launcher and audit perform no
+competing-method fits. Checkpoints remain in-memory during a cell's fitting;
+an interrupted cell must restart, while completed compatible records can be
+verified and reused by the runner. Plan storage for the full checkpoint
+artifacts and their durable archives; the one-cell pilot does not establish
+the full grid's wall time or output volume.
 
 ## Historical implementation checks and targeted results
 
