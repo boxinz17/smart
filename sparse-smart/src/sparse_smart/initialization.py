@@ -33,6 +33,8 @@ def reduced_lasso(design, response, rank, penalty, *, tol=1e-9, max_iter=20000, 
     ``coefficient`` is the raw Lasso solution; ``P, d, Q`` give its
     rank-truncated approximation. The numerical minimizer is not claimed
     to be the canonical minimum-norm member of a nonunique solution set.
+    Exactly zero response columns have the unique solution zero for positive
+    penalty and are returned with zero dual gap and zero solver iterations.
     """
     design = _real_matrix(design, "design")
     response = _real_matrix(response, "response")
@@ -54,6 +56,15 @@ def reduced_lasso(design, response, rank, penalty, *, tol=1e-9, max_iter=20000, 
     n_iter = np.empty(response.shape[1], dtype=int)
     warned = False
     for column in range(response.shape[1]):
+        if not np.any(response[:, column]):
+            # With positive penalty, zero is the unique minimizer for y=0.
+            # Some sklearn versions warn after exhausting max_iter because
+            # their response-scaled dual-gap tolerance is also exactly zero.
+            # Use exact equality: tiny nonzero responses still need a solve.
+            coefficient[:, column] = 0.
+            dual_gaps[column] = 0.
+            n_iter[column] = 0
+            continue
         solver = Lasso(alpha=penalty, fit_intercept=False, tol=tol, max_iter=max_iter, selection="cyclic")
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", ConvergenceWarning)

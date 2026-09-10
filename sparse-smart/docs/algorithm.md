@@ -63,9 +63,10 @@ The gradient includes inactive coordinates, allowing supports to change.
 No polar projection follows a thresholded affine update. Source frames,
 anchors, reference rotations, penalties, and support limits remain fixed.
 
-## Acceptance and finite precision
+## Original chart solver: acceptance and finite precision
 
-Every iteration starts at the configured inverse step size. Soft thresholding
+In the original `chart` solver, every iteration starts at the configured
+inverse step size. Soft thresholding
 followed by stable C-order hard thresholding minimizes the specified isotropic
 quadratic support subproblem. The trial must pass the chart domain, displacement,
 and `F(w) <= F(x) - L*||w-x||^2/4` checks. There is no permissive uphill
@@ -75,13 +76,12 @@ is removed only during comparisons and restored in reported objectives.
 `max_backtracks` limits doublings; zero still allows the first trial.
 Finite-precision overflow produces a numerical failure or rejected trial.
 An overflowing penalty/L shrink threshold has the limiting all-zero output.
-When an entire trial rounds to its current state but the core/active-coordinate
-first-order residual exceeds a local scale times `64*eps`, the solver reports
-`numerical_stagnation`. The core scale uses its own gradient; active complement
-scales also include the penalty. At available support capacity it checks unused
-coordinates whose scores exceed the penalty. This is a numerical safeguard,
-not a proof of stationarity. Exact zero steps with no resolvable local direction
-are accepted and counted toward T. No convergence-to-global-optimum claim is made.
+A trial at floating-point resolution with an unresolved independently computed
+projected residual produces a numerical or active-constraint stall. This is a
+numerical safeguard, not a proof of stationarity. With no stationarity stopping
+requested, zero steps whose mapping is resolved can count toward T. No
+convergence-to-global-optimum claim is made. Version 0.4 leaves this solver's
+update and acceptance rules unchanged, including their use in prescribed mode.
 
 ## Practical projection and validation extensions (0.2)
 
@@ -152,6 +152,165 @@ statistical certificates. `diagnostic_coordinates` distinguishes these norms
 from the original Z-coordinate diagnostics. Full caps are required because
 adding a hard cardinality cap makes the proximal subproblem nonconvex; auto
 mode retains the chart solver for that case. Rank admissibility is unchanged.
+
+## Budget checkpoints and numerical stability (0.4)
+
+### Successful checkpoints remain eligible
+
+`SparseSMARTTuner(iterations=T, iteration_budgets=None)` fits the grid once at
+T, preserving the original single-budget behavior, including T=0. An explicit
+schedule must consist of positive strictly increasing integers whose last
+value is T. For example, `(500,2000)` runs each candidate once with budget 500
+and independently again with budget 2000. The training and validation arrays
+are split or validated once and reused unchanged. Initializers are recomputed;
+there is no state resume or warm start between candidates or budgets.
+Calling `fit` again clears all checkpoints from the previous call.
+
+Budgets are traversed in increasing order, with the existing parameter-grid
+order inside each budget. Every fit has a globally sequential `candidate_id`,
+a `grid_candidate_id` shared across budgets, and its `iteration_budget` in
+`selection_history_`. All outcomes and validation trajectories are retained.
+Only the best successful fitted model per budget is kept in `checkpoints_`,
+keyed by budget, to avoid storing all candidate model objects. Budgets with no
+successful candidate have no model in this mapping.
+
+The global winner minimizes validation prediction MSE over all successful
+checkpoints. Strict improvement is required to replace it, so ties prefer the
+earlier budget and then earlier grid position. This gives the same global
+minimum as retaining every successful candidate model. A failed longer fit
+cannot invalidate the shorter fit that completed successfully. Its partial
+coefficient is still excluded, even if that partial validation score is lower.
+Completion at a declared budget is distinct from stationarity.
+
+`selected_budget_` and `selected_candidate_id_` identify the winning fit;
+`selected_iteration_` and `n_iter_` concern that fit, not the last fit attempted.
+`budget_statuses` reports success and failure counts and the winning candidate
+at each budget. `selected_checkpoint_continuations` reports the later outcomes
+at the selected grid position, while
+`selected_checkpoint_retained_after_failure` identifies retention despite a
+later failure. These continuation records describe independent refits. There
+is no implicit refit on training plus validation data, and coefficient truth
+does not select a budget. Validation scores used repeatedly for this selection
+are not independent test-error estimates.
+
+### Stable objective differences in the practical anchor solver
+
+For a proposed fixed-chart update, let R be the current working prediction
+residual and Delta be the prediction change. The smooth-loss difference is
+computed as `(<R,Delta> + ||Delta||_F^2/2)/n`. Delta is assembled from telescoping
+factor differences. The penalty difference is computed from the entrywise
+changes in `abs(Z_u)` and `abs(Z_v)`. This avoids subtracting two complete
+objective values that can round to the same number near stationarity.
+
+The acceptance condition remains
+`objective_change <= -L*||y_trial-y||^2/4` in H coordinates, together with the
+original chart feasibility and displacement checks. No uphill tolerance is
+introduced. The recorded objective is still the original objective, including
+any constant loss outside the exact-source right span; that constant cancels
+from the difference. Identically rounded recorded objectives alone therefore
+do not imply that the stable difference was zero.
+
+The first trial starts at the configured inverse step size `initial_L`.
+Subsequent iterations start at `max(initial_L,last_accepted_L/2)`, then double
+L for rejected trials. This carries forward useful line-search information
+while allowing larger trial steps again. It is confined to the practical
+anchor solver and does not warm-start another candidate. The diagnostic
+reference remains `L_ref=clip(initial_L,1,1000)`, fixed throughout the fit;
+backtracking cannot manufacture a small stationarity residual by increasing L.
+`line_search_start_inverse` records the initial trial inverse step at each
+iteration. The estimator reports
+`line_search_strategy="previous_accepted_half_inverse"` for this solver and
+`"reset_initial_inverse"` for the original chart solver.
+
+### Inner accuracy and the constrained stationarity diagnostic
+
+The anchor solver records the mapping displacement
+`m=L_ref*||y_prox-y||_2` and proximal uncertainty
+`u=L_ref*sqrt(e_u^2+e_v^2)` separately. Each block allowance is
+`e_a=sqrt(2*(G_a+c_a))+d_a`, where G is the numerical primal-dual gap,
+c guards cancellation in its evaluation, and d is a linear arithmetic
+roundoff allowance for both Dykstra and direct proximal formulas. Active
+Dykstra solves also retain the cancellation allowance; the arithmetic floor
+remains even when the ball-gap term is zero. Their sum
+`m+u` is the reported constrained residual. The uncertainty accounts for
+inexact proximal solutions; it is not statistical uncertainty.
+The gaps and allowances are floating-point diagnostics, not rigorous interval
+certificates accounting for every rounding error.
+
+If the numerical residual interval straddles the stopping threshold,
+`max(0,m-u) <= stationarity_tol < m+u`, the diagnostic tries tighter absolute
+gap targets, with at most two refinements. A target
+uncertainty eta corresponds to a per-block Dykstra target
+`G_a+c_a <= eta^2/(4*L_ref^2)`. Thus tightening is based on the squared desired
+mapping accuracy, not only a relative inner-iteration tolerance. The smallest
+available upper residual `m+u` and its corresponding components are retained if floating-point
+arithmetic prevents the stricter target from being reached. A nonzero
+uncertainty allowance is never silently dropped to declare convergence.
+Requesting a smaller tolerance does not remove the roundoff allowances.
+
+Iteration and result diagnostics include `mapping_displacement`,
+`proximal_uncertainty`, `mapping_refinements`, and
+`mapping_precision_limited`. Estimator diagnostics expose these for the
+validation-selected state and expose the corresponding `last_` fields for
+the terminal state. `objective_change` and `relative_step_norm` describe the
+selected step. The terminal `precision_limited` flag is true for numerical
+stagnation or a precision-limited terminal mapping; optimization convergence
+still requires stationarity termination. A precision-limited diagnostic does not certify
+stationarity or automatically make a failed partial fit eligible. A collapsed
+trial with an unresolved constrained residual still produces a numerical
+failure status, allowing the tuner to retain an earlier successful budget.
+Neither this diagnostic nor budget-checkpoint selection establishes global
+optimality or the manuscript's statistical assumptions.
+
+## Continuous trajectories and budget assessment (v0.5)
+
+`checkpoint_execution="continuous"` in the tuner performs one initialization
+and one uninterrupted refinement call per hyperparameter grid point. The
+internal H state, gradient, and successful line-search inverse remain in the
+solver across all checkpoints. No H/Z round trip is used to restart an update.
+The default independent-budget mode is unchanged.
+
+The capture schedule is the union of iteration zero, multiples of
+`checkpoint_interval` (250 by default in continuous mode), all requested
+comparison budgets, and the maximum budget. Validation is evaluated only at
+those scheduled points, plus an earlier stationary terminal iterate. Equal
+scores retain the earlier evaluated state. Validation never modifies a
+gradient or an acceptance condition. The initializer participates in validation
+selection once a positive prefix completes, but cannot by itself rescue a
+trajectory that fails before its first positive checkpoint. A stationary
+initializer is a successful terminal fit and does cover later caps.
+
+Each estimator stores compact original-chart endpoint and selected states in
+`checkpoints_`. The `checkpoint_model(t)` view reconstructs coefficients,
+truncated histories, and selected/terminal diagnostics without fitting. Views
+are independent of the ongoing or failed parent estimator's mutable arrays.
+Nonfinite objective/gradient callback records do not become successful
+checkpoints. Capturing state is not a disk-resume protocol.
+
+For each requested cap, the continuous tuner evaluates the latest successful
+checkpoint at or below that cap for each grid point. A certified stationary
+stop may cover all later caps. `success` means a usable completed prefix;
+`budget_reached` means the requested cap is covered. Later numerical failure
+does not erase an earlier dense checkpoint, and retained fallbacks do not
+establish cap coverage. Candidate records stay in budget-major order, with
+strict validation improvement replacing the winner; ties retain earlier caps
+and then grid order. Per-trajectory timing is reported once rather than charged
+again to every prefix.
+
+The simulation study compares cumulative validation minima at 500, 1,000,
+2,000, 4,000, and 8,000 updates. It saves compact ambient singular factors for
+checkpoint endpoint and selected states. Training/validation fingerprints and
+the saved factors allow independent reconstruction of prediction and coefficient
+errors. Coefficient truth enters only this post-fit evaluation and never the
+tuner or the material-gain rule.
+
+Statistical stabilization and optimization convergence are separate outputs.
+Material validation gain is configurable; the study's default is an absolute
+gain exceeding `max(1e-4, 1e-3 * baseline_validation_MSE)`. This is a practical
+comparison threshold, not a hypothesis test or a theorem. Missing cells,
+unattained caps, and failed extensions cannot count as evidence of a plateau.
+The strict numerical residual retains its original tolerance, and a
+validation-stable result can still be unconverged or precision-limited.
 
 ## Calibration
 

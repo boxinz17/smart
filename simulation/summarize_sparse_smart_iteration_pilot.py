@@ -35,12 +35,15 @@ DIFFICULT_SETTINGS = ((2, "rs=5"), (2, "rs=7"), (3, "sigma0=0.5"))
 def _without_iterations(configuration):
     value = deepcopy(configuration)
     del value["runner"]["iterations"]
+    value["runner"].setdefault("iteration_budgets", None)
     return value
 
 
 def _validate_iteration_semantics(record, budget):
     """Check this pilot's solver contract, including unsuccessful candidates."""
     config = record["configuration"]["runner"]
+    _require(config.get("iteration_budgets") is None,
+             "Iteration pilot requires single-budget runs; checkpoint tuning is unsupported")
     _require(config["iterations"] == budget, "Wrong iteration budget for this cohort")
     _require(config["initialization_spectrum"] == "projected"
              and config["refinement_solver"] == "anchor_projected",

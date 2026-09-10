@@ -22,19 +22,24 @@ single_cell/    Section 6 — CITE-seq transfer-learning case study
 
 ## Installation
 
-Python 3.9 or newer is required; the experiments in the paper were run with
-Python 3.12. We recommend a fresh virtual environment.
+The shared development, CI, and Discovery runtime uses **Python 3.12** and
+**scikit-learn 1.9.0**. Scientific dependencies are pinned in
+[`python-constraints.txt`](python-constraints.txt); Python patch releases
+within 3.12 are allowed. See the [environment guide](environment/README.md).
 
 ```bash
-python -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate           # Windows: .venv\Scripts\activate
-pip install -e ./smart
-pip install -r requirements.txt
+python -m pip install -c python-constraints.txt setuptools wheel
+python -m pip install --no-build-isolation -c python-constraints.txt \
+  -e './smart[test]' -e './bi-smart[test]' -e './sparse-smart[test]'
+python -m pip install -r requirements.txt
+python environment/check_runtime.py
 ```
 
-The first command installs the `smart` package in editable mode; the second
+The editable installs supply all three project packages. `requirements.txt`
 adds the extras used by the experiment scripts (for example `scanpy` and
-`anndata` for the single-cell pipeline, and `pytest` for the test suite).
+`anndata` for the single-cell pipeline) while retaining the shared pins.
 
 The R baselines need an R installation with the packages listed in
 [`R_packages.txt`](R_packages.txt):
@@ -98,6 +103,10 @@ See [`smart/README.md`](smart/README.md) for a full tour of the public API
 `fit_baseline`).
 
 ## HPC submission scripts
+
+For USC Discovery, use the [Discovery setup and Slurm launcher](hpc/discovery/README.md).
+It runs simulations on compute nodes, snapshots the current source for each
+submission, and keeps separate outputs for each seed and submission.
 
 The `simulation/submit_*.sh` and `single_cell/submit_*.sh` files are Slurm
 array examples we used on a cluster. They are kept as convenient templates;

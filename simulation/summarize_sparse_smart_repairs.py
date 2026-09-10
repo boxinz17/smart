@@ -88,6 +88,9 @@ def validate_pair(old, new):
              and new["refit_on_all_data"] is False, "Incorrect data-use flags")
     before_config, after_config = old["configuration"], new["configuration"]
     before_options, after_options = dict(before_config["runner"]), dict(after_config["runner"])
+    for options in (before_options, after_options):
+        _require(options.get("iteration_budgets") is None, "Repair comparison requires single-budget runs")
+        options.setdefault("iteration_budgets", None)
     _require(after_options.get("initialization_spectrum") == "projected"
              and after_options.get("refinement_solver") == "anchor_projected", "Repair policies not enabled")
     for key in POLICY_KEYS:

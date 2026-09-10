@@ -11,7 +11,7 @@ from .source import ExactSource, NoisySource, SourceBases, prepare_source
 from .spectral import project_singular_values
 from .tuning import SparseSMARTTuner
 
-__version__ = "0.3.0"
+__version__ = "0.5.0"
 __all__ = ["SparseSMART", "ExactSource", "NoisySource", "Margins", "PracticalCalibration",
            "PrescribedCalibration", "ResolvedCalibration", "resolve_calibration", "AnchorChart",
            "SourceBases", "prepare_source", "LassoInitialization", "reduced_lasso", "refine",

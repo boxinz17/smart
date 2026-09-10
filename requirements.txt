@@ -1,5 +1,7 @@
 # Python dependencies for running the SMART experiments end-to-end.
 # The `smart` package itself is installed separately with `pip install -e ./smart`.
+# Shared pins used by local setup, CI, and Discovery.
+-c python-constraints.txt
 
 # Core scientific stack (also pulled in as smart dependencies).
 numpy>=1.23

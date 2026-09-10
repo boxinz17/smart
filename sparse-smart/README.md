@@ -5,23 +5,31 @@ Sparse two-stage spectral transfer regression from
 and sparse refinement in coordinates that preserve orthogonality and selected
 weighted-factor zeros. The distribution is `sparse-smart`; the import is
 `sparse_smart`. It is independent of the existing `smart` and `bi_smart` packages.
-Version 0.3 adds feasible spectral initialization and anchor-aware refinement
-to the practical projection, separate left/right penalties, and validation
-selection introduced in 0.2. These
-extensions retain explicit numerical safeguards and are not theorem claims.
+Version 0.5 adds continuous optimization trajectories and dense validation
+checkpoints for studying iteration budgets. It retains the version 0.4
+checkpoint eligibility, numerical acceptance, and stopping safeguards in the
+practical anchor solver. It builds on feasible spectral initialization,
+anchor-aware refinement, and separate left/right penalties. These extensions
+retain explicit numerical safeguards and are not theorem claims.
 
 ## Install and run
 
-From this directory, with Python 3.10 or newer:
+The supported runtime is **Python 3.12**, **scikit-learn 1.9.0**, NumPy 2.5.3,
+and SciPy 1.18.1. Python patch releases within 3.12 are allowed. Local setup,
+CI, and Discovery use the same [dependency pins](../python-constraints.txt).
+
+From the repository root, create the shared environment as described in the
+[environment guide](../environment/README.md). Then, from this directory:
 
 ```bash
-python -m pip install -e '.[test]'
+python -m pip install --no-build-isolation -c ../python-constraints.txt -e '.[test]'
+python ../environment/check_runtime.py
 python -m pytest
 python examples/exact_and_noisy.py
 ```
 
-Runtime dependencies are NumPy, SciPy, and scikit-learn. A normal wheel install
-is also supported. The `src/` layout keeps imports independent of the checkout's
+The wheel metadata also pins the scientific runtime, including scikit-learn's
+joblib and threadpoolctl dependencies. The `src/` layout keeps imports independent of the checkout's
 working directory. The example runs exact, noisy, and unresolved-cluster modes.
 
 ## Minimal fit
@@ -160,6 +168,18 @@ on Z. Its proximal mapping includes the anchor, rotation, and singular-value
 constraints. Gradients and step norms for this solver use the H-coordinate
 metric, identified in `diagnostics_["diagnostic_coordinates"]`.
 
+The practical anchor solver compares objective differences directly to reduce
+cancellation near a stationary point. After the first update, its next trial
+starts at `max(initial_L, last_accepted_L / 2)`; rejected trials still double
+the inverse step size. The stationarity mapping keeps a fixed reference
+inverse step size, independent of this trial adaptation. Its reported residual
+separates mapping displacement from an allowance for the inner proximal solve;
+when that allowance prevents a possible stationarity decision, the diagnostic
+solve is tightened. Roundoff allowances remain active even when a stricter
+inner tolerance is requested. Unresolved numerical stalls remain failures. The original
+chart solver, including the prescribed update rule, is unchanged by these
+0.4 changes. See [the numerical policy](docs/algorithm.md) for details.
+
 Prescribed fits, smaller hard support caps, and `spectral_step="reject"` use
 the original `"chart"` solver under `auto`. An explicit `"anchor_projected"`
 request rejects incompatible caps or spectral rejection. To reproduce the
@@ -179,12 +199,13 @@ tuned = SparseSMARTTuner(
     penalties_u=(.0025, .01, .04),
     penalties_v=(.0025, .01, .04),
     support_limits=None,
-    iterations=500, validation_fraction=.2, random_state=0,
+    iterations=2000, iteration_budgets=(500, 2000),
+    validation_fraction=.2, random_state=0,
 )
 tuned.fit(X, Y, source=source)
 if not tuned.success_:
     raise RuntimeError(tuned.status_)
-print(tuned.best_params_, tuned.best_score_)
+print(tuned.selected_budget_, tuned.best_params_, tuned.best_score_)
 prediction = tuned.predict(X_new)
 ```
 
@@ -197,6 +218,34 @@ the candidate and its iterate, with earliest ties retained. No coefficient
 truth is accepted as a tuning input. `selection_history_` records every
 candidate, including failures; failed partial fits cannot win. If all fail,
 the tuner reports `no_successful_candidate` and exposes no winning coefficient.
+
+`iteration_budgets=None` is the default: each grid point is fitted once at
+`iterations`. An explicit schedule must contain positive, strictly increasing
+integers and end at `iterations`. Each budget runs the entire parameter grid
+independently, using the same training and validation rows; it does not resume
+the shorter fit or warm-start from another candidate. Thus `(500, 2000)` costs
+both sets of fits. There is no implicit refit on the combined training and
+validation rows.
+
+`checkpoints_` maps each budget with successful candidates to that budget's
+best fitted estimator. Selection minimizes validation MSE across these
+successful checkpoints; ties prefer the earlier budget, then the original
+grid order. A later failure cannot erase a completed earlier checkpoint, and
+the failed run's partial coefficient is still ineligible. A completed
+iteration budget need not be a converged fit.
+
+`iteration_budgets_`, `selected_budget_`, and `selected_candidate_id_` identify
+the resolved schedule and winner. Each `selection_history_` record includes
+`iteration_budget`, a globally sequential `candidate_id`, and
+`grid_candidate_id`, which identifies the same grid position across budgets.
+The winning model's iteration count, selected iterate, and histories remain
+its own, even if a later fit fails. Tuner diagnostics separately record
+`budget_statuses`, `selected_checkpoint_status`,
+`selected_checkpoint_continuations`, and
+`selected_checkpoint_retained_after_failure`. Here continuations are
+independent longer fits of the selected grid position, not resumed execution.
+A new call to `fit` clears the previous call's results; checkpoint retention
+applies within one scheduled fit.
 
 By default `support_limits=None` permits the full weighted nonanchor blocks,
 leaving the penalties to determine effective sparsity. These are **entry
@@ -246,6 +295,17 @@ smooth loss, penalty, support counts, anchor margins, inverse step size,
 step norm, and rejected-trial reasons. Reported loss includes the constant
 response component outside the thin exact right source span.
 
+For the practical anchor solver, inspect `mapping_displacement`,
+`proximal_uncertainty`, `mapping_refinements`, and
+`mapping_precision_limited` in `diagnostics_`; `last_` versions describe the
+terminal state. The selected state also reports `objective_change` and
+`relative_step_norm`. History records `line_search_start_inverse`, and
+`line_search_strategy` distinguishes the practical adaptive trial start from
+the original solver's reset. These are floating-point diagnostics, not
+rigorous interval certificates. The terminal `precision_limited` flag marks
+numerical stagnation or a precision-limited mapping; it does not imply
+`optimization_converged` or make a failed partial fit eligible.
+
 Algorithmic statuses include `source_accuracy_failed`, `initialization_failed`,
 `lasso_not_converged`, `initialization_spectrum_failed`, `anchor_selection_failed`,
 `handoff_failed`, `invalid_initial_state`, `line_search_failed`,
@@ -278,6 +338,61 @@ laying out arrays.
 
 ## Numerical scope and development
 
+### Continuous trajectories and iteration-budget studies
+
+Use the opt-in continuous mode to compare maximum budgets without restarting
+each parameter setting:
+
+```python
+tuner = SparseSMARTTuner(
+    rank=5, source_rank=7, sparsity=(5, 5), margins=margins,
+    init_penalties=(.03,), penalties_u=(.0025, .01, .04),
+    penalties_v=(.0025, .01, .04),
+    iterations=8000, iteration_budgets=(500, 1000, 2000, 4000, 8000),
+    checkpoint_execution="continuous", checkpoint_interval=250,
+    refinement_solver="anchor_projected", enforce_source_accuracy=False,
+)
+tuner.fit(X_train, Y_train, source=source,
+          validation_data=(X_validation, Y_validation))
+```
+
+Each grid point has one initializer and one solver trajectory. Validation is
+evaluated at iteration zero, every 250 updates, all comparison budgets, and
+an earlier stationary endpoint if needed. The optimization state and the warm
+line-search state continue unchanged between checkpoints. The validation
+sample never enters the updates. Both earlier successful prefixes and their
+best validation states remain available after a later numerical failure.
+The original independent-budget mode remains the default.
+
+`trajectory_models_` and `trajectory_history_` contain one entry per grid
+point. Each full estimator exposes lightweight `checkpoints_` and a
+`checkpoint_model(iteration)` method that reconstructs an independent fitted
+view without optimization. That view's `coefficient_` is the selected state;
+`last_coefficient_` is the checkpoint endpoint. At the lower level, pass
+`checkpoint_iterations` and `validation_interval` directly to `SparseSMART`.
+Checkpoint capture is in memory; it is not process-restart support.
+
+Continuous tuner `selection_history_` records remain in budget-major order.
+`success` describes a retained, completed prefix; `budget_reached` separately
+records whether the requested cap was reached or stationarity was established
+earlier. `trajectory_checkpoint_iteration` identifies the actual prefix. For
+example, after failure at update 400, a completed 250-update prefix may remain
+eligible at cap 500, with `budget_reached=False`. A failed partial iterate is
+never substituted for that completed checkpoint. An initializer alone is not
+a fallback after failure before the first positive checkpoint.
+
+The separate simulation budget-study runner records validation MSE, diagnostic
+coefficient error, objective, movement, and stationarity at every checkpoint.
+Its summary compares best eligible validation scores across caps, separately
+from optimization diagnostics. Missing or failed extensions cannot establish
+a plateau. See [the budget-study guide](../simulation/SPARSE_SMART_V05_BUDGET_STUDY.md).
+
+Continuous mode stores all trajectory histories and compact checkpoint states;
+it therefore uses more memory than a single-budget fit. Validation-selected
+scores are tuning scores, not independent estimates of prediction error.
+
+### Numerical implementation
+
 See [the algorithm mapping and numerical policy](docs/algorithm.md). The
 implementation differentiates the matrix square root with a Sylvester solve,
 computes gradients for all potential complement coordinates, and reconstructs
@@ -288,8 +403,10 @@ Tests cover analytic derivatives, threshold-subproblem optima on tiny examples,
 RRQR exchanges, Lasso normalization and nonconvergence, source/SVD conventions,
 calibration formulas, all major solver checks, exact/noisy/cluster fits,
 support changes, and initialization when `n < source_rank`.
+Checkpoint tests cover eligibility after later failures, validation ties,
+identical data across budgets, and reproduction of shorter validation prefixes.
 
-Dense arrays are used in version 0.1. The initializer stores an `r0` by `r0`
+Dense arrays are used. The initializer stores an `r0` by `r0`
 coefficient. Noisy full frames cost `O(p^2+q^2)` storage and their deterministic
 completion can be expensive. Fitting uses low-rank prediction products and
 does not form a `p*q` Jacobian; the physical coefficient is formed once on

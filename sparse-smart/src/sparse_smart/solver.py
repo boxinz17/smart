@@ -29,6 +29,13 @@ class IterationRecord:
     raw_gradient_norm: float | None = None
     mapping_step_size_inverse: float | None = None
     mapping_domain_reason: str | None = None
+    mapping_displacement: float | None = None
+    proximal_uncertainty: float | None = None
+    mapping_refinements: int = 0
+    mapping_precision_limited: bool = False
+    objective_change: float | None = None
+    relative_step_norm: float | None = None
+    line_search_start_inverse: float | None = None
 
 
 @dataclass
@@ -42,6 +49,10 @@ class RefinementResult:
     termination_reason: str = "unspecified"
     projected_gradient_norm: float | None = None
     raw_gradient_norm: float | None = None
+    mapping_displacement: float | None = None
+    proximal_uncertainty: float | None = None
+    mapping_refinements: int = 0
+    mapping_precision_limited: bool = False
 
     @property
     def success(self) -> bool:
@@ -58,7 +69,8 @@ def _penalty(chart, x, penalty):
                zip((chart.z_u_slice, chart.z_v_slice), penalty))
 
 
-def _record(chart, x, t, smooth, penalty_value, L, step_norm, rejects, offset, diagnostic):
+def _record(chart, x, t, smooth, penalty_value, L, step_norm, rejects, offset, diagnostic,
+            *, objective_change=None, relative_step_norm=None, line_search_start_inverse=None):
     P, _, Q = chart.reconstruct(x)
     return IterationRecord(
         t, float(smooth + penalty_value + offset), float(smooth + offset),
@@ -67,6 +79,8 @@ def _record(chart, x, t, smooth, penalty_value, L, step_norm, rejects, offset, d
         float(np.linalg.svd(P[chart.anchors_u], compute_uv=False)[-1]),
         float(np.linalg.svd(Q[chart.anchors_v], compute_uv=False)[-1]), tuple(rejects),
         *diagnostic,
+        objective_change=objective_change, relative_step_norm=relative_step_norm,
+        line_search_start_inverse=line_search_start_inverse,
     )
 
 
@@ -120,7 +134,11 @@ def _result(x, status, message, n_iter, history, reason=None, termination_reason
     return RefinementResult(x, status, message, n_iter, history, reason,
                             termination_reason or status,
                             last.projected_gradient_norm if last else None,
-                            last.raw_gradient_norm if last else None)
+                            last.raw_gradient_norm if last else None,
+                            last.mapping_displacement if last else None,
+                            last.proximal_uncertainty if last else None,
+                            last.mapping_refinements if last else 0,
+                            last.mapping_precision_limited if last else False)
 
 
 def refine(

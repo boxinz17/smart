@@ -45,6 +45,8 @@ def _integer(value, name, maximum=None):
 
 def _runner_config(value):
     values = dict(value)
+    if values.get("iteration_budgets") is not None:
+        values["iteration_budgets"] = tuple(values["iteration_budgets"])
     for key in ("init_penalties", "penalties_u", "penalties_v"):
         values[key] = tuple(values[key])
     if values["support_limits"] is not None:
@@ -52,6 +54,101 @@ def _runner_config(value):
     config = RunnerConfig(**values)
     config.validate()
     return config
+
+
+def _candidate_grid(config, supports):
+    """Budget-major order is part of deterministic validation tie breaking."""
+    return [(budget, dict(init_penalty=li, penalty_u=lu, penalty_v=lv,
+                          support_limits=pair, step_size_inverse=config.inverse_step))
+            for budget, li, lu, lv, pair in product(
+                config.iteration_budgets or (config.iterations,), config.init_penalties,
+                config.penalties_u, config.penalties_v, supports)]
+
+
+def _candidate_budget(candidate, config):
+    # Old single-budget artifacts omitted this field. Never mutate their identity.
+    budget = candidate.get("iteration_budget", config.iterations if config.iteration_budgets is None else None)
+    _integer(budget, "candidate iteration budget", config.iterations)
+    _require(budget in (config.iteration_budgets or (config.iterations,)), "Unknown candidate iteration budget")
+    return budget
+
+
+def _selected_budget(record):
+    return record.get("selected_budget", record["configuration"]["runner"]["iterations"])
+
+
+def _validate_selected_budget(record, winner, config):
+    budget = _candidate_budget(winner, config)
+    _require("selected_budget" in record or config.iteration_budgets is None,
+             "Missing selected budget for checkpoint tuning")
+    _require(type(_selected_budget(record)) is int and _selected_budget(record) == budget,
+             "Selected budget does not match validation winner")
+    if "selected_candidate_id" in record:
+        _require(type(record["selected_candidate_id"]) is int
+                 and record["selected_candidate_id"] == winner["candidate_id"],
+                 "Selected candidate ID does not match validation winner")
+    return budget
+
+
+def _same_checkpoint_metadata(actual, expected):
+    """Compare serialized metadata without allowing booleans as integer IDs."""
+    if isinstance(expected, dict):
+        return (isinstance(actual, dict) and actual.keys() == expected.keys()
+                and all(_same_checkpoint_metadata(actual[key], value) for key, value in expected.items()))
+    if isinstance(expected, list):
+        return (isinstance(actual, list) and len(actual) == len(expected)
+                and all(_same_checkpoint_metadata(a, b) for a, b in zip(actual, expected)))
+    if isinstance(expected, float):
+        return type(actual) in (int, float) and math.isfinite(actual) and actual == expected
+    return type(actual) is type(expected) and actual == expected
+
+
+def _validate_checkpoint_metadata(record, config, grid_size):
+    """Cross-check optional new fields while preserving historical records."""
+    candidates = record["selection_history"]
+    for index, candidate in enumerate(candidates):
+        if "grid_candidate_id" in candidate:
+            _require(type(candidate["grid_candidate_id"]) is int
+                     and candidate["grid_candidate_id"] == index % grid_size,
+                     "Grid candidate ID does not match budget-major grid position")
+    if "tuning_diagnostics" not in record:
+        return
+    diagnostics = record["tuning_diagnostics"]
+    _require(isinstance(diagnostics, dict), "Invalid checkpoint tuning diagnostics")
+    budgets = config.iteration_budgets or (config.iterations,)
+    eligible = [candidate for candidate in candidates if candidate["success"]]
+    winner = min(eligible, key=lambda candidate: candidate["validation_mse"]) if eligible else None
+    selected_budget = _candidate_budget(winner, config) if winner is not None else None
+    winner_grid_id = winner["candidate_id"] % grid_size if winner is not None else None
+    continuations = [dict(candidate_id=candidate["candidate_id"],
+        iteration_budget=_candidate_budget(candidate, config), success=candidate["success"],
+        status=candidate["status"], termination_reason=candidate["termination_reason"])
+        for candidate in candidates if winner is not None
+        and candidate["candidate_id"] % grid_size == winner_grid_id
+        and _candidate_budget(candidate, config) > selected_budget]
+    budget_statuses = []
+    for budget in budgets:
+        records = [candidate for candidate in candidates if _candidate_budget(candidate, config) == budget]
+        successful = [candidate for candidate in records if candidate["success"]]
+        best = min(successful, key=lambda candidate: candidate["validation_mse"]) if successful else None
+        budget_statuses.append(dict(iteration_budget=budget, success=bool(successful),
+            successful_candidates=len(successful), failed_candidates=len(records)-len(successful),
+            best_candidate_id=best["candidate_id"] if best is not None else None,
+            best_validation_mse=best["validation_mse"] if best is not None else None))
+    expected = dict(iteration_budgets=list(budgets), checkpoint_execution="independent_fits",
+        selected_budget=selected_budget, selected_candidate_id=winner["candidate_id"] if winner is not None else None,
+        selected_checkpoint_status=winner["status"] if winner is not None else None,
+        selected_checkpoint_termination_reason=winner["termination_reason"] if winner is not None else None,
+        retained_budget_checkpoints=sum(status["success"] for status in budget_statuses),
+        successful_candidate_fits=len(eligible), failed_candidate_fits=len(candidates)-len(eligible),
+        budget_statuses=budget_statuses,
+        retained_earlier_checkpoint=bool(winner is not None and selected_budget < budgets[-1]),
+        selected_checkpoint_continuations=continuations,
+        selected_checkpoint_retained_after_failure=any(not candidate["success"] for candidate in continuations))
+    for key, value in expected.items():
+        if key in diagnostics:
+            _require(_same_checkpoint_metadata(diagnostics[key], value),
+                     f"Checkpoint tuning diagnostics disagree with candidate history: {key}")
 
 
 def _validate_validation_history(record):
@@ -82,6 +179,8 @@ def validate_record(record, path, *, setting, random_seed, model, experiment, se
              and path.parent.parent.name == model, "Result filename or directory does not match cell identity")
     config = _runner_config(record["configuration"]["runner"])
     expected_config = _json_value(resolved_configuration(setting, config))
+    if "iteration_budgets" not in record["configuration"]["runner"]:
+        del expected_config["runner"]["iteration_budgets"]
     _require(record["configuration"] == expected_config, "Resolved configuration mismatch")
     arguments = dict(n=setting.n, p=setting.p, q=setting.q, sigma0=setting.sigma0,
                      sigma=.5, r_star=5, r0_star=10, random_seed=int(random_seed))
@@ -126,25 +225,28 @@ def validate_record(record, path, *, setting, random_seed, model, experiment, se
         _require(record["split"] is not None, "Missing split for a completed tuning search")
     candidates = record["selection_history"]
     supports = expected_config["support_limits"]
-    parameter_grid = [dict(init_penalty=li, penalty_u=lu, penalty_v=lv,
-                           support_limits=pair, step_size_inverse=config.inverse_step)
-                      for li, lu, lv, pair in product(config.init_penalties, config.penalties_u,
-                                                     config.penalties_v, supports)]
+    parameter_grid = _candidate_grid(config, supports)
     _require(len(candidates) <= len(parameter_grid), "Too many candidate records")
     if status in ("complete", "all_candidates_failed"):
         _require(len(candidates) == len(parameter_grid), "Incomplete candidate search")
     for index, candidate in enumerate(candidates):
-        _require(candidate["candidate_id"] == index and candidate["params"] == parameter_grid[index],
+        budget, params = parameter_grid[index]
+        _require(_candidate_budget(candidate, config) == budget, "Candidate budget order mismatch")
+        _require(candidate["candidate_id"] == index and candidate["params"] == params,
                  "Candidate identity or tuning grid mismatch")
         _require(type(candidate["success"]) is bool, "Invalid candidate success flag")
+        _integer(candidate["n_iter"], "candidate iterations", budget)
         if candidate["success"]:
             _require(candidate["status"] in ("completed", "converged"), "Failed candidate marked successful")
             _validate_validation_history(candidate)
         else:
             _require(candidate["validation_mse"] is None, "Failed candidate must not have an eligible validation score")
-        _integer(candidate["n_iter"], "candidate iterations", config.iterations)
+        if candidate["success"] and candidate["termination_reason"] == "max_iterations":
+            _require(candidate["n_iter"] == budget, "Candidate stopped below its iteration budget")
     _require(record["fit_errors"] == [c for c in candidates if not c["success"]],
-             "fit_errors does not match failed candidate records")
+              "fit_errors does not match failed candidate records")
+    _validate_checkpoint_metadata(record, config,
+                                 len(parameter_grid) // len(config.iteration_budgets or (config.iterations,)))
     eligible = [candidate for candidate in candidates if candidate["success"]]
     if status == "all_candidates_failed":
         _require(record["all_candidates_failed"] is True and not eligible
@@ -153,6 +255,7 @@ def validate_record(record, path, *, setting, random_seed, model, experiment, se
     if record["success"]:
         _require(record["all_candidates_failed"] is False and bool(eligible), "No eligible successful winner")
         winner = min(eligible, key=lambda c: c["validation_mse"])
+        winner_budget = _validate_selected_budget(record, winner, config)
         _require(record["best_params"] == winner["params"], "Selected candidate is not the validation winner")
         _require(record["selected_iteration"] == winner["selected_iteration"]
                  and record["n_iter"] == winner["n_iter"], "Winner iteration mismatch")
@@ -176,7 +279,7 @@ def validate_record(record, path, *, setting, random_seed, model, experiment, se
         _require(diag["optimization_converged"] == (record["termination_reason"] == "stationarity"),
                  "Optimization convergence/termination mismatch")
         if record["termination_reason"] == "max_iterations":
-            _require(record["n_iter"] == config.iterations, "Maximum-iteration termination below configured budget")
+            _require(record["n_iter"] == winner_budget, "Maximum-iteration termination below configured budget")
     return config
 
 
@@ -271,8 +374,9 @@ def summarize(result_root, reference_path=DEFAULT_REFERENCE, *, model_id=0,
                    chosen_initializer=sum(r["selected_iteration"] == 0 for r in successful),
                    refined_selections=sum(r["selected_iteration"] > 0 for r in successful),
                    selected_final_iteration=sum(r["selected_iteration"] == r["n_iter"] for r in successful),
-                   selected_at_budget=sum(r["selected_iteration"] == config["iterations"] for r in successful) if config else 0,
-                   selected_near_budget=sum(r["selected_iteration"] >= .9*config["iterations"] for r in successful) if config else 0,
+                   selected_budget_counts=_counter(_selected_budget(r) for r in successful),
+                   selected_at_budget=sum(r["selected_iteration"] == _selected_budget(r) for r in successful) if config else 0,
+                   selected_near_budget=sum(r["selected_iteration"] >= .9*_selected_budget(r) for r in successful) if config else 0,
                    optimization_converged=sum(r["diagnostics"]["optimization_converged"] for r in successful),
                    selected_converged=sum(r["diagnostics"]["selected_converged"] for r in successful),
                    max_iterations=sum(r["termination_reason"] == "max_iterations" for r in successful),

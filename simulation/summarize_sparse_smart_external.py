@@ -25,6 +25,8 @@ from run_sparse_smart_tuned import result_path as previous_result_path
 from summarize_sparse_smart import DEFAULT_REFERENCE, _stats
 from summarize_sparse_smart_tuned import (
     _finite, _integer, _paper_reference, _require, _validate_validation_history,
+    _candidate_grid, _candidate_budget, _selected_budget, _validate_selected_budget,
+    _validate_checkpoint_metadata,
     validate_record as validate_previous_record,
 )
 
@@ -35,6 +37,8 @@ HISTORICAL_SOLVER_SETTINGS = {"initialization_spectrum": "reject", "refinement_s
 
 def _config(value):
     value = dict(value)
+    if value.get("iteration_budgets") is not None:
+        value["iteration_budgets"] = tuple(value["iteration_budgets"])
     for key, historical_value in HISTORICAL_SOLVER_SETTINGS.items():
         value.setdefault(key, historical_value)
     for key in ("init_penalties", "penalties_u", "penalties_v"):
@@ -47,13 +51,13 @@ def _config(value):
 
 
 def _expected_configuration(setting, config, saved):
-    """Allow only the two new solver keys to be absent in historical records.
+    """Normalize absent historical solver and checkpoint-budget settings.
 
     Decoding assigns the historical algorithms, not today's auto defaults.
     The saved object remains untouched for the original identity/hash check.
     """
     expected = _json_value(external_runner.resolved_configuration(setting, config))
-    for key in HISTORICAL_SOLVER_SETTINGS:
+    for key in (*HISTORICAL_SOLVER_SETTINGS, "iteration_budgets"):
         if key not in saved["runner"]:
             del expected["runner"][key]
     return expected
@@ -73,18 +77,19 @@ def _validate_selection(record, config, resolved):
     _require(record["applicable"] is True, "All six requested Model I settings must be applicable")
     _require(status != "inapplicable", "An applicable external setting is marked inapplicable")
     candidates = record["selection_history"]
-    grid = [dict(init_penalty=li, penalty_u=lu, penalty_v=lv,
-                 support_limits=pair, step_size_inverse=config.inverse_step)
-            for li, lu, lv, pair in product(config.init_penalties, config.penalties_u,
-                config.penalties_v, resolved["support_limits"])]
+    grid = _candidate_grid(config, resolved["support_limits"])
     _require(len(candidates) <= len(grid), "Too many candidate records")
     if status in ("complete", "all_candidates_failed"):
         _require(len(candidates) == len(grid), "Incomplete candidate search")
     for index, candidate in enumerate(candidates):
-        _require(candidate["candidate_id"] == index and candidate["params"] == grid[index],
+        budget, params = grid[index]
+        _require(_candidate_budget(candidate, config) == budget, "Candidate budget order mismatch")
+        _require(candidate["candidate_id"] == index and candidate["params"] == params,
                  "Candidate identity or tuning grid mismatch")
         _require(type(candidate["success"]) is bool, "Invalid candidate success flag")
-        _integer(candidate["n_iter"], "candidate iterations", config.iterations)
+        _integer(candidate["n_iter"], "candidate iterations", budget)
+        if candidate["success"] and candidate["termination_reason"] == "max_iterations":
+            _require(candidate["n_iter"] == budget, "Candidate stopped below its iteration budget")
         if candidate["success"]:
             _require(candidate["status"] in ("completed", "converged"),
                      "Failed candidate marked successful")
@@ -93,7 +98,9 @@ def _validate_selection(record, config, resolved):
             _require(candidate["validation_mse"] is None,
                      "Failed candidate must not have an eligible validation score")
     _require(record["fit_errors"] == [c for c in candidates if not c["success"]],
-             "fit_errors does not match failed candidate records")
+              "fit_errors does not match failed candidate records")
+    _validate_checkpoint_metadata(record, config,
+                                 len(grid) // len(config.iteration_budgets or (config.iterations,)))
     eligible = [c for c in candidates if c["success"]]
     if not record["success"]:
         _require(record["avg_err"] is None, "Failed partial error must not count as a successful error")
@@ -104,6 +111,7 @@ def _validate_selection(record, config, resolved):
         return
     _require(record["all_candidates_failed"] is False and eligible, "No successful candidate winner")
     winner = min(eligible, key=lambda c: c["validation_mse"])
+    winner_budget = _validate_selected_budget(record, winner, config)
     _require(record["best_params"] == winner["params"], "Selected candidate is not the validation winner")
     _require(record["selected_iteration"] == winner["selected_iteration"]
              and record["n_iter"] == winner["n_iter"], "Winner iteration mismatch")
@@ -133,7 +141,7 @@ def _validate_selection(record, config, resolved):
     _require(diag["optimization_converged"] == (record["termination_reason"] == "stationarity"),
              "Optimizer convergence/termination mismatch")
     if record["termination_reason"] == "max_iterations":
-        _require(record["n_iter"] == config.iterations, "Iteration limit recorded below configured budget")
+        _require(record["n_iter"] == winner_budget, "Iteration limit recorded below configured budget")
 
 
 def validate_record(record, path, *, setting, seed_id, random_seed, previous):
@@ -280,8 +288,9 @@ def summarize(result_root, reference_path=DEFAULT_REFERENCE, *, seed_ids=(0, 1, 
             earlier_complete=len(previous_success), earlier_failed=len(previous)-len(previous_success),
             earlier_missing=len(seed_ids)-len(previous),
             chosen_initializer=sum(r["selected_iteration"] == 0 for r in successes),
-            selected_at_budget=sum(r["selected_iteration"] == config["iterations"] for r in successes) if config else 0,
-            selected_near_budget=sum(r["selected_iteration"] >= .9*config["iterations"] for r in successes) if config else 0,
+            selected_budget_counts=_counts(_selected_budget(r) for r in successes),
+            selected_at_budget=sum(r["selected_iteration"] == _selected_budget(r) for r in successes) if config else 0,
+            selected_near_budget=sum(r["selected_iteration"] >= .9*_selected_budget(r) for r in successes) if config else 0,
             optimization_converged=sum(r["diagnostics"]["optimization_converged"] for r in successes),
             selected_converged=sum(r["diagnostics"]["selected_converged"] for r in successes),
             max_iterations=sum(r["termination_reason"] == "max_iterations" for r in successes),

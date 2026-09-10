@@ -138,10 +138,10 @@ def run_setting(*, setting: SimulationSetting, model: str, experiment: str, seed
         status="inapplicable" if reason else "failed", success=False, applicable=reason is None,
         estimator_status=None, failure_reason=reason, failure_message=None, all_candidates_failed=False,
         avg_err=None, initial_avg_err=None, C_hat=None, best_params=None, validation_loss=None,
-        selected_iteration=None, n_iter=0, selected_supports=None, termination_reason=None,
+        selected_iteration=None, selected_budget=None, selected_candidate_id=None, n_iter=0, selected_supports=None, termination_reason=None,
         n_train=setting.n, n_validation=config.n_validation, all_training_rows_used=True,
         training_matches_legacy=True, refit_on_all_data=False, split=None,
-        selection_history=[], fit_errors=[], history=[], validation_history=[], diagnostics={},
+        selection_history=[], fit_errors=[], history=[], validation_history=[], diagnostics={}, tuning_diagnostics={},
         fit_time_sec=0., elapsed_time_sec=None, theorem_certified=False,
         source_check_mode="strict" if config.strict_source_check else "empirical",
         error_metric="norm(C_hat-C_star, fro) / sqrt(p*q)",
@@ -162,7 +162,8 @@ def run_setting(*, setting: SimulationSetting, model: str, experiment: str, seed
                 sparsity=tuple(resolved["sparsity"]), margins=sparse_api.Margins(**MARGINS),
                 init_penalties=config.init_penalties, penalties_u=config.penalties_u,
                 penalties_v=config.penalties_v, support_limits=config.support_limits,
-                iterations=config.iterations, step_size_inverse=config.inverse_step,
+                iterations=config.iterations, iteration_budgets=config.iteration_budgets,
+                step_size_inverse=config.inverse_step,
                 enforce_source_accuracy=config.strict_source_check, spectral_step=config.spectral_step,
                 stationarity_tol=config.stationarity_tol,
                 initialization_spectrum=config.initialization_spectrum,
@@ -177,6 +178,9 @@ def run_setting(*, setting: SimulationSetting, model: str, experiment: str, seed
                 best_params=_json_value(getattr(tuner, "best_params_", None)),
                 validation_loss=_json_value(getattr(tuner, "best_score_", None)),
                 selected_iteration=getattr(tuner, "selected_iteration_", None),
+                selected_budget=getattr(tuner, "selected_budget_", config.iterations if tuner.success_ else None),
+                selected_candidate_id=getattr(tuner, "selected_candidate_id_", None),
+                tuning_diagnostics=_json_value(getattr(tuner, "diagnostics_", {})),
                 split=_split_metadata(tuner, setting.n, config.n_validation), selection_history=candidates,
                 fit_errors=[entry for entry in candidates if not entry.get("success", False)])
             if tuner.success_:
@@ -219,6 +223,8 @@ def _parser():
     parser.add_argument("--seed-file", type=Path, default=DEFAULT_SEED_FILE)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT/"sparse_smart_external")
     parser.add_argument("--iterations", type=int, default=500)
+    parser.add_argument("--iteration-budgets", type=int, nargs="+",
+                        help="Increasing checkpoint budgets ending at --iterations; default uses one budget")
     parser.add_argument("--init-penalties", type=old_runner._float_grid, default=(.03,))
     parser.add_argument("--penalties-u", type=old_runner._float_grid, default=(.0025,.01,.04))
     parser.add_argument("--penalties-v", type=old_runner._float_grid, default=(.0025,.01,.04))
@@ -238,7 +244,9 @@ def _parser():
 
 def main(argv=None):
     args = _parser().parse_args(argv)
-    config = RunnerConfig(iterations=args.iterations, init_penalties=args.init_penalties,
+    config = RunnerConfig(iterations=args.iterations,
+        iteration_budgets=tuple(args.iteration_budgets) if args.iteration_budgets else None,
+        init_penalties=args.init_penalties,
         penalties_u=args.penalties_u, penalties_v=args.penalties_v, support_limits=args.support_grid,
         inverse_step=args.inverse_step, strict_source_check=args.strict_source_check,
         spectral_step=args.spectral_step, stationarity_tol=args.stationarity_tol,

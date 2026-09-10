@@ -8,15 +8,21 @@ that is tracked in git.
 
 ## 1. Environment
 
-From the repository root:
+Use the shared Python 3.12 environment with scikit-learn 1.9.0. From the
+repository root:
 
 ```bash
-python -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate          # on Windows: .venv\Scripts\activate
-pip install -e ./smart
-pip install -e './bi-smart[test]'
-pip install -r requirements.txt
+python -m pip install -c python-constraints.txt setuptools wheel
+python -m pip install --no-build-isolation -c python-constraints.txt \
+  -e './smart[test]' -e './bi-smart[test]' -e './sparse-smart[test]'
+python environment/check_runtime.py
 ```
+
+The [shared environment guide](../environment/README.md) describes the pinned
+scientific stack used by local runs, CI, and Discovery. The optional single-cell
+dependencies in the top-level `requirements.txt` are not needed for these simulations.
 
 For the baselines implemented in R, install the R packages listed in the top-level
 `R_packages.txt` (`rrpack`, `jsonlite`).
@@ -167,6 +173,11 @@ runner still performs no screening, Wedin gate, data split, cross-weight
 selection, or target-only fallback.
 
 ## 6. HPC orchestration (optional)
+
+On USC Discovery, use the [Discovery Slurm launcher](../hpc/discovery/README.md)
+for all simulations. It configures Discovery modules and account settings,
+isolates each submission and seed, and archives results outside scratch.
+The older templates below require manual adaptation.
 
 The `submit_*_m<model_id>.sh` scripts are Slurm array submissions that fan out
 `rd_seed_id = 0..99` automatically. They are kept as convenient examples; you can run

@@ -42,11 +42,19 @@ class RunnerConfig:
     strict_source_check: bool = False
     spectral_step: str = "projected"
     stationarity_tol: float | None = 1e-6
+    iteration_budgets: tuple[int, ...] | None = None
 
     def validate(self):
         for name, value in (("iterations", self.iterations), ("split_seed", self.split_seed)):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a nonnegative integer")
+        if self.iteration_budgets is not None:
+            budgets = self.iteration_budgets
+            if (not isinstance(budgets, (tuple, list)) or not budgets
+                    or any(type(b) is not int or b <= 0 for b in budgets)
+                    or any(left >= right for left, right in zip(budgets, budgets[1:]))
+                    or budgets[-1] != self.iterations):
+                raise ValueError("iteration_budgets must be positive, strictly increasing, and end at iterations")
         for name in ("init_penalties", "penalties_u", "penalties_v"):
             grid = getattr(self, name)
             if not grid:
@@ -92,7 +100,7 @@ def resolved_configuration(setting, config):
         runner=asdict(config), margins=MARGINS.copy(), rank=rank, source_rank=source_rank,
         sparsity=[sparsity, sparsity], support_limits=[list(pair) for pair in supports],
         actual_complement_counts=list(maximum),
-        candidate_count=len(config.init_penalties) * len(config.penalties_u) * len(config.penalties_v) * len(supports),
+        candidate_count=len(config.iteration_budgets or (config.iterations,)) * len(config.init_penalties) * len(config.penalties_u) * len(config.penalties_v) * len(supports),
         selection_metric="mean((Y_validation - X_validation @ C_hat)**2)",
         selection_inputs=["X", "Y", "observed_source"], tuning_uses_truth=False,
         fit_sample="training_subset", refit_on_all_data=False,
@@ -201,9 +209,9 @@ def run_setting(*, setting: SimulationSetting, model: str, experiment: str, seed
                   status="inapplicable" if reason else "failed", success=False, applicable=reason is None,
                   estimator_status=None, failure_reason=reason, failure_message=None,
                   all_candidates_failed=False, avg_err=None, initial_avg_err=None, C_hat=None,
-                  best_params=None, validation_loss=None, selected_iteration=None, n_iter=0,
+                  best_params=None, validation_loss=None, selected_iteration=None, selected_budget=None, selected_candidate_id=None, n_iter=0,
                   selected_supports=None, termination_reason=None, split=None,
-                  selection_history=[], fit_errors=[], history=[], validation_history=[], diagnostics={},
+                  selection_history=[], fit_errors=[], history=[], validation_history=[], diagnostics={}, tuning_diagnostics={},
                   fit_time_sec=0., elapsed_time_sec=None, theorem_certified=False,
                   source_check_mode="strict" if config.strict_source_check else "empirical",
                   error_metric="norm(C_hat-C_star, fro) / sqrt(p*q)",
@@ -224,7 +232,8 @@ def run_setting(*, setting: SimulationSetting, model: str, experiment: str, seed
                 sparsity=tuple(resolved["sparsity"]), margins=sparse_api.Margins(**MARGINS),
                 init_penalties=config.init_penalties, penalties_u=config.penalties_u,
                 penalties_v=config.penalties_v, support_limits=config.support_limits,
-                iterations=config.iterations, step_size_inverse=config.inverse_step,
+                iterations=config.iterations, iteration_budgets=config.iteration_budgets,
+                step_size_inverse=config.inverse_step,
                 validation_fraction=config.validation_fraction, random_state=config.split_seed,
                 enforce_source_accuracy=config.strict_source_check, spectral_step=config.spectral_step,
                 stationarity_tol=config.stationarity_tol,
@@ -239,6 +248,9 @@ def run_setting(*, setting: SimulationSetting, model: str, experiment: str, seed
                           best_params=_json_value(getattr(tuner, "best_params_", None)),
                           validation_loss=_json_value(getattr(tuner, "best_score_", None)),
                           selected_iteration=getattr(tuner, "selected_iteration_", None),
+                          selected_budget=getattr(tuner, "selected_budget_", config.iterations if tuner.success_ else None),
+                          selected_candidate_id=getattr(tuner, "selected_candidate_id_", None),
+                          tuning_diagnostics=_json_value(getattr(tuner, "diagnostics_", {})),
                           split=_split_metadata(tuner, X.shape[0]), selection_history=candidates,
                           fit_errors=[entry for entry in candidates if not entry.get("success", False)])
             if tuner.success_:
@@ -297,6 +309,8 @@ def _parser():
     parser.add_argument("--seed-file", type=Path, default=DEFAULT_SEED_FILE)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT / "sparse_smart_tuned")
     parser.add_argument("--iterations", type=int, default=500)
+    parser.add_argument("--iteration-budgets", type=int, nargs="+",
+                        help="Increasing checkpoint budgets ending at --iterations; default uses one budget")
     parser.add_argument("--init-penalties", type=_float_grid, default=(.03,))
     parser.add_argument("--penalties-u", type=_float_grid, default=(.0025, .01, .04))
     parser.add_argument("--penalties-v", type=_float_grid, default=(.0025, .01, .04))
@@ -314,7 +328,9 @@ def _parser():
 
 def main(argv: Sequence[str] | None = None):
     args = _parser().parse_args(argv)
-    config = RunnerConfig(iterations=args.iterations, init_penalties=args.init_penalties,
+    config = RunnerConfig(iterations=args.iterations,
+                          iteration_budgets=tuple(args.iteration_budgets) if args.iteration_budgets else None,
+                          init_penalties=args.init_penalties,
                           penalties_u=args.penalties_u, penalties_v=args.penalties_v,
                           support_limits=args.support_grid, inverse_step=args.inverse_step,
                           validation_fraction=args.validation_fraction, split_seed=args.split_seed,

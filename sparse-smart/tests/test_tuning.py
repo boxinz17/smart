@@ -40,14 +40,18 @@ def fake_estimator(monkeypatch):
             self.validation_X, self.validation_Y = (value.copy() for value in validation_data)
             self.source = source
             pu, pv = self.calibration.penalty
-            outcome = self.outcomes.get((pu, pv), {})
+            budget = self.options["iterations"]
+            outcome = self.outcomes.get((budget, pu, pv), self.outcomes.get((pu, pv), {}))
             if "exception" in outcome:
                 raise outcome["exception"]
             self.success_ = outcome.get("success", True)
-            self.status_ = "converged" if self.success_ else "line_search_failed"
-            self.message_, self.termination_reason_ = self.status_, self.status_
-            self.n_iter_, self.selected_iteration_ = 3, outcome.get("selected_iteration", 1)
+            self.status_ = outcome.get("status", "converged" if self.success_ else "line_search_failed")
+            self.message_, self.termination_reason_ = self.status_, outcome.get("termination_reason", self.status_)
+            self.n_iter_ = outcome.get("n_iter", budget)
+            self.selected_iteration_ = outcome.get("selected_iteration", min(1, self.n_iter_))
             self.validation_history_ = [{"iteration": 0, "loss": 9.}, {"iteration": 1, "loss": 1.}]
+            self.history_ = [{"iteration": self.n_iter_, "budget": budget}]
+            self.diagnostics_ = {"budget_marker": budget, "candidate_marker": (pu, pv)}
             if outcome.get("has_coefficient", True):
                 self.coefficient_ = np.zeros((X.shape[1], Y.shape[1]))
                 self.coefficient_[0, 0] = outcome.get("coefficient", pu + pv)
@@ -213,7 +217,8 @@ def test_truth_is_not_an_input(data):
         _tuner().fit(X, Y, source=source, C_star=np.zeros((3, 2)))
 
 
-def test_real_fit_selects_a_recorded_validation_iterate_and_preserves_training_size():
+@pytest.mark.parametrize("iteration_budgets", [None, (3, 10)])
+def test_real_fit_selects_a_recorded_validation_iterate_and_preserves_training_size(iteration_budgets):
     rng = np.random.default_rng(194)
     X = rng.normal(size=(100, 4))
     C = np.zeros((4, 3))
@@ -223,7 +228,7 @@ def test_real_fit_selects_a_recorded_validation_iterate_and_preserves_training_s
     fitted = SparseSMARTTuner(
         rank=1, source_rank=2, sparsity=(1, 1), margins=Margins(.05, 6., .01),
         init_penalties=(.01,), penalties_u=(.001, .01), penalties_v=(.003,),
-        iterations=10, step_size_inverse=5., random_state=22,
+        iterations=10, iteration_budgets=iteration_budgets, step_size_inverse=5., random_state=22,
     ).fit(X, Y, source=source)
     assert fitted.success_, fitted.selection_history_
     assert fitted.training_sample_count_ == 80 and fitted.validation_sample_count_ == 20
@@ -235,3 +240,10 @@ def test_real_fit_selects_a_recorded_validation_iterate_and_preserves_training_s
     assert fitted.model_.calibration_.support_limits == (1, 1)
     assert len(fitted.model_.validation_history_) == fitted.model_.n_iter_ + 1
     assert not fitted.diagnostics_["theorem_certified"]
+    assert fitted.model_ is fitted.checkpoints_[fitted.selected_budget_]
+    assert fitted.model_.iterations == fitted.selected_budget_
+    assert fitted.best_score_ == min(record["validation_mse"] for record in fitted.selection_history_ if record["success"])
+    if iteration_budgets is not None:
+        assert fitted.n_candidates_ == 4
+        for old, new in zip(fitted.selection_history_[:2], fitted.selection_history_[2:]):
+            assert new["validation_history"][:len(old["validation_history"])] == old["validation_history"]

@@ -50,6 +50,8 @@ def fit_cell(task):
         seed_id=seed_id, outcome=outcome, status=result["status"], avg_err=result["avg_err"],
         n_train=result["n_train"], n_validation=result["n_validation"],
         failure_reason=result["failure_reason"], selected_iteration=result["selected_iteration"],
+        selected_budget=result.get("selected_budget"),
+        selected_candidate_id=result.get("selected_candidate_id"),
         termination_reason=result["termination_reason"],
         candidate_count=len(result["selection_history"]), failed_candidates=len(result["fit_errors"]),
         fit_time_sec=result["fit_time_sec"], path=str(destination), reused_from=reused_from)
@@ -74,6 +76,8 @@ def main(argv=None):
     parser.add_argument("--seed-file", type=Path, default=DEFAULT_SEED_FILE)
     parser.add_argument("--output-root", type=Path, default=HERE / "result" / "sparse_smart_external")
     parser.add_argument("--iterations", type=int, default=500)
+    parser.add_argument("--iteration-budgets", type=int, nargs="+",
+                        help="Increasing checkpoint budgets ending at --iterations; default uses one budget")
     parser.add_argument("--profile", choices=("full", "difficult"), default="full")
     parser.add_argument("--initialization-spectrum", choices=("auto", "projected", "reject"), default="auto")
     parser.add_argument("--refinement-solver", choices=("auto", "chart", "anchor_projected"), default="auto")
@@ -86,6 +90,7 @@ def main(argv=None):
     if len(set(args.models)) != len(args.models) or len(set(args.experiments)) != len(args.experiments):
         parser.error("model and experiment lists must not contain duplicates")
     config = RunnerConfig(iterations=args.iterations,
+        iteration_budgets=tuple(args.iteration_budgets) if args.iteration_budgets else None,
         initialization_spectrum=args.initialization_spectrum, refinement_solver=args.refinement_solver)
     try:
         config.validate()

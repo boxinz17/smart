@@ -9,23 +9,27 @@ on:
 jobs:
   pytest:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up standardized Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version-file: .python-version
           cache: pip
+          cache-dependency-path: python-constraints.txt
+
+      - name: Install pinned build and test tools
+        run: python -m pip install --constraint python-constraints.txt setuptools wheel pytest
 
       - name: Install project packages and test dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ./smart[test]
-          pip install -e ./bi-smart[test]
+          python -m pip install --constraint python-constraints.txt --no-build-isolation -e './smart[test]' -e './bi-smart[test]' -e './sparse-smart[test]'
+
+      - name: Verify standardized runtime
+        run: |
+          python -m pip check
+          python environment/check_runtime.py
 
       - name: Run pytest
         # The two package suites both use a top-level ``tests`` package, so

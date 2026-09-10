@@ -1,0 +1,3 @@
+# Compatibility path; local development, CI, and Discovery use the root pins.
+# Relative includes are resolved from this file's directory by pip.
+-c ../../python-constraints.txt

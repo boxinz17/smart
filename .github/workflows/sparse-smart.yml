@@ -2,9 +2,9 @@ name: sparse-smart
 
 on:
   push:
-    paths: ["sparse-smart/**", "simulation/run_sparse_smart*.py", "simulation/tests/test_run_sparse_smart*.py", ".github/workflows/sparse-smart.yml"]
+    paths: ["sparse-smart/**", "simulation/run_sparse_smart*.py", "simulation/tests/test_run_sparse_smart*.py", ".github/workflows/sparse-smart.yml", ".python-version", "python-constraints.txt", "environment/check_runtime.py"]
   pull_request:
-    paths: ["sparse-smart/**", "simulation/run_sparse_smart*.py", "simulation/tests/test_run_sparse_smart*.py", ".github/workflows/sparse-smart.yml"]
+    paths: ["sparse-smart/**", "simulation/run_sparse_smart*.py", "simulation/tests/test_run_sparse_smart*.py", ".github/workflows/sparse-smart.yml", ".python-version", "python-constraints.txt", "environment/check_runtime.py"]
 
 jobs:
   package:
@@ -12,16 +12,21 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version-file: .python-version
+      - name: Install pinned build tools
+        run: python -m pip install --constraint python-constraints.txt setuptools wheel
       - name: Build wheel
-        run: python -m pip wheel --no-deps ./sparse-smart --wheel-dir wheelhouse
+        run: python -m pip wheel --constraint python-constraints.txt --no-build-isolation --no-deps ./sparse-smart --wheel-dir wheelhouse
       - name: Install wheel and test runner
-        run: python -m pip install wheelhouse/*.whl pytest
+        run: python -m pip install --constraint python-constraints.txt wheelhouse/*.whl pytest
+      - name: Verify standardized runtime
+        run: |
+          python -m pip check
+          python environment/check_runtime.py
       - name: Test installed package
         run: python -m pytest -q sparse-smart/tests --import-mode=importlib
       - name: Run examples

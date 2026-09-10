@@ -23,7 +23,9 @@ from run_restricted_rrr import DEFAULT_SEED_FILE, experiment_settings, load_expe
 from run_sparse_smart import _digest_json, _json_value
 from summarize_sparse_smart import DEFAULT_REFERENCE, _stats
 from summarize_sparse_smart_external import _config, _expected_configuration, _fingerprint, _paper_provenance
-from summarize_sparse_smart_tuned import _finite, _integer, _paper_reference, _require, _validate_validation_history
+from summarize_sparse_smart_tuned import (_finite, _integer, _paper_reference, _require,
+    _validate_validation_history, _candidate_grid, _candidate_budget, _selected_budget, _validate_selected_budget,
+    _validate_checkpoint_metadata)
 
 HERE = Path(__file__).resolve().parent
 MODEL_DIMS = ((100, 50), (150, 100), (300, 200))
@@ -63,21 +65,23 @@ def _validate_selection(record, setting, config, resolved):
                  and record["best_params"] is None and record["split"] is None
                  and record["n_iter"] == 0 and record["all_candidates_failed"] is False,
                  "Inapplicable record contains fitted or successful output")
+        _validate_checkpoint_metadata(record, config, 1)  # There are no candidate positions.
         return
     _require(status != "inapplicable", "Applicable setting is marked inapplicable")
     candidates = record["selection_history"]
-    grid = [dict(init_penalty=li, penalty_u=lu, penalty_v=lv, support_limits=pair,
-                 step_size_inverse=config.inverse_step)
-            for li, lu, lv, pair in product(config.init_penalties, config.penalties_u,
-                                           config.penalties_v, resolved["support_limits"])]
+    grid = _candidate_grid(config, resolved["support_limits"])
     _require(len(candidates) <= len(grid), "Too many candidate records")
     if status in ("complete", "all_candidates_failed"):
         _require(len(candidates) == len(grid), "Incomplete candidate search")
     for index, candidate in enumerate(candidates):
-        _require(candidate["candidate_id"] == index and candidate["params"] == grid[index],
+        budget, params = grid[index]
+        _require(_candidate_budget(candidate, config) == budget, "Candidate budget order mismatch")
+        _require(candidate["candidate_id"] == index and candidate["params"] == params,
                  "Candidate identity or tuning grid mismatch")
         _require(type(candidate["success"]) is bool, "Invalid candidate success flag")
-        _integer(candidate["n_iter"], "candidate iterations", config.iterations)
+        _integer(candidate["n_iter"], "candidate iterations", budget)
+        if candidate["success"] and candidate["termination_reason"] == "max_iterations":
+            _require(candidate["n_iter"] == budget, "Candidate stopped below its iteration budget")
         if candidate["success"]:
             _require(candidate["status"] in ("completed", "converged"), "Failed candidate marked successful")
             _validate_validation_history(candidate)
@@ -85,7 +89,9 @@ def _validate_selection(record, setting, config, resolved):
             _require(candidate["validation_mse"] is None,
                      "Failed candidate must not have an eligible validation score")
     _require(record["fit_errors"] == [c for c in candidates if not c["success"]],
-             "fit_errors does not match candidate failures")
+              "fit_errors does not match candidate failures")
+    _validate_checkpoint_metadata(record, config,
+                                 len(grid) // len(config.iteration_budgets or (config.iterations,)))
     eligible = [c for c in candidates if c["success"]]
     if not record["success"]:
         _require(record["avg_err"] is None, "Failed partial error cannot count as successful")
@@ -96,6 +102,7 @@ def _validate_selection(record, setting, config, resolved):
         return
     _require(record["all_candidates_failed"] is False and eligible, "No eligible winner")
     winner = min(eligible, key=lambda c: c["validation_mse"])
+    winner_budget = _validate_selected_budget(record, winner, config)
     _require(record["best_params"] == winner["params"], "Selected candidate is not the validation winner")
     _require(record["selected_iteration"] == winner["selected_iteration"]
              and record["n_iter"] == winner["n_iter"], "Winner iteration mismatch")
@@ -123,7 +130,7 @@ def _validate_selection(record, setting, config, resolved):
     _require(diagnostics["optimization_converged"] == (record["termination_reason"] == "stationarity"),
              "Optimizer convergence/termination mismatch")
     if record["termination_reason"] == "max_iterations":
-        _require(record["n_iter"] == config.iterations, "Iteration limit recorded below configured budget")
+        _require(record["n_iter"] == winner_budget, "Iteration limit recorded below configured budget")
 
 
 def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_seed,
@@ -282,8 +289,9 @@ def summarize(result_root, reference_path=DEFAULT_REFERENCE, *, model_ids=(0,1,2
             optimization_converged=sum(r["diagnostics"]["optimization_converged"] for r in successful),
             selected_converged=sum(r["diagnostics"]["selected_converged"] for r in successful),
             max_iterations=sum(r["termination_reason"] == "max_iterations" for r in successful),
-            selected_near_budget=sum(r["selected_iteration"] >= .9*config["iterations"] for r in successful) if config else 0,
-            selected_at_budget=sum(r["selected_iteration"] == config["iterations"] for r in successful) if config else 0,
+            selected_near_budget=sum(r["selected_iteration"] >= .9*_selected_budget(r) for r in successful) if config else 0,
+            selected_budget_counts=_counts(_selected_budget(r) for r in successful),
+            selected_at_budget=sum(r["selected_iteration"] == _selected_budget(r) for r in successful) if config else 0,
             candidate_total=len(candidates),candidate_failed=sum(not c["success"] for c in candidates),
             candidate_failure_counts=_counts(c["status"] for c in candidates if not c["success"]),
             initialization_spectrum_failures=sum(c["status"] == "initialization_spectrum_failed" for c in candidates),

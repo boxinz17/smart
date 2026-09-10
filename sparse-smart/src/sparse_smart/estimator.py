@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import numbers
+from copy import deepcopy
+from dataclasses import dataclass
 import numpy as np
 
 from .anchors import AnchorFailure, select_anchor
@@ -9,7 +11,7 @@ from .calibration import (CalibrationError, Margins, PracticalCalibration,
                           PrescribedCalibration, SourceAccuracyError, resolve_calibration)
 from .chart import AnchorChart
 from .initialization import InitializationFailure, reduced_lasso
-from .solver import refine
+from .solver import refine, _result
 from .source import ExactSource, NoisySource, _positive_real, prepare_source
 from .spectral import project_singular_values
 from .thresholding import hard_threshold
@@ -31,6 +33,36 @@ def _data(value, name):
     return x
 
 
+@dataclass(frozen=True)
+class TrajectoryCheckpoint:
+    """Lightweight successful finite prefix; states use original Z coordinates."""
+    iteration: int
+    state: np.ndarray
+    selected_state: np.ndarray
+    selected_iteration: int
+    best_validation_loss: float | None
+    history_length: int
+    validation_history_length: int
+    status: str
+    termination_reason: str
+    message: str
+
+
+def _checkpoint_schedule(values, iterations):
+    if values is None:
+        return None
+    try:
+        values = tuple(values)
+    except TypeError as error:
+        raise ValueError("checkpoint_iterations must be a sequence of distinct iteration numbers") from error
+    if any(isinstance(value, (bool, np.bool_)) or not isinstance(value, numbers.Integral)
+           or value < 0 or value > iterations for value in values):
+        raise ValueError("checkpoint_iterations must contain integers between zero and iterations")
+    if len(set(values)) != len(values):
+        raise ValueError("checkpoint_iterations must contain distinct iteration numbers")
+    return tuple(sorted(int(value) for value in values))
+
+
 class SparseSMART:
     """Sparse spectral transfer regression from a supplied source experiment.
 
@@ -49,6 +81,7 @@ class SparseSMART:
         tie_tol: float = 1e-12, raise_on_failure: bool = False,
         spectral_step: str = "auto", stationarity_tol: float | None = None,
         initialization_spectrum: str = "auto", refinement_solver: str = "auto",
+        checkpoint_iterations=None, validation_interval: int = 1,
     ):
         if not isinstance(initialization_spectrum, str) or initialization_spectrum not in ("auto", "projected", "reject"):
             raise ValueError("initialization_spectrum must be 'auto', 'projected', or 'reject'")
@@ -64,6 +97,7 @@ class SparseSMART:
         self.spectral_step, self.stationarity_tol = spectral_step, stationarity_tol
         self.initialization_spectrum = initialization_spectrum
         self.refinement_solver = refinement_solver
+        self.checkpoint_iterations, self.validation_interval = checkpoint_iterations, validation_interval
 
     def _failure(self, status, message):
         self.status_, self.message_, self.success_ = status, str(message), False
@@ -110,9 +144,12 @@ class SparseSMART:
         for name, value, minimum in (
             ("iterations", self.iterations, 0), ("max_backtracks", self.max_backtracks, 0),
             ("lasso_max_iter", self.lasso_max_iter, 1), ("qr_max_exchanges", self.qr_max_exchanges, 1),
+            ("validation_interval", self.validation_interval, 1),
         ):
             if isinstance(value, (bool, np.bool_)) or not isinstance(value, numbers.Integral) or value < minimum:
                 raise ValueError(f"{name} must be an integer >= {minimum}")
+        requested_checkpoints = _checkpoint_schedule(self.checkpoint_iterations, self.iterations)
+        self.checkpoints_, self.checkpoint_iterations_ = {}, ()
         for name, value in (("lasso_tol", self.lasso_tol),
                             ("orthogonality_tol", self.orthogonality_tol), ("tie_tol", self.tie_tol)):
             _positive_real(value, name)
@@ -257,7 +294,18 @@ class SparseSMART:
 
         def observe(iteration, state, record):
             nonlocal selected_state, selected_iteration
-            if validation_data is None:
+            self.history_.append(record)
+            self.n_iter_ = iteration
+            eligible = (iteration == 0 or iteration % self.validation_interval == 0
+                        or requested_checkpoints is not None and iteration in requested_checkpoints)
+            if validation_data is not None and eligible:
+                evaluate_validation(iteration, state)
+            if requested_checkpoints is not None and iteration in requested_checkpoints:
+                capture(iteration, state, record)
+
+        def evaluate_validation(iteration, state):
+            nonlocal selected_state, selected_iteration
+            if self.validation_history_ and self.validation_history_[-1]["iteration"] == iteration:
                 return
             P, d, Q = self.chart_.reconstruct(state)
             prediction = ((validation_design @ P) * d) @ (self.source_.right @ Q).T
@@ -270,15 +318,52 @@ class SparseSMART:
                 self.best_validation_loss_ = score
                 selected_state, selected_iteration = state.copy(), iteration
 
+        def capture(iteration, state, record, *, terminal=None):
+            # Solvers also observe an accepted state whose subsequent gradient
+            # evaluation failed. That record is not a successful finite prefix.
+            if (not np.all(np.isfinite(state))
+                    or any(value is None or not np.isfinite(value) for value in
+                           (record.objective, record.smooth_loss, record.penalty_value,
+                            record.raw_gradient_norm))):
+                return
+            status, reason = "completed", "max_iterations"
+            message = f"Completed {iteration} refinement updates in a retained trajectory prefix."
+            if terminal is not None:
+                status, reason, message = terminal.status, terminal.termination_reason, terminal.message
+            elif (iteration > 0 and self.stationarity_tol is not None
+                  and record.mapping_domain_reason is None
+                  and record.projected_gradient_norm is not None
+                  and record.projected_gradient_norm <= self.stationarity_tol):
+                status, reason = "converged", "stationarity"
+                message = "The retained trajectory prefix meets the stationarity tolerance."
+            endpoint = state.copy()
+            chosen = state.copy() if selected_state is None else selected_state.copy()
+            endpoint.setflags(write=False)
+            chosen.setflags(write=False)
+            self.checkpoints_[iteration] = TrajectoryCheckpoint(
+                iteration, endpoint, chosen, iteration if selected_iteration is None else selected_iteration,
+                self.best_validation_loss_, len(self.history_), len(self.validation_history_),
+                status, reason, message)
+            self.checkpoint_iterations_ = tuple(sorted(self.checkpoints_))
+
         solver_options = dict(calibration=self.calibration_, margins=self.margins,
             iterations=self.iterations, max_backtracks=self.max_backtracks, loss_offset=loss_offset,
             stationarity_tol=self.stationarity_tol,
-            iterate_callback=observe if validation_data is not None else None)
+            iterate_callback=observe if validation_data is not None or requested_checkpoints is not None else None)
         if self.refinement_solver_ == "anchor_projected":
             from .anchor_solver import refine_anchor_projected
             result = refine_anchor_projected(self.chart_, x0, Z, W, **solver_options)
         else:
             result = refine(self.chart_, x0, Z, W, spectral_step=self.spectral_step_, **solver_options)
+        if result.success and result.termination_reason == "stationarity":
+            if validation_data is not None:
+                evaluate_validation(result.n_iter, result.state)
+            if requested_checkpoints is not None and result.history:
+                capture(result.n_iter, result.state, result.history[-1], terminal=result)
+        return self._finalize_refinement(result, selected_state, selected_iteration)
+
+    def _finalize_refinement(self, result, selected_state, selected_iteration):
+        """Finalize either the solver result or a captured successful prefix."""
         self.result_, self.last_state_ = result, result.state.copy()
         self.state_ = self.last_state_.copy() if selected_state is None else selected_state
         self.selected_iteration_ = result.n_iter if selected_iteration is None else selected_iteration
@@ -303,6 +388,19 @@ class SparseSMART:
             raw_gradient_norm=(selected_record.raw_gradient_norm if selected_record else None),
             last_projected_gradient_norm=result.projected_gradient_norm,
             last_raw_gradient_norm=result.raw_gradient_norm,
+            mapping_displacement=(selected_record.mapping_displacement if selected_record else None),
+            proximal_uncertainty=(selected_record.proximal_uncertainty if selected_record else None),
+            mapping_refinements=(selected_record.mapping_refinements if selected_record else 0),
+            mapping_precision_limited=(selected_record.mapping_precision_limited if selected_record else False),
+            last_mapping_displacement=result.mapping_displacement,
+            last_proximal_uncertainty=result.proximal_uncertainty,
+            last_mapping_refinements=result.mapping_refinements,
+            last_mapping_precision_limited=result.mapping_precision_limited,
+            precision_limited=(result.status == "numerical_stagnation" or result.mapping_precision_limited),
+            objective_change=(selected_record.objective_change if selected_record else None),
+            relative_step_norm=(selected_record.relative_step_norm if selected_record else None),
+            line_search_strategy=("previous_accepted_half_inverse" if self.refinement_solver_ == "anchor_projected"
+                                  else "reset_initial_inverse"),
             optimization_converged=self.optimization_converged_, selected_converged=self.converged_,
             selected_iteration=self.selected_iteration_,
             best_validation_loss=self.best_validation_loss_,
@@ -314,6 +412,34 @@ class SparseSMART:
         self.status_, self.message_, self.success_ = result.status, result.message, True
         self.diagnostics_["status"] = result.status
         return self
+
+    def checkpoint_model(self, iteration):
+        """Reconstruct an independent fitted view of an available finite prefix.
+
+        This does not rerun initialization or refinement. The selected state
+        and validation minimum are limited to observations eligible by this
+        checkpoint; the endpoint is retained separately as ``last_state_``.
+        """
+        if (isinstance(iteration, (bool, np.bool_)) or not isinstance(iteration, numbers.Integral)
+                or iteration < 0):
+            raise ValueError("checkpoint iteration must be a nonnegative integer")
+        snapshot = getattr(self, "checkpoints_", {}).get(int(iteration))
+        if snapshot is None:
+            raise FitFailure("checkpoint_unavailable", f"No successful finite prefix is available at iteration {iteration}.")
+        view = object.__new__(type(self))
+        excluded = {"checkpoints_", "history_", "validation_history_", "result_"}
+        view.__dict__ = deepcopy({key: value for key, value in vars(self).items() if key not in excluded})
+        view.iterations = snapshot.iteration
+        view.checkpoints_ = deepcopy({key: value for key, value in self.checkpoints_.items()
+                                     if key <= snapshot.iteration})
+        view.checkpoint_iterations_ = tuple(sorted(view.checkpoints_))
+        view.checkpoint_iterations = view.checkpoint_iterations_
+        view.validation_history_ = deepcopy(self.validation_history_[:snapshot.validation_history_length])
+        view.best_validation_loss_ = snapshot.best_validation_loss
+        result = _result(snapshot.state.copy(), snapshot.status, snapshot.message, snapshot.iteration,
+                         deepcopy(self.history_[:snapshot.history_length]),
+                         termination_reason=snapshot.termination_reason)
+        return view._finalize_refinement(result, snapshot.selected_state.copy(), snapshot.selected_iteration)
 
     def predict(self, X, *, allow_partial: bool = False):
         """Predict with low-rank products; failed partial fits require opt-in."""

@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+import sparse_smart.initialization as initialization
 from sparse_smart.initialization import reduced_lasso
 
 
@@ -34,6 +35,43 @@ def test_lasso_handles_more_source_coordinates_than_samples():
     inactive = result.coefficient == 0
     assert np.max(np.abs(gradient[inactive])) <= 0.2 + 1e-7
     np.testing.assert_allclose(gradient[~inactive], -0.2 * np.sign(result.coefficient[~inactive]), atol=1e-7)
+    zero_columns = ~np.any(response, axis=0)
+    np.testing.assert_array_equal(result.n_iter[zero_columns], 0)
+    np.testing.assert_array_equal(result.dual_gaps[zero_columns], 0.)
+    nonzero = reduced_lasso(design, response[:, ~zero_columns], 2, 0.2)
+    np.testing.assert_array_equal(result.coefficient[:, ~zero_columns], nonzero.coefficient)
+
+
+def test_zero_response_is_solved_exactly_without_calling_lasso(monkeypatch):
+    def unexpected_solver(**kwargs):
+        raise AssertionError("zero responses must not call the numerical solver")
+    monkeypatch.setattr(initialization, "Lasso", unexpected_solver)
+    design = np.random.default_rng(19).normal(size=(3, 5))
+    result = reduced_lasso(design, np.zeros((3, 4)), 2, .1, max_iter=1)
+    assert result.converged and result.kkt_residual == 0.
+    np.testing.assert_array_equal(result.coefficient, np.zeros((5, 4)))
+    np.testing.assert_array_equal(result.dual_gaps, np.zeros(4))
+    np.testing.assert_array_equal(result.n_iter, np.zeros(4, dtype=int))
+    np.testing.assert_array_equal(result.d, np.zeros(2))
+
+
+def test_tiny_nonzero_response_is_not_classified_as_zero(monkeypatch):
+    def reached_solver(**kwargs):
+        raise RuntimeError("nonzero response reached solver")
+    monkeypatch.setattr(initialization, "Lasso", reached_solver)
+    # Squaring these entries underflows; a norm or allclose check is unsafe.
+    with pytest.raises(RuntimeError, match="nonzero response reached solver"):
+        reduced_lasso(np.ones((3, 1)), np.full((3, 1), 1e-200), 1, .1)
+
+
+def test_zero_columns_do_not_hide_nonconvergence_in_other_columns():
+    rng = np.random.default_rng(45)
+    design = rng.normal(size=(20, 40))
+    response = np.column_stack((np.zeros(20), rng.normal(size=20), np.zeros(20)))
+    result = reduced_lasso(design, response, 2, .001, max_iter=1, tol=1e-12)
+    assert not result.converged
+    np.testing.assert_array_equal(result.n_iter, [0, 1, 0])
+    np.testing.assert_array_equal(result.coefficient[:, [0, 2]], np.zeros((40, 2)))
 
 
 def test_lasso_nonconvergence_is_reported():
