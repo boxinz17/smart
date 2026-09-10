@@ -142,16 +142,51 @@ def _transitions(caps,absolute,relative):
 
 def _configuration(record, setting):
     options = dict(record["configuration"]["runner"])
-    for name in ("iteration_budgets", "init_penalties", "penalties_u", "penalties_v"):
+    legacy_validation = "validation_iterations" not in options
+    if legacy_validation:
+        options["validation_iterations"] = ()
+    for name in ("iteration_budgets", "init_penalties", "penalties_u", "penalties_v", "validation_iterations"):
         if name in options:
             options[name] = tuple(options[name])
     config = runner.RunnerConfig(**options)
     config.validate()
-    _require(record["configuration"] == _json_value(runner.resolved_configuration(setting, config)),
+    expected = _json_value(runner.resolved_configuration(setting, config))
+    if legacy_validation:
+        expected["runner"].pop("validation_iterations")
+        for key in ("validation_iterations", "validation_schedule", "validation_state_policy"):
+            expected.pop(key)
+    _require(record["configuration"] == expected,
              "Resolved study configuration mismatch")
     _require(record["configuration"]["runner"]["checkpoint_execution"] == "continuous",
              "Budget study requires continuous candidate trajectories")
     return config
+
+
+_VALIDATION_AUDIT_COUNTS = ("evaluated_points", "factor_verified_points", "metadata_only_points",
+                          "verified_pairwise_comparisons", "metadata_only_pairwise_comparisons")
+
+
+def _validation_audit_totals(values=()):
+    values = list(values)
+    result = {key: sum(value.get(key, 0) for value in values) for key in _VALIDATION_AUDIT_COUNTS}
+    result["all_validation_points_factor_verified"] = result["metadata_only_points"] == 0
+    return result
+
+
+def _validation_bests(history):
+    """Replay scalar decisions, retaining every historical incumbent iteration."""
+    history_winner(history)  # Includes ordered pairwise-incumbent consistency checks.
+    best = None
+    retained = set()
+    pairwise = pairwise_selection(history)
+    keys = selection_keys(history, "loss") if not pairwise else None
+    for i, row in enumerate(history):
+        improves = (best is None or (row["selection_comparison"]["loss_difference"] < 0
+                    if pairwise else keys[i] < keys[best]))
+        if improves:
+            best = i
+            retained.add(row["iteration"])
+    return retained
 
 
 def _data(setting, seed, config, cache, generator):
@@ -248,7 +283,8 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
             setting=setting.suffix, seed_id=seed_id, status="inapplicable", applicable=False,
             inapplicability_reason=inapplicability, missing=False, caps=[],
             trajectory_status_counts={}, trajectory_final_diagnostics=[], failed_trajectories=0,
-            verified_factor_states=0, configuration=_json_value(asdict(config)),
+            verified_factor_states=0, validation_audit=_validation_audit_totals(),
+            configuration=record["configuration"]["runner"],
             implementation_fingerprint=record["implementation_fingerprint"])
     grid = record["configuration"]["candidate_grid"]
     trajectories = record["trajectories"]
@@ -256,13 +292,41 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
     stable_selection = "selection_score" in record
     pairwise = pairwise_selection([record])
     reference = record.get("validation_reference_prediction")
+    reference_mapping = record.get("trajectory_validation_references")
+    merged = "tuning_shard_merge" in record
+    if merged:
+        _require(pairwise and stable_selection
+                 and record.get("validation_reference_scope") == "trajectory"
+                 and record.get("selection_reference") == {
+                     "kind": "per_trajectory", "mapping": "trajectory_validation_references"}
+                 and reference is None,
+                 "Merged tuning record must declare per-trajectory validation references")
+        _require(isinstance(reference_mapping, dict)
+                 and set(reference_mapping) == {str(j) for j in range(len(grid))},
+                 "Missing or malformed trajectory validation reference mapping")
+        for item in reference_mapping.values():
+            _require(isinstance(item, dict) and set(item) == {
+                "validation_reference_prediction", "selection_reference"},
+                "Malformed trajectory validation reference entry")
+    else:
+        _require(reference_mapping is None and record.get("validation_reference_scope") in (None, "fit"),
+                 "Ordinary tuning record cannot carry per-trajectory validation references")
     points = {}
     verified_factors = 0
+    validation_audit = _validation_audit_totals()
     for j, trajectory in enumerate(trajectories):
         _require(trajectory["grid_candidate_id"] == j and trajectory["params"] == grid[j], "Trajectory grid mismatch")
         last = _integer(trajectory["n_iter"], "trajectory iterations")
         _require(last <= budgets[-1] and type(trajectory["success"]) is bool, "Invalid terminal trajectory")
         history = trajectory["validation_history"]
+        if merged:
+            reference_entry = reference_mapping[str(j)]
+            reference = reference_entry["validation_reference_prediction"]
+            if history:
+                reference_array = np.asarray(reference, dtype=float)
+                _require(reference_array.shape == data["Y"].shape and np.isfinite(reference_array).all()
+                         and isinstance(reference_entry["selection_reference"], dict),
+                         "Invalid trajectory validation reference")
         indices = _ordered(history, last, "validation history")
         losses = {row["iteration"]:_number(row["loss"], "validation loss") for row in history}
         ranking = dict(zip(indices, selection_values(history, "loss")))
@@ -305,26 +369,56 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
         terminal_stationary = (trajectory["success"] and trajectory["status"] == "converged"
                                and trajectory["termination_reason"] == "stationarity")
         scheduled = {0, *budgets, *range(interval, budgets[-1]+1, interval)}
+        validation_scheduled = set(runner.validation_schedule(config))
         if trajectory["success"]:
             _require(terminal_stationary or (last == budgets[-1] and trajectory["status"] == "completed"
                      and trajectory["termination_reason"] == "max_iterations"), "Inconsistent successful trajectory termination")
             expected = {t for t in scheduled if t <= last} | ({last} if terminal_stationary else set())
-            _require(set(checkpoint_indices) == set(indices) == expected, "Successful trajectory omits scheduled checkpoint or validation")
+            expected_validation = {t for t in validation_scheduled if t <= last} | ({last} if terminal_stationary else set())
+            _require(set(checkpoint_indices) == expected and set(indices) == expected_validation,
+                     "Successful trajectory omits scheduled checkpoint or validation")
         elif optimization:
             # A terminal failed accepted state may lack validation/capture, but
             # failure cannot erase earlier scheduled, completed prefixes.
             required = {t for t in scheduled if t < last}
             allowed = {t for t in scheduled if t <= last}
-            _require(required <= set(checkpoint_indices) <= allowed and required <= set(indices) <= allowed,
+            validation_required = {t for t in validation_scheduled if t < last}
+            validation_allowed = {t for t in validation_scheduled if t <= last}
+            _require(required <= set(checkpoint_indices) <= allowed
+                     and validation_required <= set(indices) <= validation_allowed,
                      "Failed trajectory omits earlier scheduled checkpoint or validation")
         else:
             _require(last == 0 and not checkpoints and not history and not factor_scores,
                      "Trajectory without optimization history contains refinement states")
-        _require(set(factor_scores) == {str(t) for t in checkpoint_indices}, "Factor states differ from certified checkpoints")
+        best_iterations = _validation_bests(history)
+        expected_factors = set(checkpoint_indices) | best_iterations
+        _require(set(factor_scores) == {str(t) for t in expected_factors},
+                 "Factor states differ from certified checkpoints and historical validation bests")
+        _require(expected_factors <= set(optimization_by_iteration),
+                 "Retained validation state omits optimization diagnostics")
         def prediction(row):
             return runner._factor_prediction(trajectory["factor_states"][str(row["iteration"])], data["X"])
-        # Validate the full decision chain against saved factors once.
-        history_winner(history, prediction=prediction if pairwise else None, response=data["Y"])
+        # The full scalar decision chain was checked above. Periodic states and
+        # every historical best are independently rescored; early losers have
+        # no saved parameter state and must not be called factor-verified.
+        validation_audit["evaluated_points"] += len(indices)
+        validation_audit["factor_verified_points"] += len(factor_scores)
+        validation_audit["metadata_only_points"] += len(indices)-len(factor_scores)
+        if pairwise:
+            by_iteration = {row["iteration"]: row for row in history}
+            for row in history:
+                comparison = row["selection_comparison"]
+                incumbent = comparison["incumbent_iteration"]
+                if incumbent is None:
+                    continue
+                if str(row["iteration"]) in factor_scores and str(incumbent) in factor_scores:
+                    actual = pairwise_loss_difference(prediction(row), data["Y"], prediction(by_iteration[incumbent]))
+                    difference = comparison["loss_difference"]
+                    _same(actual, difference, "Pairwise validation difference disagrees with saved factors")
+                    _require((actual < 0) == (difference < 0), "Pairwise validation difference sign mismatch")
+                    validation_audit["verified_pairwise_comparisons"] += 1
+                else:
+                    validation_audit["metadata_only_pairwise_comparisons"] += 1
         previous_checkpoint = 0
         for cp in checkpoints:
             t, selected = cp["checkpoint_iteration"], _integer(cp["selected_iteration"],"selected iteration")
@@ -496,7 +590,8 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
             success=t["success"],n_iter=t["n_iter"],termination_reason=t["termination_reason"],
             diagnostics=_diagnostics(t["history"][-1]) if t["history"] else None) for t in trajectories],
         failed_trajectories=sum(not t["success"] for t in trajectories),verified_factor_states=verified_factors,
-        configuration=_json_value(asdict(config)),implementation_fingerprint=record["implementation_fingerprint"])
+        validation_audit=_validation_audit_totals([validation_audit]),
+        configuration=record["configuration"]["runner"],implementation_fingerprint=record["implementation_fingerprint"])
 
 
 def _aggregate(cells, budgets, absolute, relative, *, model=False):
@@ -630,6 +725,7 @@ def summarize(result_root=DEFAULT_ROOT, *, model_ids=(0,1,2),seed_ids=(0,1,2,3,4
         recorded_inapplicable_cells=sum(not c["applicable"] and not c["missing"] for c in cells),
         missing_inapplicable_cells=sum(not c["applicable"] and c["missing"] for c in cells),
         regenerated_unique_datasets=len(cache.seen_keys),verified_factor_states=sum(c.get("verified_factor_states",0) for c in cells),
+        validation_audit=_validation_audit_totals(c.get("validation_audit", {}) for c in cells),
         configurations=[json.loads(c) for c in configs],
         implementation_fingerprints=sorted(set.union(*implementations.values())),
         implementation_fingerprints_by_applicability={"applicable" if key else "inapplicable": sorted(values)
@@ -653,7 +749,11 @@ def write_outputs(report, output_root):
         ("Scope follows exactly the manifest's declared settings and seeds, including requested cells whose result is still missing."
          if report["manifest_scope"] else "Scope includes the three declared difficult settings for every requested model and saved seed."), "",
         f"A gain is material when it exceeds max({_fmt(report['absolute_threshold'])}, {_fmt(report['relative_threshold'])} × the earlier validation MSE). Both absolute and relative gains are retained per cell in summary.json. These are predeclared practical thresholds, not significance tests.", "",
-        "Cumulative minima retain successful earlier checkpoints, including before a later failure. Current records compare each prediction directly with the incumbent using stable pairwise validation loss differences; zero differences preserve budget-major candidate order and the earliest evaluated iterate. Saved factors independently verify these decisions and pairwise cap gains, even when reported MSE and reference-relative scores round equal. Historical records retain their recorded selection rules. A plateau is not established when any candidate has failed or not reached the comparison cap. Genuine earlier stationarity is checked separately.", "",
+        "Cumulative minima retain successful earlier checkpoints, including before a later failure. Current records compare each prediction directly with the incumbent using stable pairwise validation loss differences; zero differences preserve budget-major candidate order and the earliest evaluated iterate. The full logged decision chain is checked for consistency. Saved factors independently verify retained models, backed comparisons and pairwise cap gains, even when reported MSE and reference-relative scores round equal. Nonimproving extra validation points retain scalar metadata only: their scores and rejection decisions cannot be independently recomputed from parameter states. Historical records retain their recorded selection rules. A plateau is not established when any candidate has failed or not reached the comparison cap. Genuine earlier stationarity is checked separately.", "",
+        (f"Validation evidence: {report.get('validation_audit', {}).get('evaluated_points', 0)} evaluations; "
+         f"{report.get('validation_audit', {}).get('factor_verified_points', 0)} independently factor-verified, "
+         f"{report.get('validation_audit', {}).get('metadata_only_points', 0)} scalar-only. "
+         "Detailed comparison-coverage counts are recorded in summary.json."), "",
         "## Paired validation gains", "",
         "The 2000 → 8000 comparison is included alongside adjacent caps whenever available: two adjacent gains below the threshold can jointly exceed it.", "",
         "Means and SEs below use only seeds with complete candidate coverage at both caps. Incomplete pairs are explicitly excluded; one pair has no estimable SE. Coefficient errors are descriptive diagnostics and never select stopping or a budget.", "",

@@ -1,9 +1,10 @@
 """Continuous SparseSMART budget study with independently verifiable checkpoints.
 
 This opt-in runner has its own schema and output root. Each parameter grid point
-is fitted once to the maximum budget; validation is evaluated at the declared
-checkpoint interval. Earlier certified prefixes survive a later trajectory
-failure, while unattained comparison caps remain explicitly unresolved.
+is fitted once to the maximum budget; validation uses the checkpoint interval
+plus optional early checks that retain only improving states. Earlier certified
+prefixes survive a later trajectory failure, while unattained comparison caps
+remain explicitly unresolved.
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ import json
 import math
 import multiprocessing
 from pathlib import Path
+import re
 import time
 
 import numpy as np
@@ -44,9 +46,10 @@ SCHEMA_VERSION = 1
 class RunnerConfig:
     iteration_budgets: tuple[int, ...] = (500, 1000, 2000, 4000, 8000)
     checkpoint_interval: int = 250
-    init_penalties: tuple[float, ...] = (.03,)
-    penalties_u: tuple[float, ...] = (.0025, .01, .04)
-    penalties_v: tuple[float, ...] = (.0025, .01, .04)
+    validation_iterations: tuple[int, ...] = (10, 25, 50, 100, 150, 200)
+    init_penalties: tuple[float, ...] = (.01, .03, .1)
+    penalties_u: tuple[float, ...] = (.0025, .01, .04, .16)
+    penalties_v: tuple[float, ...] = (.0025, .01, .04, .16)
     inverse_step: float = 20.
     stationarity_tol: float = 1e-6
     n_validation: int = 100
@@ -69,6 +72,11 @@ class RunnerConfig:
             raise ValueError('iteration_budgets must be positive, unique, and increasing')
         if type(self.checkpoint_interval) is not int or self.checkpoint_interval <= 0:
             raise ValueError('checkpoint_interval must be a positive integer')
+        checks = self.validation_iterations
+        if (not isinstance(checks, (tuple, list))
+                or any(type(t) is not int or t <= 0 for t in checks)
+                or any(a >= b for a, b in zip(checks, checks[1:]))):
+            raise ValueError('validation_iterations must be positive, unique, and increasing (or empty)')
         for name in ('init_penalties', 'penalties_u', 'penalties_v'):
             values = getattr(self, name)
             if (not isinstance(values, (tuple, list)) or not values
@@ -90,6 +98,28 @@ class RunnerConfig:
             raise ValueError('This study requires continuous empirical-source projected-anchor refinement')
 
 
+def parse_validation_iterations(values):
+    """Parse additive validation checks; `none` reproduces periodic-only selection."""
+    if isinstance(values, str):
+        values = [values]
+    if values == ['none']:
+        return ()
+    tokens = [token for value in values for token in value.split(',')]
+    if not tokens or any(re.fullmatch(r'[0-9]+', token) is None for token in tokens):
+        raise ValueError('validation_iterations requires positive integers or the single value none')
+    result = tuple(map(int, tokens))
+    if any(t <= 0 for t in result) or any(a >= b for a, b in zip(result, result[1:])):
+        raise ValueError('validation_iterations must be positive, unique, and increasing')
+    return result
+
+
+def validation_schedule(config):
+    """Planned validation points; successful early stationarity adds its endpoint."""
+    return sorted({0, config.iterations, *config.iteration_budgets,
+                   *range(config.checkpoint_interval, config.iterations+1, config.checkpoint_interval),
+                   *(t for t in config.validation_iterations if t <= config.iterations)})
+
+
 def resolved_configuration(setting, config):
     config.validate()
     rank, source_rank = setting.target_rank, setting.source_rank
@@ -104,6 +134,8 @@ def resolved_configuration(setting, config):
         support_limits=[counts], actual_complement_counts=counts, candidate_grid=grid,
         trajectory_count=len(grid), candidate_count=len(grid)*len(config.iteration_budgets),
         checkpoint_execution='continuous', validation_interval=config.checkpoint_interval,
+        validation_iterations=list(config.validation_iterations), validation_schedule=validation_schedule(config),
+        validation_state_policy='checkpoints_and_validation_bests',
         n_train=setting.n, n_validation=config.n_validation, fit_sample='all_supplied_training_rows',
         validation_mode='independent_external', refit_on_all_data=False, tuning_uses_truth=False,
         selection_metric='mean((Y_validation-X_validation@C_hat)**2)',
@@ -117,7 +149,8 @@ def result_path(output_root, *, model, experiment, setting, seed_id):
 
 def _implementation_files():
     return (*external_runner._implementation_files(), Path(__file__),
-            Path(__file__).with_name("batch_manifest.py"))
+            Path(__file__).with_name("batch_manifest.py"),
+            Path(__file__).with_name("merge_sparse_smart_budget_shards.py"))
 
 
 def _implementation_provenance(api, generator):
@@ -207,9 +240,16 @@ def _encode_trajectory(model, metadata, data):
             value["checkpoints"][-1].update(selection_score=validation_rows[selected]["selection_score"],
                 terminal_selection_score=validation_rows[k]["selection_score"])
         previous_checkpoint = k
-    # Keep diagnostic history once at declared checkpoints and the final endpoint.
+    # Early validation does not create certified checkpoints. Preserve every
+    # improving early state for selection provenance, including superseded bests;
+    # nonimproving early points retain scalar validation metadata only.
+    for k, state in getattr(model, 'best_validation_states_', {}).items():
+        _require(k in history and any(row['iteration'] == k for row in value['validation_history']),
+                 'Early validation best has no diagnostic or validation record')
+        factors(state, k)
+    # Keep diagnostics for checkpoint endpoints, historical bests, and the final endpoint.
     # A final failed partial endpoint is diagnostic-only, never in checkpoints.
-    retained = set(keys) | {getattr(model, 'n_iter_', 0)}
+    retained = set(keys) | {int(k) for k in value['factor_states']} | {getattr(model, 'n_iter_', 0)}
     value['history'] = [history[k] for k in sorted(retained) if k in history]
     return value
 
@@ -338,6 +378,7 @@ def run_setting(*, setting: SimulationSetting, model, experiment, seed_id, rando
             init_penalties=config.init_penalties, penalties_u=config.penalties_u, penalties_v=config.penalties_v,
             support_limits=None, iterations=config.iterations, iteration_budgets=config.iteration_budgets,
             checkpoint_execution='continuous', checkpoint_interval=config.checkpoint_interval,
+            validation_iterations=config.validation_iterations,
             step_size_inverse=config.inverse_step, stationarity_tol=config.stationarity_tol,
             enforce_source_accuracy=False, initialization_spectrum='projected', refinement_solver='anchor_projected',
             spectral_step='projected')
@@ -408,11 +449,13 @@ def main(argv=None):
     parser.add_argument('--setting-index',type=int,help='Original paper-grid index; requires one model and experiment')
     parser.add_argument('--iteration-budgets',type=int,nargs='+',default=[500,1000,2000,4000,8000])
     parser.add_argument('--checkpoint-interval',type=int,default=250)
+    parser.add_argument('--validation-iterations',nargs='+',default=['10,25,50,100,150,200'],
+        help='Extra validation-only iterations (comma/space separated), or none; full checkpoints stay periodic')
     parser.add_argument('--stationarity-tol',type=float,default=1e-6,
         help='Positive constrained stationarity tolerance for early stopping (checked every iteration)')
-    parser.add_argument('--init-penalties',type=external_runner.old_runner._float_grid,default=(.03,))
-    parser.add_argument('--penalties-u',type=external_runner.old_runner._float_grid,default=(.0025,.01,.04))
-    parser.add_argument('--penalties-v',type=external_runner.old_runner._float_grid,default=(.0025,.01,.04))
+    parser.add_argument('--init-penalties',type=external_runner.old_runner._float_grid,default=(.01,.03,.1))
+    parser.add_argument('--penalties-u',type=external_runner.old_runner._float_grid,default=(.0025,.01,.04,.16))
+    parser.add_argument('--penalties-v',type=external_runner.old_runner._float_grid,default=(.0025,.01,.04,.16))
     parser.add_argument('--dry-run',action='store_true')
     args = parser.parse_args(argv)
     seed_ids = args.seed_ids if args.seed_ids is not None else list(range(args.seed_count if args.seed_count is not None else 5))
@@ -420,10 +463,11 @@ def main(argv=None):
             or len(set(seed_ids)) != len(seed_ids) or args.workers < 1
             or len(set(args.models)) != len(args.models) or len(set(args.experiments)) != len(args.experiments)):
         parser.error('Require unique valid models, experiments, seed IDs and positive workers/seed count')
-    config = RunnerConfig(iteration_budgets=tuple(args.iteration_budgets),checkpoint_interval=args.checkpoint_interval,
-        init_penalties=args.init_penalties,penalties_u=args.penalties_u,penalties_v=args.penalties_v,
-        stationarity_tol=args.stationarity_tol)
     try:
+        config = RunnerConfig(iteration_budgets=tuple(args.iteration_budgets),checkpoint_interval=args.checkpoint_interval,
+            validation_iterations=parse_validation_iterations(args.validation_iterations),
+            init_penalties=args.init_penalties,penalties_u=args.penalties_u,penalties_v=args.penalties_v,
+            stationarity_tol=args.stationarity_tol)
         config.validate()
     except ValueError as error:
         parser.error(str(error))

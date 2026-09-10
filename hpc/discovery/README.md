@@ -79,33 +79,61 @@ export R_LIBS_USER="${R_LIBS_USER:-$VENV/R/library}"
 
 Use `submit_budget_study.sh` for `run_sparse_smart_budget_study.py`, whose named
 arguments and batch manifests differ from the per-seed runners supported by
-the generic `submit.sh` below. Preview the complete study on Discovery:
+the generic `submit.sh` below. First preview a three-seed tuning pilot on
+Discovery, covering every model, experiment, and setting:
 
 ```bash
 cd "$HOME/projects/smart"
 bash hpc/discovery/submit_budget_study.sh --workers 32 \
+  --seeds 0-2 --tuning-task-size 1 --validation-iterations 10,25,50,100,150,200 \
+  --init-penalties .01,.03,.1 --penalties-u .0025,.01,.04,.16 \
+  --penalties-v .0025,.01,.04,.16 \
   --time 24:00:00 --mem 8G --stationarity-tol 1e-6 --dry-run
 ```
 
 The dedicated launcher's defaults are **all three models, all four paper
 experiments, all settings, and saved seed IDs 0–99**. Its plan contains 7,200
-cases: 6,300 applicable fits and 900 explicit inapplicable records. The current
+cases: 6,300 applicable cases and 900 explicit inapplicable records. The current
 estimator cannot fit target rank 11 with source rank 10, or target rank 5 with
 source rank 0/3. These cases remain visible in the report; they are not silently
 dropped or fitted using a different method.
 
-Each applicable case tunes the nine left/right penalty pairs from
-`{0.0025, 0.01, 0.04}`, with initialization penalty `0.03`, using all paper-grid
-training rows and 100 independent validation rows. This is 56,700 continuous
-trajectories. It compares budgets **500, 1,000, 2,000, 4,000, and 8,000**, retaining
-checkpoints every 250 updates. The optimizer checks constrained stationarity
+Each applicable case tunes 48 combinations: the initialization penalties
+`{0.01, 0.03, 0.1}` crossed with the left/right penalties
+`{0.0025, 0.01, 0.04, 0.16}`, using all paper-grid
+training rows and 100 independent validation rows. The three-seed pilot above
+contains 216 cases, including 189 applicable cases and 27 explicit exclusions,
+for **9,072 continuous trajectories in 9,099 work items** (including the 27
+inapplicable records). The full 100-seed scope has 302,400 trajectories in
+303,300 work items. It compares budgets **500, 1,000, 2,000, 4,000, and 8,000**, retaining
+regular checkpoints every 250 updates. Additional validation checks at
+**10, 25, 50, 100, 150, and 200** capture useful iterates before the first regular
+checkpoint. Extra validation checks retain factors when they improve the
+validation best; regular checkpoints and budget endpoints retain their states.
+This separates validation frequency from full-state retention. The optimizer checks constrained stationarity
 every iteration and stops early at tolerance `1e-6`, including its proximal
 uncertainty allowance. The maximum budget is a limit, not a convergence claim;
 validation selection and optimization convergence are reported separately.
-`--iteration-budgets`, `--checkpoint-interval`, `--stationarity-tol`,
+`--iteration-budgets`, `--checkpoint-interval`, `--validation-iterations`, `--stationarity-tol`,
 `--init-penalties`, `--penalties-u`, and `--penalties-v` make these choices explicit.
+Additional validation iterations must be positive, unique, and increasing.
+They are combined with regular checkpoints, cap endpoints, and initialization;
+entries above the maximum budget are ignored during fitting. Use
+`--validation-iterations none` to disable only the additional checks. The
+declared schedule remains part of the saved configuration and provenance.
+
+The expanded refinement grid and denser early validation address two separate
+uncertainties in the previous pilot: upper-bound penalty selections and
+selections at the first available positive checkpoint. Initialization is also
+tuned over `0.01, 0.03, 0.1` by default, giving 48 combinations with the
+4-by-4 refinement grid. Task splitting covers
+all three tuning dimensions. Compare initializer-selected cases separately: their
+refinement penalties can tie. Use the pilot to reassess grid boundaries and
+runtime before committing to 100 seeds; final performance should be evaluated
+separately from the validation data used for tuning.
 
 `--dry-run` creates a source snapshot, `study-plan.json`, `work-items.tsv`,
+shared tuning-subset overrides in `task-configs/`,
 submission metadata, and an archive copy, but does not submit a job or fit
 anything. Remove `--dry-run` to submit that scope. Use `--models`,
 `--experiments`, `--seeds`, and `--setting-index` to request a smaller scope;
@@ -113,8 +141,12 @@ anything. Remove `--dry-run` to submit that scope. Use `--models`,
 
 `--workers N` is required: choose the concurrency for each submission based on
 cluster availability, for example 16, 32, 64, or 128. It is independent of the
-number of seeds and cases. `budget_pool.sbatch` uses GNU Parallel to dispatch
-one single-CPU Slurm step per model/experiment/setting/seed case. Workers use
+number of seeds, cases, and tuning combinations. `budget_pool.sbatch` uses GNU
+Parallel to dispatch one single-CPU Slurm step per planned work item. By
+default, `--tuning-task-size 1` gives each penalty combination its own work
+item, so workers can start another combination as soon as one trajectory
+finishes. One seed has 72 data cases but **3,033 work items**: 63 applicable
+cases times 48 combinations, plus nine inapplicable records. Workers use
 `--workers 1` internally. This is one Slurm job, not `N` separate batch jobs.
 Slurm distributes its requested CPU slots across suitable nodes, with no fixed
 node count. For example, 32 workers at the default 8 GB per CPU request
@@ -123,16 +155,39 @@ queue and final audit, not each case. These resource choices are adjustable;
 the small pilot does not predict full-grid runtime. Slurm grants the requested
 allocation before starting the pool; it stays fixed while the queue drains.
 
+Use `--tuning-task-size N` to group up to `N` combinations in each work item.
+Each group fixes the initializer and U penalty and takes a consecutive chunk
+of V penalties. Thus size 2 gives 24 fitting work items per applicable case,
+and size 4 gives 12 with the default grid. `--tuning-task-size all` restores
+one work item per data case, running all 48 combinations sequentially. Small
+groups reduce the long tail from uneven trajectory runtimes; larger groups
+reduce repeated initialization, data generation, and Slurm-step overhead.
+The concurrency remains controlled solely by `--workers`.
+
 Every worker has a separate `tasks/<task-id>/results` manifest/output root.
-After workers finish, the controller assembles `results/`, preserving complete,
+Split task IDs such as `m0_e0_s0_k0_g0` identify their original data case and
+first global grid index. `task-configs/g0.sh` and similar files hold the tuning
+overrides shared by every data case; the default grid needs only 48 such files.
+These overrides and the source snapshot are archived before submission.
+After workers finish, the controller verifies the
+runtime and assembles `results/`, merging saved tuning subsets into one result
+per original data case. It compares saved predictions in the original grid
+order and preserves initializer ties and validation selection semantics.
+The merge performs no fitting and keeps incomplete candidate coverage visible.
+Each task retains its original validation-score reference; cross-task selection
+uses direct differences between saved predictions on the same validation data.
+Merged fitting times sum task work; pool wall time is recorded in the job logs.
+Collection preserves complete,
 partial, failed, inapplicable, and missing outcomes, then runs the existing
 summary with `--manifest-scope`. `aggregation-report.json`, the study manifest,
 stage exit codes, worker logs, and GNU Parallel job log distinguish execution
 failures from scientific outcomes. No separate processes write one shared
 runner manifest. Source and seed hashes remain attached to the results.
+If runtime validation fails, collection reports available task metadata and
+missing cases without performing a scientific merge or summary.
 
-Completed-cell artifacts are copied to the durable archive. Checkpoint states
-are held in memory until that cell's trajectories finish; an interrupted cell
+Completed-task artifacts are copied to the durable archive. Checkpoint states
+are held in memory until that task's trajectories finish; an interrupted task
 must restart. The launcher does not automatically resubmit a timed-out queue.
 Provision storage for all checkpoint records and archive copies, and inspect
 the report's coverage before treating the campaign as complete. The full-grid

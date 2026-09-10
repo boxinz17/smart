@@ -418,12 +418,29 @@ prefixes and their best validation states remain available after a later
 numerical failure.
 The original independent-budget mode remains the default.
 
+To resolve minima before the first regular checkpoint, continuous mode also
+accepts `validation_iterations=(10, 25, 50, 100, 150, 200)`.
+These points add validation evaluations without changing the full checkpoint
+schedule, gradient updates, or stationarity stopping rule. The schedule must
+contain strictly increasing unique nonnegative integers; points above the
+maximum budget are ignored. The default is empty, and independent mode rejects
+a nonempty schedule because it already validates every accepted iterate.
+An early validation winner propagates into subsequent full checkpoints. Extra
+points do not establish budget coverage or rescue a trajectory that fails before
+its first positive full checkpoint. `best_validation_states_` stores read-only
+compact chart states only for improving extra points, including improvements
+that are superseded before the next full checkpoint; scalar evaluations remain
+in `validation_history_` and optimization records in `history_`.
+
 `trajectory_models_` and `trajectory_history_` contain one entry per grid
 point. Each full estimator exposes lightweight `checkpoints_` and a
 `checkpoint_model(iteration)` method that reconstructs an independent fitted
 view without optimization. That view's `coefficient_` is the selected state;
 `last_coefficient_` is the checkpoint endpoint. At the lower level, pass
-`checkpoint_iterations` and `validation_interval` directly to `SparseSMART`.
+`checkpoint_iterations`, `validation_interval`, and `validation_iterations`
+directly to `SparseSMART`. Estimator diagnostics record the configured extra
+schedule and the actual validation iterations; tuner diagnostics declare the
+planned union, while individual trajectory diagnostics show evaluations reached.
 Checkpoint capture is in memory; it is not process-restart support.
 The tuner reconstructs validation predictions from compact checkpoint states
 and makes pairwise comparisons before constructing independent fitted models

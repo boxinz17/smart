@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One distributed allocation; one independent single-CPU step per planned cell.
+# One distributed allocation; one single-CPU step per planned tuning subset.
 set -euo pipefail
 [[ $# == 1 && -f "$1/budget-job-config.sh" ]] || { printf 'Use submit_budget_study.sh.\n' >&2; exit 2; }
 source "$1/budget-job-config.sh"
@@ -55,10 +55,13 @@ environment_status=$?
 if (( environment_status == 0 )); then
     python -m pip list --format=freeze >> "$run_dir/logs/environment.txt" 2>&1
 fi
-# Collection is metadata-only and can still describe failures if runtime
-# validation failed. Never certify a scientific summary under a failed runtime.
-"$VENV/bin/python" "$SMART_SOURCE_ROOT/simulation/discovery_budget_study.py" aggregate \
-    --run-root "$run_dir" --output-root "$run_dir/results" \
+# With a verified runtime, collection merges tuning shards by comparing saved
+# predictions. Otherwise it reports metadata/missing cells without a merge.
+# Neither collection mode fits estimators.
+aggregate_args=("$VENV/bin/python" "$SMART_SOURCE_ROOT/simulation/discovery_budget_study.py" aggregate
+    --run-root "$run_dir" --output-root "$run_dir/results")
+if (( environment_status == 0 )); then aggregate_args+=(--merge-shards); fi
+"${aggregate_args[@]}" \
     > "$run_dir/logs/aggregate.log" 2>&1
 aggregate_status=$?
 if (( environment_status == 0 )); then

@@ -14,7 +14,7 @@ import time
 import numpy as np
 
 from .calibration import Margins, PracticalCalibration
-from .estimator import FitFailure, SparseSMART, _FitPreparationCache, _data
+from .estimator import FitFailure, SparseSMART, _FitPreparationCache, _data, _validation_schedule
 from .source import ExactSource, NoisySource
 from .validation import SELECTION_RULE, validation_loss_difference
 
@@ -112,6 +112,11 @@ class SparseSMARTTuner:
     records cap coverage. The initializer alone cannot rescue a trajectory
     that fails before its first positive checkpoint. Continuous histories
     are available in ``trajectory_models_`` and ``trajectory_history_``.
+    ``validation_iterations=()`` adds sorted, unique nonnegative validation
+    points in continuous mode without adding full checkpoints or budget
+    coverage. Points above the maximum iteration budget are ignored. Independent
+    mode already validates every accepted iterate and rejects a nonempty extra
+    schedule. Generic defaults retain the existing validation schedules.
     """
 
     def __init__(
@@ -123,7 +128,7 @@ class SparseSMARTTuner:
         stationarity_tol=1e-6, delta=.05, max_backtracks=60,
         lasso_tol=1e-9, lasso_max_iter=20000,
         initialization_spectrum="auto", refinement_solver="auto",
-        checkpoint_execution="independent", checkpoint_interval=None,
+        checkpoint_execution="independent", checkpoint_interval=None, validation_iterations=(),
     ):
         self.rank, self.source_rank, self.sparsity = rank, source_rank, sparsity
         self.margins = margins
@@ -141,6 +146,7 @@ class SparseSMARTTuner:
         self.refinement_solver = refinement_solver
         self.checkpoint_execution = checkpoint_execution
         self.checkpoint_interval = checkpoint_interval
+        self.validation_iterations = validation_iterations
 
     def _split(self, X, Y, validation_data):
         if validation_data is not None:
@@ -209,6 +215,9 @@ class SparseSMARTTuner:
         self.trajectory_models_, self.trajectory_history_ = [], []
         self.diagnostics_.update(checkpoint_execution="continuous_trajectory",
             checkpoint_interval=self.checkpoint_interval_, checkpoint_iterations=schedule,
+            validation_iterations=self.validation_iterations_,
+            validation_schedule=sorted({*schedule, *(t for t in self.validation_iterations_
+                                                    if t <= self.iterations)}),
             candidate_records_are_checkpoint_prefixes=True,
             elapsed_time_scope="one_measurement_per_trajectory")
         for grid_id, (init, pu, pv, limits) in enumerate(grid):
@@ -227,7 +236,8 @@ class SparseSMARTTuner:
                     spectral_step=self.spectral_step, stationarity_tol=self.stationarity_tol,
                     initialization_spectrum=self.initialization_spectrum,
                     refinement_solver=self.refinement_solver,
-                    checkpoint_iterations=schedule, validation_interval=self.checkpoint_interval_)
+                    checkpoint_iterations=schedule, validation_interval=self.checkpoint_interval_,
+                    validation_iterations=self.validation_iterations_)
                 model._fit_cache = preparation
                 preparation.validation_context = dict(grid_candidate_id=grid_id,
                                                        iteration_budget=self.iterations)
@@ -402,6 +412,9 @@ class SparseSMARTTuner:
             raise ValueError("checkpoint_execution must be 'independent' or 'continuous'")
         if self.checkpoint_execution == "independent" and self.checkpoint_interval is not None:
             raise ValueError("checkpoint_interval requires continuous checkpoint execution")
+        self.validation_iterations_ = _validation_schedule(self.validation_iterations)
+        if self.checkpoint_execution == "independent" and self.validation_iterations_:
+            raise ValueError("validation_iterations requires continuous checkpoint execution")
         interval = 250 if self.checkpoint_interval is None else self.checkpoint_interval
         if isinstance(interval, (bool, np.bool_)) or not isinstance(interval, Integral) or interval < 1:
             raise ValueError("checkpoint_interval must be a positive integer or None")

@@ -17,7 +17,7 @@ from sparse_smart import AnchorChart
 
 CELL = runner.SimulationSetting(6,4,3,.01,1,2,'small')
 CONFIG = runner.RunnerConfig(iteration_budgets=(2,4),checkpoint_interval=1,
-    penalties_u=(.01,.04),penalties_v=(.01,))
+    init_penalties=(.03,),penalties_u=(.01,.04),penalties_v=(.01,))
 
 
 def data(**kwargs):
@@ -26,7 +26,7 @@ def data(**kwargs):
     return dict(X=rng.normal(size=(n,p)),Y=np.zeros((n,q)),C0=np.eye(p,q),C_star=np.zeros((p,q)))
 
 
-def fake_api(calls, *, failure_at=None, initial_failure=False, early_convergence=False):
+def fake_api(calls, *, failure_at=None, initial_failure=False, early_convergence=False, scales=None):
     def factory(**options):
         calls['options'] = options
         tuner = SimpleNamespace()
@@ -51,17 +51,24 @@ def fake_api(calls, *, failure_at=None, initial_failure=False, early_convergence
                     reason = 'stationarity' if early_convergence else 'numerical_stagnation' if failed else 'max_iterations'
                     chart = AnchorChart(X.shape[1],Y.shape[1],[0],[0],np.eye(1),np.eye(1))
                     model = SimpleNamespace(chart_=chart,source_=SimpleNamespace(left=np.eye(X.shape[1]),right=np.eye(Y.shape[1])),
-                        history_=[],validation_history_=[],checkpoints_={},n_iter_=end,status_=status,success_=not failed)
+                        history_=[],validation_history_=[],checkpoints_={},best_validation_states_={},
+                        n_iter_=end,status_=status,success_=not failed)
+                    checkpoints = {0, options['iterations'], *options['iteration_budgets'],
+                        *range(options['checkpoint_interval'], options['iterations']+1, options['checkpoint_interval'])}
+                    evaluations = checkpoints | set(options['validation_iterations'])
                     best_score,best_state,best_iteration = float('inf'),None,None
                     for k in range(end+1):
-                        d = max(.1,1.-.2*k) + gid*.2
+                        d = (scales[k] if scales is not None else max(.1,1.-.2*k)) + gid*.2
                         state = chart.pack([],[],[d],np.zeros((X.shape[1]-1,1)),np.zeros((Y.shape[1]-1,1)))
                         P,singular,Q = chart.reconstruct(state)
                         coefficient = (P*singular)@Q.T
                         score = float(np.mean((Yv-Xv@coefficient)**2))
-                        if score < best_score:
-                            best_score,best_state,best_iteration = score,state.copy(),k
-                        model.validation_history_.append(dict(iteration=k,loss=score))
+                        if k in evaluations:
+                            if score < best_score:
+                                best_score,best_state,best_iteration = score,state.copy(),k
+                                if k not in checkpoints:
+                                    model.best_validation_states_[k] = state.copy()
+                            model.validation_history_.append(dict(iteration=k,loss=score))
                         model.history_.append(dict(iteration=k,objective=chart.loss(state,X,Y),
                             smooth_loss=chart.loss(state,X,Y),penalty_value=0.,step_norm=.2 if k else 0.,
                             relative_step_norm=.1 if k else 0.,projected_gradient_norm=.3,raw_gradient_norm=.3,
@@ -69,10 +76,12 @@ def fake_api(calls, *, failure_at=None, initial_failure=False, early_convergence
                             mapping_refinements=0,mapping_step_size_inverse=20.,mapping_domain_reason=None,
                             step_size_inverse=20.,line_search_start_inverse=20.,objective_change=-.1 if k else None,
                             backtracks=0,rejections=[],support_u=0,support_v=0,anchor_min_u=1.,anchor_min_v=1.))
-                        model.checkpoints_[k] = SimpleNamespace(iteration=k,state=state,selected_state=best_state.copy(),
-                            selected_iteration=best_iteration,best_validation_loss=best_score,
-                            history_length=k+1,validation_history_length=k+1,status='converged' if early_convergence else 'completed',
-                            termination_reason='stationarity' if early_convergence else 'max_iterations')
+                        if k in checkpoints:
+                            model.checkpoints_[k] = SimpleNamespace(iteration=k,state=state,selected_state=best_state.copy(),
+                                selected_iteration=best_iteration,best_validation_loss=best_score,
+                                history_length=k+1,validation_history_length=len(model.validation_history_),
+                                status='converged' if early_convergence else 'completed',
+                                termination_reason='stationarity' if early_convergence else 'max_iterations')
                     model.checkpoint_iterations_ = list(model.checkpoints_)
                     meta = dict(grid_candidate_id=gid,params=params,status=status,success=not failed,n_iter=end,
                         termination_reason=reason,elapsed_time_sec=.01,diagnostics={},checkpoint_iterations=list(model.checkpoints_))
@@ -90,8 +99,11 @@ def fake_api(calls, *, failure_at=None, initial_failure=False, early_convergence
                         n_iter=k if success else 0,selected_iteration=snapshot.selected_iteration if success else None,
                         validation_mse=snapshot.best_validation_loss if success else None,
                         trajectory_checkpoint_iteration=k,budget_reached=success and (k == budget or early_convergence),
+                        trajectory_status=tuner.trajectory_history_[gid]['status'],
+                        trajectory_termination_reason=tuner.trajectory_history_[gid]['termination_reason'],
                         termination_reason=snapshot.termination_reason if success else 'initialization_failed',
-                        validation_history=[] if model is None else model.validation_history_[:(k+1 if k is not None else 0)],
+                        validation_history=[] if model is None or k is None else
+                            [row for row in model.validation_history_ if row['iteration'] <= k],
                         diagnostics={}))
             eligible = [c for c in tuner.selection_history_ if c['success']]
             winner = min(eligible,key=lambda c:c['validation_mse']) if eligible else None
@@ -113,6 +125,28 @@ def run(tmp_path, *, calls=None, config=CONFIG, api=None, generator=data):
     calls = {} if calls is None else calls
     return runner.run_setting(setting=CELL,model='model1',experiment='exp3',seed_id=3,random_seed=123,
         destination=tmp_path/'record.json',config=config,generate_data_fn=generator,sparse_api=api or fake_api(calls))
+
+
+def test_early_validation_roundtrip_retains_historical_bests_and_audits_coverage(tmp_path):
+    import summarize_sparse_smart_budget_study as summary
+    calls = {}
+    config = replace(CONFIG, iteration_budgets=(4,8), checkpoint_interval=4, validation_iterations=(1,2,3))
+    api = fake_api(calls, scales=(1., .4, .2, .8, .5, .5, .5, .5, .6))
+    _, value = run(tmp_path, calls=calls, config=config, api=api)
+    assert calls['options']['validation_iterations'] == (1,2,3)
+    assert value['selected_iteration'] == 2
+    for trajectory in value['trajectories']:
+        assert trajectory['checkpoint_iterations'] == [0,4,8]
+        assert [row['iteration'] for row in trajectory['validation_history']] == [0,1,2,3,4,8]
+        assert set(trajectory['factor_states']) == {'0','1','2','4','8'}
+        assert [row['iteration'] for row in trajectory['history']] == [0,1,2,4,8]
+        assert all(cp['selected_iteration'] == 2 for cp in trajectory['checkpoints'][1:])
+    path = runner.result_path(tmp_path, model='model1', experiment='exp3', setting=CELL, seed_id=3)
+    audited = summary.validate_record(value, path, setting=CELL, model_id=0, exp_id=2,
+        seed_id=3, random_seed=123, data_cache={}, generate_data_fn=data)
+    assert audited['validation_audit']['factor_verified_points'] == 10
+    assert audited['validation_audit']['metadata_only_points'] == 2
+    assert all(cap['coverage_complete'] for cap in audited['caps'])
 
 
 def test_continuous_runner_fits_once_and_saves_independently_reconstructible_checkpoints(tmp_path,monkeypatch):
@@ -240,6 +274,9 @@ def test_full_grid_dry_run_declares_all_cases_and_early_stop_tolerance(tmp_path,
     assert manifest['expected_applicable'] == 6300 and manifest['expected_inapplicable'] == 900
     assert manifest['configuration']['iteration_budgets'][-1] == 8000
     assert manifest['configuration']['stationarity_tol'] == 2e-6
+    assert manifest['configuration']['init_penalties'] == [.01, .03, .1]
+    assert (len(manifest['configuration']['init_penalties'])*len(manifest['configuration']['penalties_u'])
+            *len(manifest['configuration']['penalties_v'])) == 48
     assert not (tmp_path/'new').exists()
 
 

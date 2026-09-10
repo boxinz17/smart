@@ -17,6 +17,8 @@ import json
 import math
 import os
 from pathlib import Path
+import re
+import shlex
 import shutil
 import tempfile
 from uuid import uuid4
@@ -31,6 +33,7 @@ SOURCE_FILES = (
     "run_sparse_smart_external.py", "external_validation_data.py",
     "run_sparse_smart_budget_study.py", "batch_manifest.py",
     "sparse_smart_selection.py", "sparse_smart_provenance.py",
+    "merge_sparse_smart_budget_shards.py",
 )
 
 
@@ -68,14 +71,19 @@ def inside(path, root):
 
 
 def configuration(*, iteration_budgets=(500, 1000, 2000, 4000, 8000), checkpoint_interval=250,
-                  init_penalties=(.03,), penalties_u=(.0025, .01, .04),
-                  penalties_v=(.0025, .01, .04), stationarity_tol=1e-6):
+                  validation_iterations=(10, 25, 50, 100, 150, 200),
+                  init_penalties=(.01, .03, .1), penalties_u=(.0025, .01, .04, .16),
+                  penalties_v=(.0025, .01, .04, .16), stationarity_tol=1e-6):
     budgets = list(iteration_budgets)
     require(budgets and all(type(x) is int and x > 0 for x in budgets)
             and all(a < b for a, b in zip(budgets, budgets[1:])),
             "Iteration budgets must be positive, unique, and increasing")
     require(type(checkpoint_interval) is int and checkpoint_interval > 0,
             "Checkpoint interval must be a positive integer")
+    validations = list(validation_iterations)
+    require(all(type(x) is int and x > 0 for x in validations)
+            and all(a < b for a, b in zip(validations, validations[1:])),
+            "Validation iterations must be positive, unique, and increasing")
     grids = dict(init_penalties=list(init_penalties), penalties_u=list(penalties_u),
                  penalties_v=list(penalties_v))
     for name, values in grids.items():
@@ -84,7 +92,8 @@ def configuration(*, iteration_budgets=(500, 1000, 2000, 4000, 8000), checkpoint
                 and len(set(values)) == len(values), f"Invalid {name}")
     require(type(stationarity_tol) in (int, float) and math.isfinite(stationarity_tol)
             and stationarity_tol > 0, "Stationarity tolerance must be finite and positive")
-    return dict(iteration_budgets=budgets, checkpoint_interval=checkpoint_interval, **grids,
+    return dict(iteration_budgets=budgets, checkpoint_interval=checkpoint_interval,
+                validation_iterations=validations, **grids,
                 inverse_step=20., stationarity_tol=stationarity_tol, n_validation=100,
                 validation_seed_tag=1397970481, checkpoint_execution="continuous",
                 initialization_spectrum="projected", refinement_solver="anchor_projected",
@@ -127,7 +136,7 @@ def resolved_configuration(setting, config):
                  step_size_inverse=config["inverse_step"])
             for li, lu, lv in product(config["init_penalties"], config["penalties_u"], config["penalties_v"])]
     sparsity = min(source*rank, max(rank, 5))
-    return dict(runner=config, iterations=config["iteration_budgets"][-1],
+    result = dict(runner=config, iterations=config["iteration_budgets"][-1],
         margins=dict(d_lower=.05, d_upper=12., gap=.01, anchor_min=.005, trial_radius=1.),
         rank=rank, source_rank=source, sparsity=[sparsity, sparsity], support_limits=[counts],
         actual_complement_counts=counts, candidate_grid=grid, trajectory_count=len(grid),
@@ -138,6 +147,17 @@ def resolved_configuration(setting, config):
         selection_metric="mean((Y_validation-X_validation@C_hat)**2)",
         selection_inputs=["training_X", "training_Y", "observed_source", "validation_X", "validation_Y"],
         rank_semantics="fitted dimensions; generator truth remains rank 5 and source rank 10")
+    # Preserve the exact legacy identity when collecting an older plan. A
+    # missing field means the historical periodic-only validation schedule.
+    if "validation_iterations" in config:
+        maximum = config["iteration_budgets"][-1]
+        schedule = sorted({0, maximum, *config["iteration_budgets"],
+            *range(config["checkpoint_interval"], maximum + 1, config["checkpoint_interval"]),
+            *(value for value in config["validation_iterations"] if value <= maximum)})
+        result.update(validation_iterations=config["validation_iterations"],
+                      validation_schedule=schedule,
+                      validation_state_policy="checkpoints_and_validation_bests")
+    return result
 
 
 def source_metadata(source_root):
@@ -180,8 +200,37 @@ def expected_cells(models, experiments, seed_ids, seeds, profile, setting_index)
     return cells
 
 
+def tuning_work_items(cells, config, task_size):
+    """Partition Cartesian grids without changing the scientific cell scope."""
+    require(type(task_size) is int and task_size > 0, "Tuning task size must be positive or all")
+    items = []
+    ni, nu, nv = (len(config[key]) for key in ("init_penalties", "penalties_u", "penalties_v"))
+    for cell in cells:
+        if cell["inapplicability_reason"] is not None:
+            items.append(dict(cell, cell_task_id=cell["task_id"], grid_candidate_ids=[]))
+            continue
+        for i, u, first in product(range(ni), range(nu), range(0, nv, task_size)):
+            stop = min(first + task_size, nv)
+            start_id = (i*nu + u)*nv + first
+            subset = dict(config, init_penalties=[config["init_penalties"][i]],
+                          penalties_u=[config["penalties_u"][u]], penalties_v=config["penalties_v"][first:stop])
+            items.append(dict(cell, task_id=f"{cell['task_id']}_g{start_id}",
+                cell_task_id=cell["task_id"], grid_candidate_ids=list(range(start_id, start_id+stop-first)),
+                configuration=subset))
+    return items
+
+
+def planned_tasks(plan):
+    return plan.get("work_items", plan["cells"])
+
+
+def task_plan(task, plan):
+    return dict(plan, configuration=task.get("configuration", plan["configuration"]))
+
+
 def make_plan(*, source_root=HERE.parent, models=(0, 1, 2), experiments=(0, 1, 2, 3),
-              seed_ids=tuple(range(100)), profile="full", setting_index=None, config=None, seed_file=None):
+              seed_ids=tuple(range(100)), profile="full", setting_index=None, config=None, seed_file=None,
+              tuning_task_size=None):
     models, experiments, seed_ids = map(list, (models, experiments, seed_ids))
     for values, limit, name in ((models, 3, "models"), (experiments, 4, "experiments"), (seed_ids, 100, "seed IDs")):
         require(values and all(type(x) is int and 0 <= x < limit for x in values)
@@ -202,6 +251,9 @@ def make_plan(*, source_root=HERE.parent, models=(0, 1, 2), experiments=(0, 1, 2
         seed_file_relative=seed_path.relative_to(root).as_posix(), configuration=config, profile=profile,
         setting_index=setting_index, expected_cells=len(cells), expected_applicable=len(cells)-excluded,
         expected_inapplicable=excluded, cells=cells, source=source_metadata(root))
+    if tuning_task_size is not None:
+        items = tuning_work_items(cells, config, tuning_task_size)
+        identity.update(tuning_task_size=tuning_task_size, expected_tasks=len(items), work_items=items)
     return dict(identity, plan_scheme=PLAN_SCHEME, plan_fingerprint=digest(identity),
                 created=datetime.now(timezone.utc).isoformat(), source_root=str(root), no_fits_performed=True)
 
@@ -223,10 +275,26 @@ def write_plan(plan, output_root):
     from io import StringIO
     stream = StringIO(newline="")
     writer = csv.DictWriter(stream, fieldnames=TABLE_FIELDS, delimiter="\t", lineterminator="\n", extrasaction="ignore")
-    writer.writerows(plan["cells"])
+    writer.writerows(planned_tasks(plan))
     content = stream.getvalue()
     require(not table.exists() or table.read_text() == content, "Existing work-item table differs from plan")
     table.write_text(content)
+    written_groups = set()
+    for task in plan.get("work_items", []):
+        if "configuration" not in task:
+            continue
+        group = task["grid_candidate_ids"][0]
+        if group in written_groups:
+            continue
+        written_groups.add(group)
+        arguments = []
+        for key in ("init_penalties", "penalties_u", "penalties_v"):
+            arguments.extend(("--"+key.replace("_", "-"), ",".join(map(str, task["configuration"][key]))))
+        path = inside(root/"task-configs"/f"g{group}.sh", root)
+        content = "tuning_args=(" + " ".join(map(shlex.quote, arguments)) + ")\n"
+        require(not path.exists() or path.read_text() == content, "Existing tuning task configuration differs from plan")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
     return plan
 
 
@@ -242,8 +310,11 @@ def validate_plan(plan):
         require(values and all(type(value) is int and 0 <= value < limit for value in values)
                 and len(set(values)) == len(values), f"Invalid planned {name}")
     config = plan["configuration"]
-    expected = configuration(**{key: config[key] for key in ("iteration_budgets", "checkpoint_interval",
+    expected = configuration(validation_iterations=config.get("validation_iterations", ()),
+        **{key: config[key] for key in ("iteration_budgets", "checkpoint_interval",
                             "init_penalties", "penalties_u", "penalties_v", "stationarity_tol")})
+    if "validation_iterations" not in config:
+        expected.pop("validation_iterations")
     require(config == expected, "Unsupported study configuration")
     seeds = [None]*100
     for cell in plan["cells"]:
@@ -257,6 +328,10 @@ def validate_plan(plan):
     excluded = sum(cell["inapplicability_reason"] is not None for cell in cells)
     require(plan["expected_applicable"] == len(cells)-excluded and plan["expected_inapplicable"] == excluded,
             "Study plan applicability mismatch")
+    if any(key in plan for key in ("tuning_task_size", "work_items", "expected_tasks")):
+        tasks = tuning_work_items(cells, config, plan["tuning_task_size"])
+        require(plan["work_items"] == tasks and plan["expected_tasks"] == len(tasks),
+                "Study plan tuning task mapping mismatch")
 
 
 def relative_result(cell):
@@ -328,7 +403,41 @@ def inspect_cell_manifest(task_root, cell, plan):
                 attempt_status=manifest.get("attempt_status")), errors
 
 
-def aggregate(run_root, output_root=None):
+def _read_task(root, task, plan, errors):
+    """Read one isolated result without fitting or importing numerical packages."""
+    task_id = task["task_id"]
+    task_root = inside(root/"tasks"/task_id/"results", root)
+    for name in ("process-exit-code.txt", "exit-code.txt", "launcher-exit-code.txt"):
+        code_path = inside(root/"tasks"/task_id/name, root)
+        if not code_path.is_file():
+            errors.append(dict(task_id=task_id, error="missing_execution_exit_code", file=name))
+        else:
+            try:
+                code = int(code_path.read_text().strip())
+            except ValueError:
+                code = None
+            if code != 0:
+                errors.append(dict(task_id=task_id, error="execution_failure", file=name, exit_code=code))
+    path = inside(task_root/relative_result(task), task_root)
+    local_plan = task_plan(task, plan)
+    manifest, manifest_errors = inspect_cell_manifest(task_root, task, local_plan)
+    errors.extend(manifest_errors)
+    found = [inside(item, task_root) for item in task_root.rglob("BudgetStudy_result_*.json")]
+    require(set(found) <= {path}, "Unexpected/duplicate result in per-cell directory")
+    if not path.is_file():
+        return None
+    raw = path.read_bytes()
+    record = json.loads(raw, parse_constant=lambda value: (_ for _ in ()).throw(
+        ValueError(f"Nonfinite JSON value: {value}")))
+    validate_record_identity(record, task, local_plan)
+    artifact = dict(task_id=task_id, source_relative=path.relative_to(root).as_posix(),
+                    sha256=hashlib.sha256(raw).hexdigest(), cell_manifest=manifest)
+    if "grid_candidate_ids" in task:
+        artifact.update(grid_candidate_ids=task["grid_candidate_ids"], plan_fingerprint=plan["plan_fingerprint"])
+    return record, raw, artifact
+
+
+def aggregate(run_root, output_root=None, *, merge_shards=False):
     root = Path(run_root).resolve()
     output = Path(output_root).absolute() if output_root else root/"results"
     require(output.parent.resolve() == root and output.name not in ("source", "tasks", "logs"),
@@ -339,7 +448,8 @@ def aggregate(run_root, output_root=None):
     table = inside(root/"work-items.tsv", root)
     with table.open(newline="") as stream:
         rows = list(csv.reader(stream, delimiter="\t"))
-    require(rows == [[str(cell[key]) for key in TABLE_FIELDS] for cell in plan["cells"]],
+    tasks = planned_tasks(plan)
+    require(rows == [[str(task[key]) for key in TABLE_FIELDS] for task in tasks],
             "Work-item table differs from study plan")
     if output.exists():
         previous = inside(output/"aggregation-report.json", output)
@@ -347,32 +457,45 @@ def aggregate(run_root, output_root=None):
                 "Refusing to replace an unrelated aggregate output directory")
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}-collect-", dir=root))
     errors, missing, copied, counts = [], [], [], Counter()
+    missing_tasks, artifacts = [], []
+    grouped = {}
+    for task in tasks:
+        grouped.setdefault(task.get("cell_task_id", task["task_id"]), []).append(task)
     try:
         for cell in plan["cells"]:
             task_id = cell["task_id"]
-            try:
-                task_root = inside(root/"tasks"/task_id/"results", root)
-                for name in ("process-exit-code.txt", "exit-code.txt", "launcher-exit-code.txt"):
-                    code_path = inside(root/"tasks"/task_id/name, root)
-                    if not code_path.is_file():
-                        errors.append(dict(task_id=task_id, error="missing_execution_exit_code", file=name))
+            collected = []
+            for task in grouped[task_id]:
+                try:
+                    result = _read_task(root, task, plan, errors)
+                    if result is None:
+                        missing_tasks.append(task["task_id"])
                     else:
-                        try:
-                            code = int(code_path.read_text().strip())
-                        except ValueError:
-                            code = None
-                        if code != 0:
-                            errors.append(dict(task_id=task_id, error="execution_failure", file=name, exit_code=code))
-                path = inside(task_root/relative_result(cell), task_root)
-                manifest, manifest_errors = inspect_cell_manifest(task_root, cell, plan)
-                errors.extend(manifest_errors)
-                found = [inside(item, task_root) for item in task_root.rglob("BudgetStudy_result_*.json")]
-                require(set(found) <= {path}, "Unexpected/duplicate result in per-cell directory")
-                if not path.is_file():
-                    missing.append(task_id)
-                    continue
-                raw = path.read_bytes()
-                record = json.loads(raw)
+                        collected.append(result)
+                        artifacts.append(result[2])
+                except (ValueError, KeyError, TypeError, OSError) as error:
+                    errors.append(dict(task_id=task["task_id"], error="invalid_cell_artifact", message=str(error)))
+                    missing_tasks.append(task["task_id"])
+            if len(collected) != len(grouped[task_id]):
+                missing.append(task_id)
+                continue
+            try:
+                if "work_items" in plan and cell["inapplicability_reason"] is None:
+                    if not merge_shards:
+                        errors.append(dict(task_id=task_id, error="tuning_merge_required",
+                            message="Use --merge-shards under the validated study environment to select across tuning tasks"))
+                        missing.append(task_id)
+                        continue
+                    from merge_sparse_smart_budget_shards import merge_records
+                    from run_sparse_smart_budget_study import RunnerConfig
+                    record = merge_records([item[0] for item in collected],
+                        config=RunnerConfig(**plan["configuration"]), source_artifacts=[item[2] for item in collected])
+                    record["tuning_shard_merge"]["plan_fingerprint"] = plan["plan_fingerprint"]
+                    raw = (json.dumps(record, sort_keys=True, indent=2, allow_nan=False)+"\n").encode()
+                    evidence = dict(tuning_tasks=[item[2] for item in collected])
+                else:
+                    record, raw, artifact = collected[0]
+                    evidence = {key: artifact[key] for key in ("source_relative", "cell_manifest")}
                 status = validate_record_identity(record, cell, plan)
                 destination = staging/relative_result(cell)
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -381,8 +504,7 @@ def aggregate(run_root, output_root=None):
                 copied.append(dict(task_id=task_id, model=record["model"], experiment=record["experiment"],
                     setting=record["setting"]["suffix"], seed_id=cell["seed"], status=status,
                     success=record["success"], path=str(output/relative_result(cell)),
-                    source_relative=path.relative_to(root).as_posix(), sha256=hashlib.sha256(raw).hexdigest(),
-                    cell_manifest=manifest))
+                    sha256=hashlib.sha256(raw).hexdigest(), **evidence))
             except (ValueError, KeyError, TypeError, OSError) as error:
                 errors.append(dict(task_id=task_id, error="invalid_cell_artifact", message=str(error)))
                 missing.append(task_id)
@@ -394,6 +516,9 @@ def aggregate(run_root, output_root=None):
             errors=errors, status_counts=dict(counts), execution_complete=execution_complete,
             budget_coverage_complete=coverage_complete, scientific_validation="pending_existing_summarizer",
             cells=copied, finished=datetime.now(timezone.utc).isoformat())
+        if "work_items" in plan:
+            report.update(expected_tasks=len(tasks), recorded_tasks=len(artifacts), missing_tasks=missing_tasks,
+                          task_artifacts=artifacts, tuning_task_size=plan["tuning_task_size"])
         manifest = {key: plan[key] for key in ("schema_version", "method", "models", "experiments", "seed_ids",
                     "seed_file_sha256", "configuration", "profile", "setting_index", "expected_cells",
                     "expected_applicable", "expected_inapplicable")}
@@ -402,6 +527,9 @@ def aggregate(run_root, output_root=None):
             attempt_status="completed" if execution_complete else "incomplete", finished=report["finished"],
             execution_complete=execution_complete, budget_coverage_complete=coverage_complete,
             scientific_validation="pending_existing_summarizer", no_fits_performed=True)
+        if "work_items" in plan:
+            manifest.update(expected_tasks=len(tasks), recorded_tasks=len(artifacts), missing_tasks=missing_tasks,
+                            tuning_task_size=plan["tuning_task_size"])
         atomic_json(manifest, staging/"budget_study_manifest.json")
         atomic_json(report, staging/"aggregation-report.json")
         if output.exists():
@@ -422,6 +550,24 @@ def float_grid(value):
         raise argparse.ArgumentTypeError("Expected a comma-separated numeric grid") from error
 
 
+def validation_grid(values):
+    """CLI form shared with the launcher: comma/space integers, or lone none."""
+    if values == ["none"]:
+        return ()
+    tokens = [item for value in values for item in value.split(",")]
+    require(tokens and all(re.fullmatch(r"[0-9]+", item) is not None for item in tokens),
+            "Expected validation iteration integers or 'none'")
+    return tuple(map(int, tokens))
+
+
+def tuning_task_size(value):
+    if value == "all":
+        return None
+    if re.fullmatch(r"[1-9][0-9]*", value) is None:
+        raise argparse.ArgumentTypeError("Tuning task size must be a positive integer or all")
+    return int(value)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -436,25 +582,33 @@ def main(argv=None):
     p.add_argument("--setting-index", type=int)
     p.add_argument("--iteration-budgets", type=int, nargs="+", default=[500, 1000, 2000, 4000, 8000])
     p.add_argument("--checkpoint-interval", type=int, default=250)
-    p.add_argument("--init-penalties", type=float_grid, default=(.03,))
-    p.add_argument("--penalties-u", type=float_grid, default=(.0025, .01, .04))
-    p.add_argument("--penalties-v", type=float_grid, default=(.0025, .01, .04))
+    p.add_argument("--validation-iterations", nargs="+", default=["10,25,50,100,150,200"],
+                   help="Additional validation iterations (comma/space list), or none")
+    p.add_argument("--init-penalties", type=float_grid, default=(.01, .03, .1))
+    p.add_argument("--penalties-u", type=float_grid, default=(.0025, .01, .04, .16))
+    p.add_argument("--penalties-v", type=float_grid, default=(.0025, .01, .04, .16))
     p.add_argument("--stationarity-tol", type=float, default=1e-6)
+    p.add_argument("--tuning-task-size", type=tuning_task_size, default=1,
+                   help="Maximum penalty combinations per task; all keeps one task per cell (default: 1)")
     a = sub.add_parser("aggregate", help="Collect records and audit missing/failed cell execution")
     a.add_argument("--run-root", type=Path, required=True)
     a.add_argument("--output-root", type=Path)
+    a.add_argument("--merge-shards", action="store_true",
+                   help="Audit and combine complete tuning shards using the study environment; never fits")
     args = parser.parse_args(argv)
     try:
         if args.command == "plan":
             values = vars(args).copy()
             values.pop("command")
             output = values.pop("output_root")
+            values["validation_iterations"] = validation_grid(values["validation_iterations"])
             config = configuration(**{key: values.pop(key) for key in ("iteration_budgets", "checkpoint_interval",
-                "init_penalties", "penalties_u", "penalties_v", "stationarity_tol")})
+                "validation_iterations", "init_penalties", "penalties_u", "penalties_v", "stationarity_tol")})
             plan = write_plan(make_plan(config=config, **values), output)
-            print(json.dumps({key: plan[key] for key in ("plan_fingerprint", "expected_cells", "expected_applicable", "expected_inapplicable")}))
+            print(json.dumps(dict({key: plan[key] for key in ("plan_fingerprint", "expected_cells", "expected_applicable", "expected_inapplicable")},
+                                  expected_tasks=len(planned_tasks(plan)))))
             return 0
-        report = aggregate(args.run_root, args.output_root)
+        report = aggregate(args.run_root, args.output_root, merge_shards=args.merge_shards)
         print(json.dumps({key: report[key] for key in ("expected_cells", "recorded_cells", "execution_complete", "budget_coverage_complete")}))
         return int(not report["execution_complete"])
     except (ValueError, KeyError, TypeError, OSError) as error:

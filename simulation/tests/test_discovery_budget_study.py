@@ -16,7 +16,7 @@ def small_plan(root, *, seeds=(0,), setting=0, experiment=0):
     plan = study.make_plan(models=(0,), experiments=(experiment,), seed_ids=seeds,
                            setting_index=setting,
                            config=study.configuration(iteration_budgets=(2, 4), checkpoint_interval=2,
-                                                      penalties_u=(.01,), penalties_v=(.01,)))
+                                                      init_penalties=(.03,), penalties_u=(.01,), penalties_v=(.01,)))
     study.write_plan(plan, root)
     return plan
 
@@ -63,7 +63,11 @@ def test_full_plan_has_exact_existing_scope_and_explicit_exclusions():
     assert (plan["expected_cells"], plan["expected_applicable"], plan["expected_inapplicable"]) == (7200, 6300, 900)
     assert len({cell["task_id"] for cell in plan["cells"]}) == 7200
     assert plan["configuration"]["stationarity_tol"] == 1e-6
-    assert len(plan["configuration"]["penalties_u"])*len(plan["configuration"]["penalties_v"]) == 9
+    assert len(plan["configuration"]["penalties_u"])*len(plan["configuration"]["penalties_v"]) == 16
+    assert plan["configuration"]["init_penalties"] == [.01, .03, .1]
+    assert (len(plan["configuration"]["init_penalties"])*len(plan["configuration"]["penalties_u"])
+            *len(plan["configuration"]["penalties_v"])) == 48
+    assert plan["configuration"]["validation_iterations"] == [10, 25, 50, 100, 150, 200]
     assert {cell["inapplicability_reason"] for cell in plan["cells"]} == {
         None, "source_rank_must_be_positive", "target_rank_exceeds_source_rank"}
 
@@ -78,8 +82,8 @@ def test_planner_runs_without_site_packages_or_estimator_imports(tmp_path):
     completed = subprocess.run([sys.executable, "-S", "-c", code, str(study.HERE), str(tmp_path)],
                                capture_output=True, text=True)
     assert completed.returncode == 0, completed.stderr
-    assert len((tmp_path/"work-items.tsv").read_text().splitlines()) == 1
-    assert (tmp_path/"work-items.tsv").read_text().startswith("m0_e0_s0_k0\t0\t0\t0\t0")
+    assert len((tmp_path/"work-items.tsv").read_text().splitlines()) == 48
+    assert (tmp_path/"work-items.tsv").read_text().startswith("m0_e0_s0_k0_g0\t0\t0\t0\t0")
 
 
 def test_grid_configuration_and_source_identity_match_runner_without_fits(monkeypatch):
@@ -116,10 +120,68 @@ def test_invalid_scope_is_rejected(kwargs):
 
 @pytest.mark.parametrize("kwargs", [dict(iteration_budgets=(4, 2)), dict(iteration_budgets=(2, 2)),
     dict(checkpoint_interval=0), dict(stationarity_tol=float("nan")), dict(stationarity_tol=0),
-    dict(init_penalties=(0.,)), dict(penalties_u=(.01, .01))])
+    dict(init_penalties=(0.,)), dict(penalties_u=(.01, .01)),
+    dict(validation_iterations=(25, 10)), dict(validation_iterations=(10, 10)),
+    dict(validation_iterations=(0,)), dict(validation_iterations=(-10,)),
+    dict(validation_iterations=(True,)), dict(validation_iterations=(10.,))])
 def test_invalid_configuration_is_rejected(kwargs):
     with pytest.raises(ValueError):
         study.configuration(**kwargs)
+
+
+def test_validation_schedule_is_additive_bounded_and_part_of_plan_identity():
+    config = study.configuration(iteration_budgets=(40, 100), checkpoint_interval=25,
+                                 validation_iterations=(10, 25, 30, 150))
+    setting = study.experiment_settings(0, 0)[0]
+    resolved = study.resolved_configuration(setting, config)
+    assert resolved["validation_schedule"] == [0, 10, 25, 30, 40, 50, 75, 100]
+    assert resolved["validation_iterations"] == [10, 25, 30, 150]
+    assert resolved["validation_state_policy"] == "checkpoints_and_validation_bests"
+    plan = study.make_plan(models=(0,), experiments=(0,), seed_ids=(0,), config=config)
+    other = study.make_plan(models=(0,), experiments=(0,), seed_ids=(0,), config={
+        **config, "validation_iterations": [10, 25, 35, 150]})
+    assert plan["plan_fingerprint"] != other["plan_fingerprint"]
+    study.validate_plan(plan)
+    study.validate_plan(other)
+
+
+@pytest.mark.parametrize("arguments, expected", [
+    (["10", "25", "50"], [10, 25, 50]),
+    (["10,25", "50"], [10, 25, 50]),
+    (["none"], []),
+])
+def test_planner_cli_canonicalizes_validation_iteration_list(tmp_path, arguments, expected):
+    assert study.main(["plan", "--output-root", str(tmp_path), "--models", "0",
+        "--experiments", "0", "--seed-ids", "0", "--validation-iterations", *arguments]) == 0
+    assert study.read_json(tmp_path/"study-plan.json")["configuration"]["validation_iterations"] == expected
+
+
+@pytest.mark.parametrize("arguments", [["none", "10"], ["10,"], ["10.5"], ["0"], ["25,10"],
+                                      ["+10"], [" 10"], ["10 "], ["10, 25"]])
+def test_planner_cli_rejects_invalid_validation_iteration_list(tmp_path, arguments):
+    with pytest.raises(SystemExit) as error:
+        study.main(["plan", "--output-root", str(tmp_path), "--models", "0",
+            "--experiments", "0", "--seed-ids", "0", "--validation-iterations", *arguments])
+    assert error.value.code == 2
+    assert not (tmp_path/"study-plan.json").exists()
+
+
+def test_old_plan_and_records_keep_periodic_only_identity(tmp_path):
+    legacy = study.configuration(iteration_budgets=(2, 4), checkpoint_interval=2,
+                                 penalties_u=(.01,), penalties_v=(.01,))
+    legacy.pop("validation_iterations")
+    plan = study.make_plan(models=(0,), experiments=(0,), seed_ids=(0,), setting_index=0,
+                           config=legacy)
+    fingerprint = plan["plan_fingerprint"]
+    study.write_plan(plan, tmp_path)
+    study.validate_plan(plan)
+    assert "validation_iterations" not in plan["configuration"]
+    path, record, _ = save_cell(tmp_path, plan, plan["cells"][0])
+    assert "validation_schedule" not in record["configuration"]
+    assert "validation_iterations" not in record["configuration"]
+    assert "validation_state_policy" not in record["configuration"]
+    assert study.aggregate(tmp_path)["execution_complete"]
+    assert study.read_json(tmp_path/"study-plan.json")["plan_fingerprint"] == fingerprint
 
 
 def test_resume_requires_matching_configuration_and_table(tmp_path):

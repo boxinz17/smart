@@ -361,8 +361,11 @@ The default independent-budget mode is unchanged.
 
 The capture schedule is the union of iteration zero, multiples of
 `checkpoint_interval` (250 by default in continuous mode), all requested
-comparison budgets, and the maximum budget. Validation is evaluated only at
-those scheduled points, plus an earlier stationary terminal iterate. A computed
+comparison budgets, and the maximum budget. Validation is evaluated at
+those scheduled points, optional additive `validation_iterations`, and a
+successful terminal iterate. The extra schedule defaults to empty, is strictly
+increasing and unique, and accepts nonnegative integers; points beyond the
+maximum budget are ignored. It never adds full checkpoints. A computed
 pairwise loss difference of zero retains the earlier evaluated state.
 Validation never modifies a gradient or an acceptance condition. The initializer participates in validation
 selection once a positive prefix completes, but cannot by itself rescue a
@@ -373,8 +376,15 @@ Each estimator stores compact original-chart endpoint and selected states in
 `checkpoints_`. The `checkpoint_model(t)` view reconstructs coefficients,
 truncated histories, and selected/terminal diagnostics without fitting. Views
 are independent of the ongoing or failed parent estimator's mutable arrays.
-Nonfinite objective/gradient callback records do not become successful
-checkpoints. Capturing state is not a disk-resume protocol.
+Nonfinite objective/gradient callback records are excluded from validation
+selection and do not become successful checkpoints. Improving extra validation
+states are kept in the read-only `best_validation_states_` mapping; losing
+extra points keep scalar diagnostics only. Every early improvement is retained,
+even if superseded before the next full checkpoint. These states do not certify
+new finite prefixes: only the ordinary full checkpoints or successful stationary
+termination can establish cap coverage. Prefix views truncate both retained
+extra states and their validation histories. Capturing state is not a disk-resume
+protocol.
 
 Continuous tuning reconstructs canonical validation predictions from compact
 checkpoint states and compares them pairwise, then constructs models only for

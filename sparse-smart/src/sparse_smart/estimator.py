@@ -4,6 +4,7 @@ from __future__ import annotations
 import numbers
 from copy import deepcopy
 from dataclasses import dataclass
+from types import MappingProxyType
 import numpy as np
 
 from .anchors import AnchorFailure, select_anchor
@@ -92,6 +93,29 @@ def _checkpoint_schedule(values, iterations):
     return tuple(sorted(int(value) for value in values))
 
 
+def _validation_schedule(values):
+    """Validate an additive schedule; points beyond a fit's cap are harmless."""
+    try:
+        values = tuple(values)
+    except TypeError as error:
+        raise ValueError("validation_iterations must be a sequence of nonnegative integers") from error
+    if any(isinstance(value, (bool, np.bool_)) or not isinstance(value, numbers.Integral)
+           or value < 0 for value in values):
+        raise ValueError("validation_iterations must contain nonnegative integers")
+    if any(a >= b for a, b in zip(values, values[1:])):
+        raise ValueError("validation_iterations must be strictly increasing and unique")
+    return tuple(int(value) for value in values)
+
+
+def _finite_accepted_record(state, record):
+    # A solver can report a newly accepted state whose gradient evaluation then
+    # failed. Such a state is neither a selectable iterate nor a finite prefix.
+    return (np.all(np.isfinite(state))
+            and all(value is not None and np.isfinite(value) for value in
+                    (record.objective, record.smooth_loss, record.penalty_value,
+                     record.raw_gradient_norm)))
+
+
 class SparseSMART:
     """Sparse spectral transfer regression from a supplied source experiment.
 
@@ -111,6 +135,7 @@ class SparseSMART:
         spectral_step: str = "auto", stationarity_tol: float | None = None,
         initialization_spectrum: str = "auto", refinement_solver: str = "auto",
         checkpoint_iterations=None, validation_interval: int = 1,
+        validation_iterations=(),
     ):
         if not isinstance(initialization_spectrum, str) or initialization_spectrum not in ("auto", "projected", "reject"):
             raise ValueError("initialization_spectrum must be 'auto', 'projected', or 'reject'")
@@ -127,6 +152,20 @@ class SparseSMART:
         self.initialization_spectrum = initialization_spectrum
         self.refinement_solver = refinement_solver
         self.checkpoint_iterations, self.validation_interval = checkpoint_iterations, validation_interval
+        self.validation_iterations = validation_iterations
+
+    @property
+    def best_validation_states_(self):
+        """Read-only view of compact early winners, without storing a proxy.
+
+        A plain private dictionary keeps whole fitted estimators compatible
+        with deepcopy and pickle. NumPy reconstruction may restore writable
+        arrays, so freeze them again before exposing the public view.
+        """
+        states = self._best_validation_states_
+        for state in states.values():
+            state.setflags(write=False)
+        return MappingProxyType(states)
 
     def _failure(self, status, message):
         self.status_, self.message_, self.success_ = status, str(message), False
@@ -148,6 +187,11 @@ class SparseSMART:
         requires explicit allow_partial=True in that case. Optional validation
         data select the best accepted iterate, including the initializer; they
         never enter initialization, gradients, or line-search acceptance.
+        ``validation_iterations`` adds evaluation points to the periodic and
+        full-checkpoint schedules without creating additional checkpoints.
+        Points beyond ``iterations`` are ignored. Improving extra points are
+        retained in the read-only ``best_validation_states_`` mapping; their
+        optimization diagnostics remain in ``history_``.
         """
         cache = self.__dict__.pop("_fit_cache", None)
         validation_reference = cache.validation_reference if cache is not None else ValidationReference()
@@ -190,7 +234,11 @@ class SparseSMART:
             if isinstance(value, (bool, np.bool_)) or not isinstance(value, numbers.Integral) or value < minimum:
                 raise ValueError(f"{name} must be an integer >= {minimum}")
         requested_checkpoints = _checkpoint_schedule(self.checkpoint_iterations, self.iterations)
+        requested_validation = _validation_schedule(self.validation_iterations)
+        extra_validation = {t for t in requested_validation if t <= self.iterations}
         self.checkpoints_, self.checkpoint_iterations_ = {}, ()
+        retained_validation_states = {}
+        self._best_validation_states_ = retained_validation_states
         for name, value in (("lasso_tol", self.lasso_tol),
                             ("orthogonality_tol", self.orthogonality_tol), ("tie_tol", self.tie_tol)):
             _positive_real(value, name)
@@ -204,6 +252,8 @@ class SparseSMART:
         self.termination_reason_, self.converged_, self.optimization_converged_ = None, False, False
         self.diagnostics_ = {"theorem_certified": False, "arithmetic": "float64",
                              "selection_rule": SELECTION_RULE,
+                             "validation_iterations_requested": requested_validation,
+                             "validation_iterations": [],
                              "same_target_data": True, "input_rescaling": False}
         source_noise = source.noise_std if isinstance(source, NoisySource) else 0.
         source_gap = source.gap_lower if isinstance(source, NoisySource) else None
@@ -350,7 +400,10 @@ class SparseSMART:
             nonlocal selected_state, selected_iteration
             self.history_.append(record)
             self.n_iter_ = iteration
+            if not _finite_accepted_record(state, record):
+                return
             eligible = (iteration == 0 or iteration % self.validation_interval == 0
+                        or iteration in extra_validation
                         or requested_checkpoints is not None and iteration in requested_checkpoints)
             if validation_data is not None and eligible:
                 evaluate_validation(iteration, state)
@@ -377,19 +430,22 @@ class SparseSMART:
                 "selection_score": selection_score, "selection_rule": SELECTION_RULE,
                 "selection_comparison": {"incumbent_iteration": selected_iteration,
                                          "loss_difference": difference}})
+            self.diagnostics_["validation_iterations"].append(iteration)
             if selected_prediction is None or difference < 0:
                 self.best_validation_loss_ = score
                 self.best_selection_score_ = selection_score
                 selected_state, selected_iteration = state.copy(), iteration
                 selected_prediction = prediction.copy()
+                if (iteration in extra_validation and iteration != 0
+                        and (requested_checkpoints is None or iteration not in requested_checkpoints)):
+                    saved = state.copy()
+                    saved.setflags(write=False)
+                    retained_validation_states[iteration] = saved
 
         def capture(iteration, state, record, *, terminal=None):
             # Solvers also observe an accepted state whose subsequent gradient
             # evaluation failed. That record is not a successful finite prefix.
-            if (not np.all(np.isfinite(state))
-                    or any(value is None or not np.isfinite(value) for value in
-                           (record.objective, record.smooth_loss, record.penalty_value,
-                            record.raw_gradient_norm))):
+            if not _finite_accepted_record(state, record):
                 return
             status, reason = "completed", "max_iterations"
             message = f"Completed {iteration} refinement updates in a retained trajectory prefix."
@@ -420,10 +476,11 @@ class SparseSMART:
             result = refine_anchor_projected(self.chart_, x0, Z, W, **solver_options)
         else:
             result = refine(self.chart_, x0, Z, W, spectral_step=self.spectral_step_, **solver_options)
-        if result.success and result.termination_reason == "stationarity":
+        if (result.success and result.history
+                and _finite_accepted_record(result.state, result.history[-1])):
             if validation_data is not None:
                 evaluate_validation(result.n_iter, result.state)
-            if requested_checkpoints is not None and result.history:
+            if requested_checkpoints is not None and result.termination_reason == "stationarity":
                 capture(result.n_iter, result.state, result.history[-1], terminal=result)
         if cache is None and validation_reference.prediction is not None:
             self.validation_reference_prediction_ = validation_reference.prediction.copy()
@@ -515,6 +572,8 @@ class SparseSMART:
             snapshot.best_selection_score)
         diagnostics = deepcopy(self.diagnostics_)
         diagnostics.update(metadata)
+        diagnostics["validation_iterations"] = [row["iteration"] for row in
+            self.validation_history_[:snapshot.validation_history_length]]
         return dict(success=result.success, status=snapshot.status, message=snapshot.message,
                     validation_mse=snapshot.best_validation_loss, selected_iteration=snapshot.selected_iteration,
                     selection_score=snapshot.best_selection_score, selection_rule=SELECTION_RULE,
@@ -540,7 +599,7 @@ class SparseSMART:
         excluded = {"checkpoints_", "history_", "validation_history_", "result_",
                     "coefficient_", "last_coefficient_", "factors_", "left_factors_", "right_factors_",
                     "singular_values_", "state_", "last_state_", "supports_", "raw_supports_",
-                    "validation_reference_prediction_"}
+                    "validation_reference_prediction_", "_best_validation_states_"}
         view.__dict__ = deepcopy({key: value for key, value in vars(self).items() if key not in excluded})
         view.iterations = snapshot.iteration
         view.checkpoints_ = deepcopy({key: value for key, value in self.checkpoints_.items()
@@ -548,6 +607,12 @@ class SparseSMART:
         view.checkpoint_iterations_ = tuple(sorted(view.checkpoints_))
         view.checkpoint_iterations = view.checkpoint_iterations_
         view.validation_history_ = deepcopy(self.validation_history_[:snapshot.validation_history_length])
+        retained_validation_states = {t: state.copy() for t, state in self.best_validation_states_.items()
+                                      if t <= snapshot.iteration}
+        for state in retained_validation_states.values():
+            state.setflags(write=False)
+        view._best_validation_states_ = retained_validation_states
+        view.diagnostics_["validation_iterations"] = [row["iteration"] for row in view.validation_history_]
         view.best_validation_loss_ = snapshot.best_validation_loss
         view.best_selection_score_ = snapshot.best_selection_score
         result = _result(snapshot.state.copy(), snapshot.status, snapshot.message, snapshot.iteration,

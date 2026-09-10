@@ -9,15 +9,16 @@ it does not contain the later audit fixes. Use the editable source installation
 in the [environment guide](../environment/README.md) for current runs.
 
 The budget study uses one continuous solver trajectory per parameter setting.
-It captures checkpoints every 250 updates and compares maximum budgets 500,
+It captures regular checkpoints every 250 updates, validates additionally at
+iterations 10, 25, 50, 100, 150, and 200, and compares maximum budgets 500,
 1,000, 2,000, 4,000, and 8,000. The existing independent-budget runners retain
 their previous behavior. This study has separate result files and summaries.
 
 The default study is 45 cells: three model sizes, fitted source ranks 5 and 7
-and source noise 0.5, each on saved seed IDs 0–4. Each cell uses the nine
-left/right penalty combinations from {0.0025, 0.01, 0.04}, initializer penalty
-0.03, projected initialization, and the practical anchor solver. There are
-405 trajectories, each with a maximum of 8,000 updates. All original training
+and source noise 0.5, each on saved seed IDs 0–4. Each cell uses 48 combinations:
+initialization penalties {0.01, 0.03, 0.1} crossed with left/right penalties
+{0.0025, 0.01, 0.04, 0.16}, projected initialization, and the practical anchor
+solver. There are 2,160 trajectories, each with a maximum of 8,000 updates. All original training
 rows and 100 independent validation rows are used; the training size is 200,
 300, or 500 according to the paper-grid setting. No competing method is fitted.
 
@@ -26,6 +27,34 @@ MSE and relative `selection_score`, diagnostic coefficient RMSE, objective,
 movement, and stationarity components. Compact ambient factors make both selected and endpoint scores
 independently reproducible. Coefficient truth is read for reporting after
 selection; it is never supplied to the tuner.
+
+Extra validation times are separate from regular state checkpoints. At an
+extra time, the trajectory records validation metadata and retains factors if
+the validation best improves; regular checkpoints, attained cap endpoints,
+and successful stationary endpoints retain their states. Failed terminal
+endpoints retain diagnostic records. Thus an early selected
+iterate is recoverable without storing a full state for every validation
+check. The summary distinguishes factor-audited validation decisions from
+checks whose saved evidence is metadata only.
+
+`--validation-iterations` accepts a comma-separated or space-separated list
+of positive, unique, increasing iterations, or `none` to disable the extra
+checks. The actual validation schedule is the sorted union of those times
+within the maximum budget, initialization, regular checkpoints, and budget
+caps. The declared extra times, effective schedule, and state-retention policy
+are recorded in result provenance. Historical records lacking this field keep
+their original periodic-only schedule and identity; they are not retroactively
+treated as densely validated.
+
+This pilot expands each refinement penalty grid upward to `0.16` and tunes
+initialization over `0.01, 0.03, 0.1` by default. It is intended to resolve early
+validation minima, upper-bound penalty selections, and sensitivity to
+initialization regularization. `--init-penalties` controls the initialization
+grid, and the distributed
+launcher splits their full Cartesian product with the U/V grids across tasks.
+Report initializer-selected cases separately because refinement
+penalties can tie there. A wider search should be evaluated on observations
+separate from the validation sample used to select the model.
 
 Selection compares each prediction `P` directly with the incumbent using
 `mean((P-P_incumbent)*((P-Y)+(P_incumbent-Y)))`, with extended-precision
@@ -106,6 +135,7 @@ Inspect the complete five-seed study without fitting:
 ```sh
 ../.venv/bin/python \
   run_sparse_smart_budget_study.py --seed-count 5 --workers 3 \
+  --validation-iterations 10 25 50 100 150 200 \
   --output-root result/sparse_smart_budget_study_current --dry-run
 ```
 
@@ -201,19 +231,55 @@ target rank 5. These constraints also occur in the initializer and source
 chart. Fitting those cases would require a declared method extension, not
 simply removal of the runner checks.
 
-The remaining 6,300 cases each use nine penalty combinations by default:
-56,700 continuous trajectories, each capped at 8,000 updates with stationarity
+The remaining 6,300 cases each use 48 penalty combinations by default:
+302,400 continuous trajectories, each capped at 8,000 updates with stationarity
 stopping enabled. The five budgets are views of each trajectory, not five
 independent fits. Each case uses its paper-grid training sample size and 100
 independent validation observations. Fitted rank changes do not change the
 generator's true ranks, which remain 5 and 10.
 
-The distributed launcher creates one manifest/output root per case and then
-assembles a single study root for `--manifest-scope` auditing. It retains
+Start with saved seed IDs 0–2 and 32 workers to measure the expanded tuning
+grid and early validation schedule before launching the full scope:
+
+```bash
+bash hpc/discovery/submit_budget_study.sh --workers 32 --seeds 0-2 \
+  --tuning-task-size 1 \
+  --validation-iterations 10,25,50,100,150,200 \
+  --init-penalties .01,.03,.1 --penalties-u .0025,.01,.04,.16 \
+  --penalties-v .0025,.01,.04,.16 --dry-run
+```
+
+Run this from the repository root on Discovery. The preview declares 216
+cases, with 189 applicable cases, 27 exclusions, and 9,072 trajectories.
+The default `--tuning-task-size 1` creates 9,099 GNU Parallel work items:
+one per trajectory plus one per inapplicable case. One seed therefore creates
+3,033 work items; the full 100-seed scope creates 303,300. This is still one
+Slurm allocation with at most `--workers` single-CPU steps active at once.
+`--dry-run` creates a source snapshot and plan but submits no job. Choose
+the worker count and whole-pool wall time for the actual submission based on
+cluster availability and pilot measurements.
+
+`--tuning-task-size N` combines up to N penalty combinations in each work item,
+holding initializer and U fixed while grouping consecutive V values. With the
+default three-by-four-by-four grid, sizes 1, 2, and 4 produce 48, 24, and 12 fitting
+work items per applicable case. `--tuning-task-size all` restores the original
+whole-case work item. Smaller groups reduce the scheduling tail for uneven
+runtimes, at the cost of repeated data generation/initialization and more
+Slurm steps. All groups use the same saved data seed and validation schedule.
+
+The distributed launcher creates one manifest/output root per work item and
+archives the shared tuning overrides in `task-configs/g<first-grid-id>.sh`.
+After verifying the runtime, it merges
+the saved subsets into one result per original data case, comparing saved
+predictions in the original grid order before `--manifest-scope` auditing.
+The merge preserves selection tie-breaking and records incomplete candidate
+coverage; it performs no estimator fitting. If runtime verification fails,
+collection reports metadata and missing cases without scientifically merging
+the subsets. It retains
 inapplicable, missing, and failed cases explicitly. Do not point independent
 driver processes at one shared output root. The launcher and audit perform no
-competing-method fits. Checkpoints remain in-memory during a cell's fitting;
-an interrupted cell must restart, while completed compatible records can be
+competing-method fits. Checkpoints remain in-memory during a task's fitting;
+an interrupted task must restart, while completed compatible records can be
 verified and reused by the runner. Plan storage for the full checkpoint
 artifacts and their durable archives; the one-cell pilot does not establish
 the full grid's wall time or output volume.

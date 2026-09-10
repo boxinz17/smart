@@ -6,9 +6,10 @@ usage() {
     cat <<'EOF'
 Usage: submit_budget_study.sh --workers N [options]
 
-One GNU Parallel pool; each Slurm step fits one model/experiment/setting/seed.
+One GNU Parallel pool; each Slurm step fits a tuning subset of one data case.
 The full defaults request 7,200 cells, including 900 inapplicable records.
-The nine penalty combinations are continuous trajectories, each capped at 8,000.
+The 48 penalty combinations are continuous trajectories, each capped at 8,000;
+by default each combination gets its own work item (303,300 for 100 seeds).
 
 Study options:
   --models IDS             IDs 0-2 (default: 0-2)
@@ -16,11 +17,17 @@ Study options:
   --seeds IDS              Saved seed IDs 0-99 (default: 0-99)
   --setting-index N        Restrict one model and experiment to one grid setting
   --iteration-budgets IDS  Increasing caps (default: 500,1000,2000,4000,8000)
-  --checkpoint-interval N  Validation/checkpoint interval (default: 250)
-  --init-penalties VALUES  Initializer grid (default: .03)
-  --penalties-u VALUES     Left penalty grid (default: .0025,.01,.04)
-  --penalties-v VALUES     Right penalty grid (default: .0025,.01,.04)
+  --checkpoint-interval N  Regular validation/checkpoint interval (default: 250)
+  --validation-iterations VALUES
+                          Extra validation times (default: 10,25,50,100,150,200)
+                          Use none for only regular checkpoints and budget caps
+  --init-penalties VALUES  Initializer grid (default: .01,.03,.1)
+  --penalties-u VALUES     Left penalty grid (default: .0025,.01,.04,.16)
+  --penalties-v VALUES     Right penalty grid (default: .0025,.01,.04,.16)
   --stationarity-tol X     Certified early-stop tolerance (default: 1e-6)
+  --tuning-task-size N|all Maximum penalty combinations per work item (default: 1)
+                          N chunks V while fixing initializer and U; all keeps
+                          every combination for a data case in one work item
 
 Lists accept comma-separated or space-separated values; ID lists also accept
 ascending ranges and strides, such as 0,2,5-9 or 0-98:2. Profile is always full.
@@ -41,7 +48,7 @@ VENV and SMART_PARALLEL_MODULE select existing runtime installations.
 No packages are installed. Each task uses one CPU and runner --workers 1;
 Slurm distributes steps across the allocated nodes. No node count is fixed.
 The CPU allocation is fixed once granted; choose --workers based on current
-availability. Values above the number of planned cells are capped to that count.
+availability. Values above the number of planned work items are capped to that count.
 EOF
 }
 die() { printf 'Error: %s\n' "$*" >&2; exit 2; }
@@ -49,8 +56,9 @@ need_value() { [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || die "$1 needs a value
 
 models=0-2 experiments=0-3 seeds=0-99 settings=''
 budgets=500,1000,2000,4000,8000 checkpoint_interval=250
-init_penalties=.03 penalties_u=.0025,.01,.04 penalties_v=.0025,.01,.04
-stationarity_tol=1e-6 workers='' time_limit=24:00:00 memory=8G dry_run=0
+validation_iterations=10,25,50,100,150,200
+init_penalties=.01,.03,.1 penalties_u=.0025,.01,.04,.16 penalties_v=.0025,.01,.04,.16
+stationarity_tol=1e-6 tuning_task_size=1 workers='' time_limit=24:00:00 memory=8G dry_run=0
 account=${SMART_ACCOUNT:-mkolar_1314}
 partition=${SMART_PARTITION:-main}
 run_root=${SMART_RUN_ROOT:-/scratch1/${USER}/smart/runs}
@@ -59,7 +67,7 @@ planner=${SMART_PLAN_PYTHON:-python3}
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --help|-h) usage; exit 0 ;;
-        --models|--experiments|--seeds|--iteration-budgets|--init-penalties|--penalties-u|--penalties-v)
+        --models|--experiments|--seeds|--iteration-budgets|--validation-iterations|--init-penalties|--penalties-u|--penalties-v)
             flag=$1; shift; values=()
             while [[ $# -gt 0 && "$1" != --* ]]; do values+=("$1"); shift; done
             [[ ${#values[@]} -gt 0 ]] || die "$flag needs a list"
@@ -69,6 +77,7 @@ while [[ $# -gt 0 ]]; do
                 --experiments) experiments=$joined ;;
                 --seeds) seeds=$joined ;;
                 --iteration-budgets) budgets=$joined ;;
+                --validation-iterations) validation_iterations=$joined ;;
                 --init-penalties) init_penalties=$joined ;;
                 --penalties-u) penalties_u=$joined ;;
                 --penalties-v) penalties_v=$joined ;;
@@ -76,6 +85,7 @@ while [[ $# -gt 0 ]]; do
         --setting-index) need_value "$@"; settings=$2; shift 2 ;;
         --checkpoint-interval) need_value "$@"; checkpoint_interval=$2; shift 2 ;;
         --stationarity-tol) need_value "$@"; stationarity_tol=$2; shift 2 ;;
+        --tuning-task-size) need_value "$@"; tuning_task_size=$2; shift 2 ;;
         --workers) need_value "$@"; workers=$2; shift 2 ;;
         --time) need_value "$@"; time_limit=$2; shift 2 ;;
         --mem) need_value "$@"; memory=$2; shift 2 ;;
@@ -112,6 +122,7 @@ parse_indices "$experiments" 3 experiment; experiment_ids=("${parsed_indices[@]}
 parse_indices "$seeds" 99 seed; seed_ids=("${parsed_indices[@]}")
 [[ -n "$workers" ]] || die '--workers is required; choose the CPU concurrency for this submission (for example, 16, 32, or 64)'
 [[ "$workers" =~ ^[1-9][0-9]*$ && ${#workers} -le 6 ]] || die '--workers must be a positive integer of at most six digits'
+[[ "$tuning_task_size" == all || "$tuning_task_size" =~ ^[1-9][0-9]*$ ]] || die '--tuning-task-size must be a positive integer or all'
 [[ "$time_limit" =~ ^[0-9:-]+$ ]] || die 'Invalid --time'
 [[ "$memory" =~ ^[1-9][0-9]*[KkMmGgTt]?$ ]] || die 'Invalid --mem'
 [[ "$account" =~ ^[A-Za-z0-9_.-]+$ ]] || die 'Invalid --account'
@@ -150,11 +161,12 @@ rsync -a --prune-empty-dirs \
     "$repo/" "$run_dir/source/"
 
 budget_args=(--iteration-budgets "${budget_ids[@]}" --checkpoint-interval "$checkpoint_interval"
+    --validation-iterations "$validation_iterations"
     --init-penalties "$init_penalties" --penalties-u "$penalties_u" --penalties-v "$penalties_v"
     --stationarity-tol "$stationarity_tol")
 plan_args=("$planner" "$run_dir/source/simulation/discovery_budget_study.py" plan
     --output-root "$run_dir" --models "${model_ids[@]}" --experiments "${experiment_ids[@]}"
-    --seed-ids "${seed_ids[@]}" --profile full "${budget_args[@]}")
+    --seed-ids "${seed_ids[@]}" --profile full --tuning-task-size "$tuning_task_size" "${budget_args[@]}")
 if [[ -n "$settings" ]]; then plan_args+=(--setting-index "$settings"); fi
 PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 "${plan_args[@]}"
 [[ -s "$run_dir/work-items.tsv" && -s "$run_dir/study-plan.json" ]] || die 'Planner did not produce the expected artifacts'
@@ -173,6 +185,7 @@ if (( pool_workers > work_count )); then pool_workers=$work_count; fi
     printf 'Created UTC: %s\nSource: %s\nRun: %s\nArchive: %s\n' "$(date -u +%FT%TZ)" "$repo" "$run_dir" "$archive_dir"
     printf 'Work items: %s\nRequested workers: %s\nEffective workers: %s\nMemory per CPU: %s\nWhole-pool time: %s\n' "$work_count" "$workers" "$pool_workers" "$memory" "$time_limit"
     printf 'Account: %s\nPartition: %s\n' "$account" "$partition"
+    printf 'Tuning combinations per task: %s\n' "$tuning_task_size"
     printf 'Plan command: '; printf '%q ' "${plan_args[@]}"; printf '\n'
     if git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         printf '\nGit HEAD:\n'; git -C "$repo" rev-parse HEAD
@@ -186,6 +199,7 @@ submit=(sbatch --parsable --account="$account" --partition="$partition" --job-na
     "$run_dir/source/hpc/discovery/budget_pool.sbatch" "$run_dir")
 { printf '%q ' "${submit[@]}"; printf '\n'; } > "$run_dir/submission-command.txt"
 rsync -a "$run_dir/source/" "$archive_dir/source/"
+if [[ -d "$run_dir/task-configs" ]]; then rsync -a "$run_dir/task-configs/" "$archive_dir/task-configs/"; fi
 rsync -a "$run_dir/study-plan.json" "$run_dir/work-items.tsv" "$run_dir/budget-job-config.sh" \
     "$run_dir/manifest.txt" "$run_dir/submission-command.txt" "$archive_dir/"
 printf 'Run directory: %s\nArchive directory: %s\nWork items: %s; simultaneous single-CPU steps: %s\nCommand: ' "$run_dir" "$archive_dir" "$work_count" "$pool_workers"
