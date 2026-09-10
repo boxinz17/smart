@@ -24,6 +24,29 @@ or updates packages. The check uses each job's saved source snapshot.
 `hpc/discovery/python-constraints.txt` is a compatibility include of the
 root file, not a separate set of pins.
 
+Discovery workers and the final merge/audit use the fixed OpenBLAS kernel
+`Haswell`, exported by `env.sh` before its first Python invocation. This
+overrides inherited `OPENBLAS_CORETYPE` values so different node generations
+follow the same numerical policy. Before importing NumPy or SciPy, the runtime
+check requires AVX2 and FMA CPU flags in `/proc/cpuinfo`. It then verifies that
+both packages loaded OpenBLAS with the Haswell architecture and one thread;
+an unsupported CPU, missing backend, or silent kernel fallback fails the job.
+NumPy SIMD dispatch is also fixed: the pinned NumPy 2.5.3 Linux wheel must
+report the compiled baseline `X86_V2` and exactly the audited optional groups
+`X86_V3,X86_V4,AVX512_ICL,AVX512_SPR`. `env.sh` forces all four groups off with
+`NPY_DISABLE_CPU_FEATURES` before Python starts. The checker rejects a different
+baseline/dispatch build, an unavailable baseline, or an enabled optional group,
+and records the baseline, dispatch groups, and active CPU feature flags.
+
+The runtime report records the requested numerical environment and active
+library paths, versions, architectures, and thread counts. Worker reports are
+in `tasks/<task-id>/slurm.out`; the controller report is in
+`logs/environment.txt`, and both are archived. Fixed package versions alone
+do not establish matching floating-point results across node types; use a
+cross-node data-fingerprint check before a new campaign. Historical runs keep
+their original saved environment and provenance. Use a fresh results root
+after changing the numerical policy.
+
 ## Install packages
 
 The bootstrap runs on a compute node and installs packages without running
