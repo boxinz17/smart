@@ -75,7 +75,7 @@ def _stub_merger(monkeypatch, root, plan, *, statuses=None):
     return calls
 
 
-@pytest.mark.parametrize("seeds, size, expected_tasks", [((0,), 1, 3033), ((0, 1, 2), 1, 9099), ((0,), 2, 1521)])
+@pytest.mark.parametrize("seeds, size, expected_tasks", [((0,), 1, 6309), ((0, 1, 2), 1, 18927), ((0,), 2, 3789)])
 def test_tuning_tasks_expand_execution_without_changing_scientific_cells(seeds, size, expected_tasks):
     plan = study.make_plan(seed_ids=seeds, tuning_task_size=size)
     assert plan["expected_cells"] == 72*len(seeds)
@@ -91,16 +91,24 @@ def test_tuning_tasks_expand_execution_without_changing_scientific_cells(seeds, 
     study.validate_plan(plan)
 
 
-@pytest.mark.parametrize("size, expected_tasks", [(1, 75), (2, 45), (4, 30), (20, 15)])
-def test_75_combination_grid_chunks_do_not_cross_initialization_or_u_boundaries(size, expected_tasks):
-    config = study.configuration(init_penalties=(.01, .03, .1),
-        penalties_u=(.000625, .0025, .01, .04, .16), penalties_v=(.000625, .0025, .01, .04, .16))
+@pytest.mark.parametrize("penalties, size, expected_tasks", [
+    ((.0025, .01, .04, .16, .32), 1, 100),
+    ((.0025, .01, .04, .16, .32), 2, 60),
+    ((.0025, .01, .04, .16, .32), 4, 40),
+    ((.0025, .01, .04, .16, .32), 20, 20),
+    ((.001, .0025, .01, .04, .16, .32), 1, 144),
+    ((.001, .0025, .01, .04, .16, .32), 2, 72),
+    ((.001, .0025, .01, .04, .16, .32), 4, 48),
+    ((.001, .0025, .01, .04, .16, .32), 20, 24),
+])
+def test_expanded_grid_chunks_do_not_cross_initialization_or_u_boundaries(penalties, size, expected_tasks):
+    config = study.configuration(penalties_u=penalties, penalties_v=penalties)
     plan = study.make_plan(models=(0,), experiments=(0,), seed_ids=(0,), setting_index=0,
                            config=config, tuning_task_size=size)
     tasks = study.planned_tasks(plan)
     assert plan["expected_cells"] == 1 and plan["expected_tasks"] == expected_tasks
     grid = study.resolved_configuration(plan["cells"][0]["simulation_setting"], config)["candidate_grid"]
-    assert [identifier for task in tasks for identifier in task["grid_candidate_ids"]] == list(range(75))
+    assert [identifier for task in tasks for identifier in task["grid_candidate_ids"]] == list(range(4*len(penalties)**2))
     for task in tasks:
         ids = task["grid_candidate_ids"]
         assert 1 <= len(ids) <= size and ids == list(range(ids[0], ids[-1]+1))
@@ -138,8 +146,8 @@ def test_cli_defaults_to_single_combination_tasks_and_all_preserves_legacy_layou
     default_root, all_root = tmp_path/"default", tmp_path/"all"
     assert study.main(["plan", "--output-root", str(default_root), "--seed-ids", "0"]) == 0
     default = study.read_json(default_root/"study-plan.json")
-    assert default["tuning_task_size"] == 1 and default["expected_tasks"] == 3033
-    assert default["configuration"]["init_penalties"] == [.01, .03, .1]
+    assert default["tuning_task_size"] == 1 and default["expected_tasks"] == 6309
+    assert default["configuration"]["init_penalties"] == [.01, .03, .1, .3]
     assert study.main(["plan", "--output-root", str(all_root), "--seed-ids", "0",
                        "--tuning-task-size", "all"]) == 0
     legacy = study.read_json(all_root/"study-plan.json")
@@ -160,7 +168,7 @@ def test_sharded_planner_still_runs_without_site_packages(tmp_path):
     result = subprocess.run([sys.executable, "-S", "-c", code, str(study.HERE), str(tmp_path)],
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    assert len((tmp_path/"work-items.tsv").read_text().splitlines()) == 48
+    assert len((tmp_path/"work-items.tsv").read_text().splitlines()) == 100
 
 
 @pytest.mark.parametrize("size", [0, -1, True, 1.5, "all"])

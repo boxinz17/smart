@@ -63,11 +63,11 @@ def test_full_plan_has_exact_existing_scope_and_explicit_exclusions():
     assert (plan["expected_cells"], plan["expected_applicable"], plan["expected_inapplicable"]) == (7200, 6300, 900)
     assert len({cell["task_id"] for cell in plan["cells"]}) == 7200
     assert plan["configuration"]["stationarity_tol"] == 1e-6
-    assert len(plan["configuration"]["penalties_u"])*len(plan["configuration"]["penalties_v"]) == 16
-    assert plan["configuration"]["init_penalties"] == [.01, .03, .1]
+    assert len(plan["configuration"]["penalties_u"])*len(plan["configuration"]["penalties_v"]) == 25
+    assert plan["configuration"]["init_penalties"] == [.01, .03, .1, .3]
     assert (len(plan["configuration"]["init_penalties"])*len(plan["configuration"]["penalties_u"])
-            *len(plan["configuration"]["penalties_v"])) == 48
-    assert plan["configuration"]["validation_iterations"] == [10, 25, 50, 100, 150, 200]
+            *len(plan["configuration"]["penalties_v"])) == 100
+    assert plan["configuration"]["validation_iterations"] == [1, 2, 5, 10, 15, 20, 25, 50, 100, 150, 200]
     assert {cell["inapplicability_reason"] for cell in plan["cells"]} == {
         None, "source_rank_must_be_positive", "target_rank_exceeds_source_rank"}
 
@@ -82,7 +82,7 @@ def test_planner_runs_without_site_packages_or_estimator_imports(tmp_path):
     completed = subprocess.run([sys.executable, "-S", "-c", code, str(study.HERE), str(tmp_path)],
                                capture_output=True, text=True)
     assert completed.returncode == 0, completed.stderr
-    assert len((tmp_path/"work-items.tsv").read_text().splitlines()) == 48
+    assert len((tmp_path/"work-items.tsv").read_text().splitlines()) == 100
     assert (tmp_path/"work-items.tsv").read_text().startswith("m0_e0_s0_k0_g0\t0\t0\t0\t0")
 
 
@@ -109,6 +109,30 @@ def test_grid_configuration_and_source_identity_match_runner_without_fits(monkey
         expected = source["implementation"][str(applicable).lower()]
         assert expected["manifest"] == provenance["implementation_manifest"]
         assert expected["fingerprint"] == provenance["implementation_fingerprint"]
+
+
+@pytest.mark.parametrize("source_rank, setting_index, penalties, trajectories", [
+    (5, 2, (.001, .0025, .01, .04, .16, .32), 144),
+    (7, 3, (.0025, .01, .04, .16, .32), 100),
+])
+def test_targeted_probe_configuration_matches_runner(monkeypatch, source_rank, setting_index,
+                                                    penalties, trajectories):
+    monkeypatch.syspath_prepend(str(study.HERE.parent/"smart"))
+    import run_sparse_smart_budget_study as runner
+    options = dict(iteration_budgets=(500, 1000, 2000, 4000, 8000, 16000),
+                   penalties_u=penalties, penalties_v=penalties)
+    config = study.configuration(**options)
+    for model in range(3):
+        setting = study.experiment_settings(model, 2)[setting_index]
+        assert setting["source_rank"] == source_rank
+        resolved = study.resolved_configuration(setting, config)
+        actual = runner.resolved_configuration(runner.experiment_settings(model, 2)[setting_index],
+                                               runner.RunnerConfig(**options))
+        assert resolved == json.loads(json.dumps(actual))
+        assert resolved["trajectory_count"] == trajectories
+        assert resolved["candidate_count"] == 6*trajectories
+        assert resolved["iterations"] == resolved["validation_schedule"][-1] == 16000
+        assert resolved["validation_schedule"][:12] == [0, 1, 2, 5, 10, 15, 20, 25, 50, 100, 150, 200]
 
 
 @pytest.mark.parametrize("kwargs", [dict(seed_ids=(0, 0)), dict(models=(3,)), dict(experiments=(4,)),
@@ -182,6 +206,24 @@ def test_old_plan_and_records_keep_periodic_only_identity(tmp_path):
     assert "validation_state_policy" not in record["configuration"]
     assert study.aggregate(tmp_path)["execution_complete"]
     assert study.read_json(tmp_path/"study-plan.json")["plan_fingerprint"] == fingerprint
+
+
+def test_previous_pilot_grid_and_early_schedule_remain_explicit_on_resume(tmp_path):
+    previous = study.configuration(init_penalties=(.01, .03, .1),
+        penalties_u=(.0025, .01, .04, .16), penalties_v=(.0025, .01, .04, .16),
+        validation_iterations=(10, 25, 50, 100, 150, 200))
+    plan = study.make_plan(models=(0,), experiments=(0,), seed_ids=(0,), setting_index=0,
+                           config=previous, tuning_task_size=1)
+    study.write_plan(plan, tmp_path)
+    saved = study.read_json(tmp_path/"study-plan.json")
+    study.validate_plan(saved)
+    assert saved["configuration"] == previous
+    assert saved["expected_tasks"] == 48
+    assert saved["plan_fingerprint"] == plan["plan_fingerprint"]
+    new_plan = study.make_plan(models=(0,), experiments=(0,), seed_ids=(0,), setting_index=0,
+                               tuning_task_size=1)
+    with pytest.raises(ValueError, match="different scope, configuration"):
+        study.write_plan(new_plan, tmp_path)
 
 
 def test_resume_requires_matching_configuration_and_table(tmp_path):

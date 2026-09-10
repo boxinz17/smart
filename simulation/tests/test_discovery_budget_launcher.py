@@ -81,23 +81,23 @@ def test_one_seed_dry_run_splits_full_grid_and_distributes_resources(checkout, t
     run = roots[0]
     plan = json.loads((run / "study-plan.json").read_text())
     rows = [line.split("\t") for line in (run / "work-items.tsv").read_text().splitlines()]
-    assert len(rows) == plan["expected_tasks"] == 3033
+    assert len(rows) == plan["expected_tasks"] == 6309
     assert plan["expected_cells"] == 72
     assert plan["tuning_task_size"] == 1
-    assert len({row[0] for row in rows}) == 3033
+    assert len({row[0] for row in rows}) == 6309
     assert all(len(row) == 5 and row[0].startswith("m") for row in rows)
     assert rows[0] == ["m0_e0_s0_k0_g0", "0", "0", "0", "0"]
     assert plan["expected_applicable"] == 63
     assert plan["expected_inapplicable"] == 9
     assert plan["configuration"]["iteration_budgets"] == [500, 1000, 2000, 4000, 8000]
-    assert plan["configuration"]["init_penalties"] == [.01, .03, .1]
-    assert plan["configuration"]["penalties_u"] == plan["configuration"]["penalties_v"] == [.0025, .01, .04, .16]
-    assert plan["configuration"]["validation_iterations"] == [10, 25, 50, 100, 150, 200]
+    assert plan["configuration"]["init_penalties"] == [.01, .03, .1, .3]
+    assert plan["configuration"]["penalties_u"] == plan["configuration"]["penalties_v"] == [.0025, .01, .04, .16, .32]
+    assert plan["configuration"]["validation_iterations"] == [1, 2, 5, 10, 15, 20, 25, 50, 100, 150, 200]
     stored = next(line.removeprefix("budget_args=(").removesuffix(")")
                   for line in (run / "budget-job-config.sh").read_text().splitlines()
                   if line.startswith("budget_args=("))
     budget_args = shlex.split(stored)
-    assert budget_args[budget_args.index("--validation-iterations")+1] == "10,25,50,100,150,200"
+    assert budget_args[budget_args.index("--validation-iterations")+1] == "1,2,5,10,15,20,25,50,100,150,200"
     assert "--tuning-task-size" not in budget_args
     command = shlex.split((run / "submission-command.txt").read_text())
     assert "--ntasks=32" in command and "--cpus-per-task=1" in command
@@ -110,8 +110,8 @@ def test_one_seed_dry_run_splits_full_grid_and_distributes_resources(checkout, t
     assert (archived / "source/hpc/discovery/budget_worker.sh").exists()
     assert (archived / "source/simulation/merge_sparse_smart_budget_shards.py").exists()
     configs = sorted((run / "task-configs").glob("*.sh"))
-    assert len(configs) == 48
-    assert len(list((archived / "task-configs").glob("*.sh"))) == 48
+    assert len(configs) == 100
+    assert len(list((archived / "task-configs").glob("*.sh"))) == 100
     for path in configs:
         assert (archived / "task-configs" / path.name).read_bytes() == path.read_bytes()
 
@@ -160,7 +160,7 @@ def test_restricted_dry_run_caps_workers_and_preserves_literal_paths(checkout, t
     assert len(list((run / "task-configs").glob("*.sh"))) == 1
 
 
-@pytest.mark.parametrize("task_size, expected_tasks", [(2, 24), (4, 12)])
+@pytest.mark.parametrize("task_size, expected_tasks", [(2, 60), (4, 40), (5, 20)])
 def test_tuning_chunks_keep_initializer_and_u_fixed(checkout, tmp_path, task_size, expected_tasks):
     result, roots, _ = dry_run(checkout, tmp_path, (
         "--models", "0", "--experiments", "0", "--seeds", "0", "--setting-index", "0",
@@ -169,19 +169,19 @@ def test_tuning_chunks_keep_initializer_and_u_fixed(checkout, tmp_path, task_siz
     run = roots[0]
     plan = json.loads((run / "study-plan.json").read_text())
     assert plan["expected_cells"] == 1 and plan["expected_tasks"] == expected_tasks
-    assert f"--ntasks={expected_tasks}" in shlex.split((run / "submission-command.txt").read_text())
+    assert f"--ntasks={min(32, expected_tasks)}" in shlex.split((run / "submission-command.txt").read_text())
     configs = list((run / "task-configs").glob("*.sh"))
     assert len(configs) == expected_tasks
     actual = set()
     for path in configs:
         arguments = shlex.split(path.read_text().strip().removeprefix("tuning_args=(").removesuffix(")"))
         assert arguments[::2] == ["--init-penalties", "--penalties-u", "--penalties-v"]
-        assert float(arguments[1]) in (.01, .03, .1)
+        assert float(arguments[1]) in (.01, .03, .1, .3)
         vs = tuple(map(float, arguments[5].split(",")))
-        assert len(vs) == task_size
+        assert 1 <= len(vs) <= task_size
         actual.update((float(arguments[1]), float(arguments[3]), v) for v in vs)
-    assert actual == {(li, u, v) for li in (.01, .03, .1)
-                      for u in (.0025, .01, .04, .16) for v in (.0025, .01, .04, .16)}
+    assert actual == {(li, u, v) for li in (.01, .03, .1, .3)
+                      for u in (.0025, .01, .04, .16, .32) for v in (.0025, .01, .04, .16, .32)}
 
 
 def test_dry_run_can_explicitly_disable_extra_validation(checkout, tmp_path):
@@ -190,9 +190,78 @@ def test_dry_run_can_explicitly_disable_extra_validation(checkout, tmp_path):
     assert result.returncode == 0, result.stderr
     plan = json.loads((roots[0] / "study-plan.json").read_text())
     assert plan["expected_cells"] == 216 and plan["expected_applicable"] == 189
-    assert plan["expected_tasks"] == 9099
+    assert plan["expected_tasks"] == 18927
     assert plan["configuration"]["validation_iterations"] == []
     assert "--validation-iterations none" in (roots[0] / "budget-job-config.sh").read_text()
+
+
+@pytest.mark.parametrize("preset, setting, penalty_count", [
+    ("source-rank-5", 2, 6), ("source-rank-7", 3, 5),
+])
+def test_targeted_preset_restricts_source_rank_and_expands_budget(
+    checkout, tmp_path, preset, setting, penalty_count,
+):
+    result, roots, _ = dry_run(checkout, tmp_path, (
+        "--workers", "150", "--tuning-preset", preset, "--models", "1", "--seeds", "0-2"))
+    assert result.returncode == 0, result.stderr
+    run = roots[0]
+    plan = json.loads((run / "study-plan.json").read_text())
+    assert plan["models"] == [1] and plan["experiments"] == [2]
+    assert plan["setting_index"] == setting
+    assert plan["expected_cells"] == plan["expected_applicable"] == 3
+    assert plan["expected_tasks"] == 3 * 4 * penalty_count**2
+    config = plan["configuration"]
+    expected_penalties = [.0025, .01, .04, .16, .32]
+    if preset == "source-rank-5":
+        expected_penalties.insert(0, .001)
+    assert config["penalties_u"] == config["penalties_v"] == expected_penalties
+    assert config["init_penalties"] == [.01, .03, .1, .3]
+    assert config["iteration_budgets"] == [500, 1000, 2000, 4000, 8000, 16000]
+    assert config["checkpoint_interval"] == 250 and config["stationarity_tol"] == 1e-6
+    assert config["validation_iterations"] == [1, 2, 5, 10, 15, 20, 25, 50, 100, 150, 200]
+    assert "--ntasks=150" in shlex.split((run / "submission-command.txt").read_text())
+    assert f"Tuning preset: {preset}\n" in (run / "manifest.txt").read_text()
+
+
+@pytest.mark.parametrize("preset_first", [True, False])
+def test_targeted_preset_preserves_explicit_overrides_in_either_order(checkout, tmp_path, preset_first):
+    preset = ("--tuning-preset", "source-rank-5")
+    overrides = ("--iteration-budgets", "500,2000", "--init-penalties", ".03",
+                 "--penalties-u", ".01", "--penalties-v", ".04,.16",
+                 "--checkpoint-interval", "100", "--validation-iterations", "none",
+                 "--stationarity-tol", "2e-6", "--tuning-task-size", "all")
+    ordered = (*preset, *overrides) if preset_first else (*overrides, *preset)
+    result, roots, _ = dry_run(checkout, tmp_path, (
+        "--workers", "150", "--models", "0", "--experiments", "2-2", "--setting-index", "2",
+        "--seeds", "0", *ordered))
+    assert result.returncode == 0, result.stderr
+    run = roots[0]
+    plan = json.loads((run / "study-plan.json").read_text())
+    config = plan["configuration"]
+    assert config["iteration_budgets"] == [500, 2000]
+    assert config["init_penalties"] == [.03]
+    assert config["penalties_u"] == [.01] and config["penalties_v"] == [.04, .16]
+    assert config["validation_iterations"] == [] and config["checkpoint_interval"] == 100
+    assert config["stationarity_tol"] == 2e-6
+    assert plan["expected_cells"] == 1 and "tuning_task_size" not in plan
+    assert len((run / "work-items.tsv").read_text().splitlines()) == 1
+    assert "--ntasks=1" in shlex.split((run / "submission-command.txt").read_text())
+
+
+@pytest.mark.parametrize("arguments, message", [
+    (("--tuning-preset", "unknown"), "Invalid --tuning-preset"),
+    (("--tuning-preset", "source-rank-5"), "exactly one model ID"),
+    (("--tuning-preset", "source-rank-7", "--models", "0-2"), "exactly one model ID"),
+    (("--tuning-preset", "source-rank-5", "--models", "0", "--experiments", "0"), "--experiments 2"),
+    (("--tuning-preset", "source-rank-7", "--models", "0", "--experiments", "2,3"), "--experiments 2"),
+    (("--tuning-preset", "source-rank-5", "--models", "0", "--setting-index", "3"), "--setting-index 2"),
+    (("--tuning-preset", "source-rank-7", "--models", "0", "--setting-index", "2"), "--setting-index 3"),
+])
+def test_invalid_preset_scope_is_rejected_before_artifacts(checkout, tmp_path, arguments, message):
+    result, roots, archive_root = dry_run(checkout, tmp_path, ("--workers", "32", *arguments))
+    assert result.returncode != 0 and message in result.stderr
+    assert not roots and not (tmp_path / "runs").exists()
+    assert not archive_root.exists()
 
 
 @pytest.mark.parametrize("arguments", [

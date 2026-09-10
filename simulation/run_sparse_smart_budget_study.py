@@ -46,10 +46,10 @@ SCHEMA_VERSION = 1
 class RunnerConfig:
     iteration_budgets: tuple[int, ...] = (500, 1000, 2000, 4000, 8000)
     checkpoint_interval: int = 250
-    validation_iterations: tuple[int, ...] = (10, 25, 50, 100, 150, 200)
-    init_penalties: tuple[float, ...] = (.01, .03, .1)
-    penalties_u: tuple[float, ...] = (.0025, .01, .04, .16)
-    penalties_v: tuple[float, ...] = (.0025, .01, .04, .16)
+    validation_iterations: tuple[int, ...] = (1, 2, 5, 10, 15, 20, 25, 50, 100, 150, 200)
+    init_penalties: tuple[float, ...] = (.01, .03, .1, .3)
+    penalties_u: tuple[float, ...] = (.0025, .01, .04, .16, .32)
+    penalties_v: tuple[float, ...] = (.0025, .01, .04, .16, .32)
     inverse_step: float = 20.
     stationarity_tol: float = 1e-6
     n_validation: int = 100
@@ -436,6 +436,7 @@ def fit_cell(task):
 
 
 def main(argv=None):
+    defaults = RunnerConfig()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--models',type=int,nargs='+',choices=range(3),default=[0,1,2])
     parser.add_argument('--experiments',type=int,nargs='+',choices=range(4),default=[2,3])
@@ -447,15 +448,15 @@ def main(argv=None):
     parser.add_argument('--output-root',type=Path,default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument('--profile',choices=('difficult','full'),default='difficult')
     parser.add_argument('--setting-index',type=int,help='Original paper-grid index; requires one model and experiment')
-    parser.add_argument('--iteration-budgets',type=int,nargs='+',default=[500,1000,2000,4000,8000])
-    parser.add_argument('--checkpoint-interval',type=int,default=250)
-    parser.add_argument('--validation-iterations',nargs='+',default=['10,25,50,100,150,200'],
+    parser.add_argument('--iteration-budgets',type=int,nargs='+',default=list(defaults.iteration_budgets))
+    parser.add_argument('--checkpoint-interval',type=int,default=defaults.checkpoint_interval)
+    parser.add_argument('--validation-iterations',nargs='+',default=[','.join(map(str, defaults.validation_iterations))],
         help='Extra validation-only iterations (comma/space separated), or none; full checkpoints stay periodic')
-    parser.add_argument('--stationarity-tol',type=float,default=1e-6,
+    parser.add_argument('--stationarity-tol',type=float,default=defaults.stationarity_tol,
         help='Positive constrained stationarity tolerance for early stopping (checked every iteration)')
-    parser.add_argument('--init-penalties',type=external_runner.old_runner._float_grid,default=(.01,.03,.1))
-    parser.add_argument('--penalties-u',type=external_runner.old_runner._float_grid,default=(.0025,.01,.04,.16))
-    parser.add_argument('--penalties-v',type=external_runner.old_runner._float_grid,default=(.0025,.01,.04,.16))
+    parser.add_argument('--init-penalties',type=external_runner.old_runner._float_grid,default=defaults.init_penalties)
+    parser.add_argument('--penalties-u',type=external_runner.old_runner._float_grid,default=defaults.penalties_u)
+    parser.add_argument('--penalties-v',type=external_runner.old_runner._float_grid,default=defaults.penalties_v)
     parser.add_argument('--dry-run',action='store_true')
     args = parser.parse_args(argv)
     seed_ids = args.seed_ids if args.seed_ids is not None else list(range(args.seed_count if args.seed_count is not None else 5))

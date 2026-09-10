@@ -1,6 +1,6 @@
 """Budget-study serialization, fallback eligibility, and launch isolation."""
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import asdict, replace
 from itertools import product
 import json
 from pathlib import Path
@@ -253,6 +253,13 @@ def test_default_dry_run_declares_45_cells_without_creating_artifacts(tmp_path,c
     assert manifest['expected_inapplicable'] == 0 and manifest['seed_ids'] == list(range(5))
     assert manifest['configuration']['iteration_budgets'] == [500,1000,2000,4000,8000]
     assert manifest['configuration']['checkpoint_interval'] == 250
+    assert manifest['configuration'] == runner._json_value(asdict(runner.RunnerConfig()))
+    assert manifest['configuration']['validation_iterations'] == [1,2,5,10,15,20,25,50,100,150,200]
+    resolved = runner.resolved_configuration(CELL, runner.RunnerConfig(**manifest['configuration']))
+    assert resolved['trajectory_count'] == 100
+    assert resolved['candidate_count'] == 500
+    assert resolved['validation_schedule'] == [0,1,2,5,10,15,20,25,50,100,150,200,*range(250,8001,250)]
+    assert manifest['configuration']['stationarity_tol'] == 1e-6
     assert not (tmp_path/'new').exists()
 
 
@@ -274,9 +281,11 @@ def test_full_grid_dry_run_declares_all_cases_and_early_stop_tolerance(tmp_path,
     assert manifest['expected_applicable'] == 6300 and manifest['expected_inapplicable'] == 900
     assert manifest['configuration']['iteration_budgets'][-1] == 8000
     assert manifest['configuration']['stationarity_tol'] == 2e-6
-    assert manifest['configuration']['init_penalties'] == [.01, .03, .1]
+    assert manifest['configuration']['init_penalties'] == [.01, .03, .1, .3]
+    assert manifest['configuration']['penalties_u'] == [.0025, .01, .04, .16, .32]
+    assert manifest['configuration']['penalties_v'] == [.0025, .01, .04, .16, .32]
     assert (len(manifest['configuration']['init_penalties'])*len(manifest['configuration']['penalties_u'])
-            *len(manifest['configuration']['penalties_v'])) == 48
+            *len(manifest['configuration']['penalties_v'])) == 100
     assert not (tmp_path/'new').exists()
 
 

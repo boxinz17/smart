@@ -91,6 +91,20 @@ provides the current source/environment commands and checkpoint audit workflow.
 Earlier SparseSMART pilot documents and saved reports retain their historical
 results; rerunning current source need not reproduce an older solver's trajectory.
 
+The current budget-study pilot grid crosses initialization penalties
+`0.01, 0.03, 0.1, 0.3` with U and V penalties `0.0025, 0.01, 0.04, 0.16, 0.32`
+(100 combinations per applicable case). It validates at initialization and
+iterations `1, 2, 5, 10, 15, 20, 25, 50, 100, 150, 200`, then at regular
+250-iteration checkpoints and budget endpoints up to 8,000, with certified
+stationarity stopping at `1e-6`. This is a provisional follow-up pilot grid;
+use scoped three-seed probes before choosing the final 100-seed configuration.
+The [Discovery launcher guide](../hpc/discovery/README.md#full-paper-grid-budget-study)
+provides metadata-only dry runs and targeted `source-rank-5` / `source-rank-7`
+presets. Both probes add a 16,000 budget; the rank-5 preset also adds `0.001`
+to U and V (144 combinations). The presets select the fitted source-rank setting
+for one explicitly chosen model, and retain flexible worker counts and explicit
+tuning overrides.
+
 Current fixed, tuned, external-validation, and budget-study cell runners use
 the `sparse-smart-source-content-v1` implementation fingerprint scheme. The
 digest covers a manifest of logical source names and content hashes, including

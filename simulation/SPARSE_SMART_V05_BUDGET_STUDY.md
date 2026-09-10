@@ -10,15 +10,15 @@ in the [environment guide](../environment/README.md) for current runs.
 
 The budget study uses one continuous solver trajectory per parameter setting.
 It captures regular checkpoints every 250 updates, validates additionally at
-iterations 10, 25, 50, 100, 150, and 200, and compares maximum budgets 500,
+iterations 1, 2, 5, 10, 15, 20, 25, 50, 100, 150, and 200, and compares maximum budgets 500,
 1,000, 2,000, 4,000, and 8,000. The existing independent-budget runners retain
 their previous behavior. This study has separate result files and summaries.
 
 The default study is 45 cells: three model sizes, fitted source ranks 5 and 7
-and source noise 0.5, each on saved seed IDs 0–4. Each cell uses 48 combinations:
-initialization penalties {0.01, 0.03, 0.1} crossed with left/right penalties
-{0.0025, 0.01, 0.04, 0.16}, projected initialization, and the practical anchor
-solver. There are 2,160 trajectories, each with a maximum of 8,000 updates. All original training
+and source noise 0.5, each on saved seed IDs 0–4. Each cell uses 100 combinations:
+initialization penalties {0.01, 0.03, 0.1, 0.3} crossed with left/right penalties
+{0.0025, 0.01, 0.04, 0.16, 0.32}, projected initialization, and the practical anchor
+solver. There are 4,500 trajectories, each with a maximum of 8,000 updates. All original training
 rows and 100 independent validation rows are used; the training size is 200,
 300, or 500 according to the paper-grid setting. No competing method is fitted.
 
@@ -46,8 +46,8 @@ are recorded in result provenance. Historical records lacking this field keep
 their original periodic-only schedule and identity; they are not retroactively
 treated as densely validated.
 
-This pilot expands each refinement penalty grid upward to `0.16` and tunes
-initialization over `0.01, 0.03, 0.1` by default. It is intended to resolve early
+This follow-up pilot expands each refinement penalty grid upward to `0.32` and tunes
+initialization over `0.01, 0.03, 0.1, 0.3` by default. It is intended to resolve early
 validation minima, upper-bound penalty selections, and sensitivity to
 initialization regularization. `--init-penalties` controls the initialization
 grid, and the distributed
@@ -135,7 +135,7 @@ Inspect the complete five-seed study without fitting:
 ```sh
 ../.venv/bin/python \
   run_sparse_smart_budget_study.py --seed-count 5 --workers 3 \
-  --validation-iterations 10 25 50 100 150 200 \
+  --validation-iterations 1 2 5 10 15 20 25 50 100 150 200 \
   --output-root result/sparse_smart_budget_study_current --dry-run
 ```
 
@@ -231,8 +231,8 @@ target rank 5. These constraints also occur in the initializer and source
 chart. Fitting those cases would require a declared method extension, not
 simply removal of the runner checks.
 
-The remaining 6,300 cases each use 48 penalty combinations by default:
-302,400 continuous trajectories, each capped at 8,000 updates with stationarity
+The remaining 6,300 cases each use 100 penalty combinations by default:
+630,000 continuous trajectories, each capped at 8,000 updates with stationarity
 stopping enabled. The five budgets are views of each trajectory, not five
 independent fits. Each case uses its paper-grid training sample size and 100
 independent validation observations. Fitted rank changes do not change the
@@ -244,28 +244,54 @@ grid and early validation schedule before launching the full scope:
 ```bash
 bash hpc/discovery/submit_budget_study.sh --workers 32 --seeds 0-2 \
   --tuning-task-size 1 \
-  --validation-iterations 10,25,50,100,150,200 \
-  --init-penalties .01,.03,.1 --penalties-u .0025,.01,.04,.16 \
-  --penalties-v .0025,.01,.04,.16 --dry-run
+  --validation-iterations 1,2,5,10,15,20,25,50,100,150,200 \
+  --init-penalties .01,.03,.1,.3 --penalties-u .0025,.01,.04,.16,.32 \
+  --penalties-v .0025,.01,.04,.16,.32 --dry-run
 ```
 
 Run this from the repository root on Discovery. The preview declares 216
-cases, with 189 applicable cases, 27 exclusions, and 9,072 trajectories.
-The default `--tuning-task-size 1` creates 9,099 GNU Parallel work items:
+cases, with 189 applicable cases, 27 exclusions, and 18,900 trajectories.
+The default `--tuning-task-size 1` creates 18,927 GNU Parallel work items:
 one per trajectory plus one per inapplicable case. One seed therefore creates
-3,033 work items; the full 100-seed scope creates 303,300. This is still one
-Slurm allocation with at most `--workers` single-CPU steps active at once.
+6,309 work items; the full 100-seed scope creates 630,900. Each submission uses
+one Slurm allocation with at most `--workers` single-CPU steps active at once.
 `--dry-run` creates a source snapshot and plan but submits no job. Choose
 the worker count and whole-pool wall time for the actual submission based on
 cluster availability and pilot measurements.
 
+Use targeted follow-up presets for source-rank settings that need a lower
+penalty probe or a longer trajectory. Each requires exactly one model ID;
+the launcher selects experiment 2 and the corresponding original grid index:
+
+```bash
+bash hpc/discovery/submit_budget_study.sh --workers 32 --models 0 --seeds 0-2 \
+  --tuning-preset source-rank-5 --dry-run
+
+bash hpc/discovery/submit_budget_study.sh --workers 32 --models 0 --seeds 0-2 \
+  --tuning-preset source-rank-7 --dry-run
+```
+
+`source-rank-5` selects index 2 and adds `0.001` to both refinement grids,
+giving 144 combinations per case. `source-rank-7` selects index 3 and retains
+the 100-combination grid. Both add a 16,000-update cap while preserving the
+earlier caps, dense validation checks, regular 250-update checkpoints, and
+certified stationarity stopping. Their single-setting scope keeps these
+exploratory runs separate from the general `expanded` preset, which remains
+capped at 8,000. Explicit `--init-penalties`, `--penalties-u`, `--penalties-v`,
+`--iteration-budgets`, and `--validation-iterations` overrides remain available.
+The expanded grid and targeted presets are follow-up choices, not a settled
+configuration for a final 100-seed campaign.
+
 `--tuning-task-size N` combines up to N penalty combinations in each work item,
 holding initializer and U fixed while grouping consecutive V values. With the
-default three-by-four-by-four grid, sizes 1, 2, and 4 produce 48, 24, and 12 fitting
+default four-by-five-by-five grid, sizes 1, 2, and 5 produce 100, 60, and 20 fitting
 work items per applicable case. `--tuning-task-size all` restores the original
 whole-case work item. Smaller groups reduce the scheduling tail for uneven
 runtimes, at the cost of repeated data generation/initialization and more
 Slurm steps. All groups use the same saved data seed and validation schedule.
+For the full 100-seed scope, use separate seed batches or larger tuning chunks
+to respect the cluster's per-job step limit; limiting concurrent workers alone
+does not limit the total number of steps in a job.
 
 The distributed launcher creates one manifest/output root per work item and
 archives the shared tuning overrides in `task-configs/g<first-grid-id>.sh`.

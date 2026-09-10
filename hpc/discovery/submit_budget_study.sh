@@ -8,10 +8,16 @@ Usage: submit_budget_study.sh --workers N [options]
 
 One GNU Parallel pool; each Slurm step fits a tuning subset of one data case.
 The full defaults request 7,200 cells, including 900 inapplicable records.
-The 48 penalty combinations are continuous trajectories, each capped at 8,000;
-by default each combination gets its own work item (303,300 for 100 seeds).
+The 100 penalty combinations are continuous trajectories, each capped at 8,000;
+by default each combination gets its own work item (630,900 for 100 seeds).
+This is a provisional pilot grid; preview a restricted three-seed scope first.
 
 Study options:
+  --tuning-preset NAME     expanded (default), source-rank-5, or source-rank-7
+                          Rank probes require --models with one ID and select
+                          experiment 2, setting 2 (rank 5) or 3 (rank 7)
+                          Both probes add a 16,000 cap; rank 5 also adds .001
+                          to U/V. Explicit tuning options override preset values
   --models IDS             IDs 0-2 (default: 0-2)
   --experiments IDS        IDs 0-3 (default: 0-3)
   --seeds IDS              Saved seed IDs 0-99 (default: 0-99)
@@ -19,11 +25,11 @@ Study options:
   --iteration-budgets IDS  Increasing caps (default: 500,1000,2000,4000,8000)
   --checkpoint-interval N  Regular validation/checkpoint interval (default: 250)
   --validation-iterations VALUES
-                          Extra validation times (default: 10,25,50,100,150,200)
+                          Extra times (default: 1,2,5,10,15,20,25,50,100,150,200)
                           Use none for only regular checkpoints and budget caps
-  --init-penalties VALUES  Initializer grid (default: .01,.03,.1)
-  --penalties-u VALUES     Left penalty grid (default: .0025,.01,.04,.16)
-  --penalties-v VALUES     Right penalty grid (default: .0025,.01,.04,.16)
+  --init-penalties VALUES  Initializer grid (default: .01,.03,.1,.3)
+  --penalties-u VALUES     Left penalty grid (default: .0025,.01,.04,.16,.32)
+  --penalties-v VALUES     Right penalty grid (default: .0025,.01,.04,.16,.32)
   --stationarity-tol X     Certified early-stop tolerance (default: 1e-6)
   --tuning-task-size N|all Maximum penalty combinations per work item (default: 1)
                           N chunks V while fixing initializer and U; all keeps
@@ -55,9 +61,10 @@ die() { printf 'Error: %s\n' "$*" >&2; exit 2; }
 need_value() { [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || die "$1 needs a value"; }
 
 models=0-2 experiments=0-3 seeds=0-99 settings=''
-budgets=500,1000,2000,4000,8000 checkpoint_interval=250
-validation_iterations=10,25,50,100,150,200
-init_penalties=.01,.03,.1 penalties_u=.0025,.01,.04,.16 penalties_v=.0025,.01,.04,.16
+tuning_preset=expanded models_explicit=0 experiments_explicit=0
+budgets='' checkpoint_interval=250
+validation_iterations=1,2,5,10,15,20,25,50,100,150,200
+init_penalties='' penalties_u='' penalties_v=''
 stationarity_tol=1e-6 tuning_task_size=1 workers='' time_limit=24:00:00 memory=8G dry_run=0
 account=${SMART_ACCOUNT:-mkolar_1314}
 partition=${SMART_PARTITION:-main}
@@ -73,8 +80,8 @@ while [[ $# -gt 0 ]]; do
             [[ ${#values[@]} -gt 0 ]] || die "$flag needs a list"
             joined=$(IFS=','; printf '%s' "${values[*]}")
             case "$flag" in
-                --models) models=$joined ;;
-                --experiments) experiments=$joined ;;
+                --models) models=$joined; models_explicit=1 ;;
+                --experiments) experiments=$joined; experiments_explicit=1 ;;
                 --seeds) seeds=$joined ;;
                 --iteration-budgets) budgets=$joined ;;
                 --validation-iterations) validation_iterations=$joined ;;
@@ -82,6 +89,7 @@ while [[ $# -gt 0 ]]; do
                 --penalties-u) penalties_u=$joined ;;
                 --penalties-v) penalties_v=$joined ;;
             esac ;;
+        --tuning-preset) need_value "$@"; tuning_preset=$2; shift 2 ;;
         --setting-index) need_value "$@"; settings=$2; shift 2 ;;
         --checkpoint-interval) need_value "$@"; checkpoint_interval=$2; shift 2 ;;
         --stationarity-tol) need_value "$@"; stationarity_tol=$2; shift 2 ;;
@@ -118,7 +126,31 @@ parse_indices() {
     done
 }
 parse_indices "$models" 2 model; model_ids=("${parsed_indices[@]}")
+case "$tuning_preset" in
+    expanded) preset_budgets=500,1000,2000,4000,8000
+              preset_penalties=.0025,.01,.04,.16,.32 ;;
+    source-rank-5|source-rank-7)
+        (( models_explicit && ${#model_ids[@]} == 1 )) || die '--tuning-preset source-rank probes require --models with exactly one model ID'
+        if [[ "$tuning_preset" == source-rank-5 ]]; then
+            preset_setting=2; preset_penalties=.001,.0025,.01,.04,.16,.32
+        else
+            preset_setting=3; preset_penalties=.0025,.01,.04,.16,.32
+        fi
+        preset_budgets=500,1000,2000,4000,8000,16000
+        if (( ! experiments_explicit )); then experiments=2; fi
+        [[ -z "$settings" || "$settings" == "$preset_setting" ]] || die "--tuning-preset $tuning_preset requires --setting-index $preset_setting"
+        settings=$preset_setting ;;
+    *) die 'Invalid --tuning-preset; choose expanded, source-rank-5, or source-rank-7' ;;
+esac
+# Resolve defaults after parsing so explicit grid/cap overrides are order-independent.
+budgets=${budgets:-$preset_budgets}
+init_penalties=${init_penalties:-.01,.03,.1,.3}
+penalties_u=${penalties_u:-$preset_penalties}
+penalties_v=${penalties_v:-$preset_penalties}
 parse_indices "$experiments" 3 experiment; experiment_ids=("${parsed_indices[@]}")
+if [[ "$tuning_preset" != expanded ]]; then
+    [[ ${#experiment_ids[@]} == 1 && "${experiment_ids[0]}" == 2 ]] || die "--tuning-preset $tuning_preset requires --experiments 2"
+fi
 parse_indices "$seeds" 99 seed; seed_ids=("${parsed_indices[@]}")
 [[ -n "$workers" ]] || die '--workers is required; choose the CPU concurrency for this submission (for example, 16, 32, or 64)'
 [[ "$workers" =~ ^[1-9][0-9]*$ && ${#workers} -le 6 ]] || die '--workers must be a positive integer of at most six digits'
@@ -186,6 +218,7 @@ if (( pool_workers > work_count )); then pool_workers=$work_count; fi
     printf 'Work items: %s\nRequested workers: %s\nEffective workers: %s\nMemory per CPU: %s\nWhole-pool time: %s\n' "$work_count" "$workers" "$pool_workers" "$memory" "$time_limit"
     printf 'Account: %s\nPartition: %s\n' "$account" "$partition"
     printf 'Tuning combinations per task: %s\n' "$tuning_task_size"
+    printf 'Tuning preset: %s\n' "$tuning_preset"
     printf 'Plan command: '; printf '%q ' "${plan_args[@]}"; printf '\n'
     if git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         printf '\nGit HEAD:\n'; git -C "$repo" rev-parse HEAD

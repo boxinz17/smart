@@ -71,9 +71,9 @@ def inside(path, root):
 
 
 def configuration(*, iteration_budgets=(500, 1000, 2000, 4000, 8000), checkpoint_interval=250,
-                  validation_iterations=(10, 25, 50, 100, 150, 200),
-                  init_penalties=(.01, .03, .1), penalties_u=(.0025, .01, .04, .16),
-                  penalties_v=(.0025, .01, .04, .16), stationarity_tol=1e-6):
+                  validation_iterations=(1, 2, 5, 10, 15, 20, 25, 50, 100, 150, 200),
+                  init_penalties=(.01, .03, .1, .3), penalties_u=(.0025, .01, .04, .16, .32),
+                  penalties_v=(.0025, .01, .04, .16, .32), stationarity_tol=1e-6):
     budgets = list(iteration_budgets)
     require(budgets and all(type(x) is int and x > 0 for x in budgets)
             and all(a < b for a, b in zip(budgets, budgets[1:])),
@@ -569,6 +569,7 @@ def tuning_task_size(value):
 
 
 def main(argv=None):
+    defaults = configuration()
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("plan", help="Write a full-scope plan without importing estimators")
@@ -580,14 +581,14 @@ def main(argv=None):
     p.add_argument("--seed-ids", type=int, nargs="+", default=list(range(100)))
     p.add_argument("--profile", choices=("full", "difficult"), default="full")
     p.add_argument("--setting-index", type=int)
-    p.add_argument("--iteration-budgets", type=int, nargs="+", default=[500, 1000, 2000, 4000, 8000])
-    p.add_argument("--checkpoint-interval", type=int, default=250)
-    p.add_argument("--validation-iterations", nargs="+", default=["10,25,50,100,150,200"],
+    p.add_argument("--iteration-budgets", type=int, nargs="+", default=defaults["iteration_budgets"])
+    p.add_argument("--checkpoint-interval", type=int, default=defaults["checkpoint_interval"])
+    p.add_argument("--validation-iterations", nargs="+", default=[",".join(map(str, defaults["validation_iterations"]))],
                    help="Additional validation iterations (comma/space list), or none")
-    p.add_argument("--init-penalties", type=float_grid, default=(.01, .03, .1))
-    p.add_argument("--penalties-u", type=float_grid, default=(.0025, .01, .04, .16))
-    p.add_argument("--penalties-v", type=float_grid, default=(.0025, .01, .04, .16))
-    p.add_argument("--stationarity-tol", type=float, default=1e-6)
+    p.add_argument("--init-penalties", type=float_grid, default=defaults["init_penalties"])
+    p.add_argument("--penalties-u", type=float_grid, default=defaults["penalties_u"])
+    p.add_argument("--penalties-v", type=float_grid, default=defaults["penalties_v"])
+    p.add_argument("--stationarity-tol", type=float, default=defaults["stationarity_tol"])
     p.add_argument("--tuning-task-size", type=tuning_task_size, default=1,
                    help="Maximum penalty combinations per task; all keeps one task per cell (default: 1)")
     a = sub.add_parser("aggregate", help="Collect records and audit missing/failed cell execution")

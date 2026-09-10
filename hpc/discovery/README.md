@@ -102,15 +102,15 @@ export R_LIBS_USER="${R_LIBS_USER:-$VENV/R/library}"
 
 Use `submit_budget_study.sh` for `run_sparse_smart_budget_study.py`, whose named
 arguments and batch manifests differ from the per-seed runners supported by
-the generic `submit.sh` below. First preview a three-seed tuning pilot on
-Discovery, covering every model, experiment, and setting:
+the generic `submit.sh` below. The expanded grid is provisional: first use
+three-seed probes in settings sensitive to the previous grid boundaries, then
+reassess coverage and runtime before a 100-seed campaign. To preview the expanded
+grid across every model, experiment, and setting on Discovery:
 
 ```bash
 cd "$HOME/projects/smart"
 bash hpc/discovery/submit_budget_study.sh --workers 32 \
-  --seeds 0-2 --tuning-task-size 1 --validation-iterations 10,25,50,100,150,200 \
-  --init-penalties .01,.03,.1 --penalties-u .0025,.01,.04,.16 \
-  --penalties-v .0025,.01,.04,.16 \
+  --tuning-preset expanded --seeds 0-2 --tuning-task-size 1 \
   --time 24:00:00 --mem 8G --stationarity-tol 1e-6 --dry-run
 ```
 
@@ -121,16 +121,19 @@ estimator cannot fit target rank 11 with source rank 10, or target rank 5 with
 source rank 0/3. These cases remain visible in the report; they are not silently
 dropped or fitted using a different method.
 
-Each applicable case tunes 48 combinations: the initialization penalties
-`{0.01, 0.03, 0.1}` crossed with the left/right penalties
-`{0.0025, 0.01, 0.04, 0.16}`, using all paper-grid
+Each applicable case tunes 100 combinations: the initialization penalties
+`{0.01, 0.03, 0.1, 0.3}` crossed with the left/right penalties
+`{0.0025, 0.01, 0.04, 0.16, 0.32}`, using all paper-grid
 training rows and 100 independent validation rows. The three-seed pilot above
 contains 216 cases, including 189 applicable cases and 27 explicit exclusions,
-for **9,072 continuous trajectories in 9,099 work items** (including the 27
-inapplicable records). The full 100-seed scope has 302,400 trajectories in
-303,300 work items. It compares budgets **500, 1,000, 2,000, 4,000, and 8,000**, retaining
+for **18,900 continuous trajectories in 18,927 work items** (including the 27
+inapplicable records). The full 100-seed scope has 630,000 trajectories in
+630,900 work items. Split a full campaign into smaller submissions or use larger
+tuning chunks to respect cluster Slurm-step limits; the launcher does not
+automatically batch that campaign. It compares budgets
+**500, 1,000, 2,000, 4,000, and 8,000**, retaining
 regular checkpoints every 250 updates. Additional validation checks at
-**10, 25, 50, 100, 150, and 200** capture useful iterates before the first regular
+**1, 2, 5, 10, 15, 20, 25, 50, 100, 150, and 200** capture useful iterates before the first regular
 checkpoint. Extra validation checks retain factors when they improve the
 validation best; regular checkpoints and budget endpoints retain their states.
 This separates validation frequency from full-state retention. The optimizer checks constrained stationarity
@@ -148,12 +151,42 @@ declared schedule remains part of the saved configuration and provenance.
 The expanded refinement grid and denser early validation address two separate
 uncertainties in the previous pilot: upper-bound penalty selections and
 selections at the first available positive checkpoint. Initialization is also
-tuned over `0.01, 0.03, 0.1` by default, giving 48 combinations with the
-4-by-4 refinement grid. Task splitting covers
+tuned over `0.01, 0.03, 0.1, 0.3` by default, giving 100 combinations with the
+5-by-5 refinement grid. Task splitting covers
 all three tuning dimensions. Compare initializer-selected cases separately: their
 refinement penalties can tie. Use the pilot to reassess grid boundaries and
 runtime before committing to 100 seeds; final performance should be evaluated
 separately from the validation data used for tuning.
+
+Two optional presets prepare targeted longer-budget probes. Each requires an
+explicit **single model** and selects experiment 2 (vary the fitted source
+rank), with setting index 2 for rank 5 or index 3 for rank 7. Both retain all
+earlier budget caps and add **16,000**. `source-rank-5` also adds `0.001` to both
+U/V grids, giving 144 combinations per case; `source-rank-7` retains the expanded
+100-combination grid. These are exploratory probes for settings showing continued
+improvement, not a claim that every such setting needs the larger budget.
+
+```bash
+# Source-rank-5 probe for Model 1 (model ID 0): 3 cases, 432 work items.
+bash hpc/discovery/submit_budget_study.sh --workers 150 \
+  --tuning-preset source-rank-5 --models 0 --seeds 0-2 --dry-run
+
+# Source-rank-7 probe for Model 1: 3 cases, 300 work items.
+bash hpc/discovery/submit_budget_study.sh --workers 150 \
+  --tuning-preset source-rank-7 --models 0 --seeds 0-2 --dry-run
+
+# Expanded grid for one boundary-sensitive case, without a longer budget.
+bash hpc/discovery/submit_budget_study.sh --workers 150 \
+  --tuning-preset expanded --models 0 --experiments 3 --setting-index 5 \
+  --seeds 0-2 --dry-run
+```
+
+Choose model ID 1 or 2 instead as needed. Explicit tuning flags override preset
+defaults regardless of their command-line order. Explicit experiment or setting
+flags that conflict with a targeted preset are rejected before any artifacts are
+created. `expanded` leaves the chosen case scope unchanged; all presets still
+default to seed IDs 0–99 unless `--seeds` restricts them. Increasing the iteration
+cap alone does not repair trajectories that terminate with numerical stagnation.
 
 `--dry-run` creates a source snapshot, `study-plan.json`, `work-items.tsv`,
 shared tuning-subset overrides in `task-configs/`,
@@ -168,8 +201,8 @@ number of seeds, cases, and tuning combinations. `budget_pool.sbatch` uses GNU
 Parallel to dispatch one single-CPU Slurm step per planned work item. By
 default, `--tuning-task-size 1` gives each penalty combination its own work
 item, so workers can start another combination as soon as one trajectory
-finishes. One seed has 72 data cases but **3,033 work items**: 63 applicable
-cases times 48 combinations, plus nine inapplicable records. Workers use
+finishes. One seed has 72 data cases but **6,309 work items**: 63 applicable
+cases times 100 combinations, plus nine inapplicable records. Workers use
 `--workers 1` internally. This is one Slurm job, not `N` separate batch jobs.
 Slurm distributes its requested CPU slots across suitable nodes, with no fixed
 node count. For example, 32 workers at the default 8 GB per CPU request
@@ -180,9 +213,10 @@ allocation before starting the pool; it stays fixed while the queue drains.
 
 Use `--tuning-task-size N` to group up to `N` combinations in each work item.
 Each group fixes the initializer and U penalty and takes a consecutive chunk
-of V penalties. Thus size 2 gives 24 fitting work items per applicable case,
-and size 4 gives 12 with the default grid. `--tuning-task-size all` restores
-one work item per data case, running all 48 combinations sequentially. Small
+of V penalties, with a shorter final chunk when needed. Thus sizes 2, 4, and 5
+give 60, 40, and 20 fitting work items per applicable case with the default grid.
+`--tuning-task-size all` restores one work item per data case, running all
+100 combinations sequentially. Small
 groups reduce the long tail from uneven trajectory runtimes; larger groups
 reduce repeated initialization, data generation, and Slurm-step overhead.
 The concurrency remains controlled solely by `--workers`.
@@ -190,7 +224,7 @@ The concurrency remains controlled solely by `--workers`.
 Every worker has a separate `tasks/<task-id>/results` manifest/output root.
 Split task IDs such as `m0_e0_s0_k0_g0` identify their original data case and
 first global grid index. `task-configs/g0.sh` and similar files hold the tuning
-overrides shared by every data case; the default grid needs only 48 such files.
+overrides shared by every data case; the default grid needs only 100 such files.
 These overrides and the source snapshot are archived before submission.
 After workers finish, the controller verifies the
 runtime and assembles `results/`, merging saved tuning subsets into one result
