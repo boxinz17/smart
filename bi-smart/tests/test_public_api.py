@@ -38,6 +38,29 @@ def test_validation_keeps_first_candidate_on_exact_tie():
     assert scored[1].metadata["validation_loss"] == 0.0
 
 
+@pytest.mark.parametrize("coefficients,target", [((0., 1., 2.), 2.),
+                                                  ((1e7, 1e8-.5, 1e8), 1e8)])
+def test_validation_ignores_common_large_residual_when_selecting(coefficients, target):
+    fold = FoldData(X=np.array([[1.], [0.]]), Y=np.array([[target], [1e12]]))
+    candidates = tuple(Candidate.successful(label=str(i), matrix=np.array([[value]]), kind="test")
+                       for i, value in enumerate(coefficients))
+    selected, scored = score_and_select_candidates(candidates, fold)
+    assert selected.label == "2"
+    assert scored[1].metadata["validation_loss"] == scored[2].metadata["validation_loss"]
+    assert scored[2].metadata["selection_comparison"]["loss_difference"] < 0
+    assert "validation_loss" not in candidates[0].metadata
+
+
+def test_pairwise_validation_keeps_first_of_distinct_exact_loss_ties():
+    fold = FoldData(X=np.array([[1.], [0.]]), Y=np.array([[2.], [1e12]]))
+    candidates = tuple(Candidate.successful(label=str(value), matrix=np.array([[value]]), kind="test")
+                       for value in (1., 3.))
+    selected, scored = score_and_select_candidates(candidates, fold)
+    assert selected.label == "1.0"
+    assert scored[1].metadata["selection_comparison"] == dict(
+        incumbent_candidate_index=0, loss_difference=0.)
+
+
 def test_unfitted_estimator_and_zero_safeguard():
     config = BISMARTConfig(
         target_rank=1,

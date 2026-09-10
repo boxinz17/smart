@@ -40,10 +40,28 @@ class _ProxResult:
     duality_gap: float
     gap_roundoff: float = 0.
     direct_error: float = 0.
+    closed_form: bool = False
 
     @property
     def error_bound(self):
         return float(np.sqrt(2. * (self.duality_gap + self.gap_roundoff)) + self.direct_error)
+
+
+@dataclass(frozen=True)
+class _BlockTrialResult:
+    value: np.ndarray
+    uncertainty: float
+    closed_form: bool
+
+    def __iter__(self):
+        # Preserve the internal two-value unpacking interface.
+        return iter((self.value, self.uncertainty))
+
+
+def _trial_key(chart, state, gradient, L, penalties, margins, tolerance):
+    """Fit-local, value-based identity for an unrefined block trial."""
+    return (id(chart), state.tobytes(), gradient.tobytes(), float(L),
+            tuple(penalties), margins, float(tolerance))
 
 
 def _project_operator_ball(value, radius):
@@ -88,7 +106,7 @@ def _weighted_l1_ball_prox(value, weights, radius, *, tolerance=1e-11,
     if absolute_gap_tol is not None and (not np.isfinite(absolute_gap_tol) or absolute_gap_tol <= 0):
         raise ValueError("absolute_gap_tol must be positive and finite, or None")
     if not value.size or radius == 0:
-        return _ProxResult(np.zeros_like(value), 0, True, 0., 0.)
+        return _ProxResult(np.zeros_like(value), 0, True, 0., 0., closed_form=True)
     x = value.copy()
     p, q = np.zeros_like(x), np.zeros_like(x)
     scale = max(1., float(np.linalg.norm(value)))
@@ -99,10 +117,10 @@ def _weighted_l1_ball_prox(value, weights, radius, *, tolerance=1e-11,
         # With no L1 term this is the closed-form ball projection. Avoid a
         # cancellation-prone Fenchel subtraction for an exact proximal map.
         return _ProxResult(_project_operator_ball(value, radius), 1, True, 0., 0.,
-                           direct_error=direct_error)
+                           direct_error=direct_error, closed_form=True)
     soft = np.sign(value) * np.maximum(np.abs(value) - weights, 0.)
     if np.linalg.norm(soft, ord=2) < radius - direct_error:
-        return _ProxResult(soft, 1, True, 0., 0., direct_error=direct_error)
+        return _ProxResult(soft, 1, True, 0., 0., direct_error=direct_error, closed_form=True)
     residual, gap = float("inf"), float("inf")
     best = None
     for iteration in range(1, max_iterations + 1):
@@ -202,7 +220,8 @@ def _block_trial(chart, state, gradient, L, penalties, margins, tolerance, *, ab
     if not pu.converged or not pv.converged:
         raise ArithmeticError("weighted L1/anchor proximal subproblem did not converge")
     uncertainty = L * np.hypot(pu.error_bound, pv.error_bound)
-    return chart.pack(next_u, next_v, next_d, pu.value, pv.value), float(uncertainty)
+    return _BlockTrialResult(chart.pack(next_u, next_v, next_d, pu.value, pv.value),
+                             float(uncertainty), pu.closed_form and pv.closed_form)
 
 
 def _roundoff_feasible(chart, state, margins):
@@ -232,7 +251,7 @@ def _roundoff_feasible(chart, state, margins):
 
 
 def _mapping(chart, state, gradient, reference_L, penalties, margins, tolerance,
-             stationarity_tol=None):
+             stationarity_tol=None, *, trial_cache=None):
     """All-constraint block-proximal residual, with inner-solve uncertainty.
 
     The gap term prevents an unresolved inner prox from manufacturing an outer
@@ -241,9 +260,16 @@ def _mapping(chart, state, gradient, reference_L, penalties, margins, tolerance,
     not a global optimality or statistical guarantee.
     """
     raw = float(np.linalg.norm(gradient))
+    if trial_cache is not None:
+        trial_cache.clear()
     try:
-        trial, uncertainty = _block_trial(chart, state, gradient, reference_L,
-                                          penalties, margins, tolerance)
+        initial_trial = _block_trial(chart, state, gradient, reference_L,
+                                     penalties, margins, tolerance)
+        trial, uncertainty = initial_trial
+        if trial_cache is not None:
+            trial_cache.update(key=_trial_key(chart, state, gradient, reference_L,
+                                              penalties, margins, tolerance),
+                               result=initial_trial)
         movement = float(reference_L * np.linalg.norm(trial - state))
         refinements = 0
         # Refine only when inner uncertainty prevents a possible stationarity
@@ -348,8 +374,9 @@ def refine_anchor_projected(
             raise FloatingPointError("nonfinite initial loss or gradient")
     except (ValueError, np.linalg.LinAlgError, FloatingPointError) as error:
         return _result(x, "numerical_failure", str(error), 0, [])
+    trial_cache = {}
     diagnostic = _mapping(chart, state, gradient, reference_L, penalties, margins, tolerance,
-                          stationarity_tol)
+                          stationarity_tol, trial_cache=trial_cache)
     history = [_record(chart, x, 0, smooth, penalty_value, initial_L, 0., [], loss_offset,
                        diagnostic, effective_support=True)]
     if iterate_callback is not None:
@@ -367,7 +394,12 @@ def refine_anchor_projected(
         backtrack = 0
         while backtrack <= max_backtracks:
             try:
-                trial, _ = _block_trial(chart, state, gradient, L, penalties, margins, tolerance)
+                key = _trial_key(chart, state, gradient, L, penalties, margins, tolerance)
+                if trial_cache.get("key") == key:
+                    block_trial = trial_cache["result"]
+                else:
+                    block_trial = _block_trial(chart, state, gradient, L, penalties, margins, tolerance)
+                trial, _ = block_trial
                 trial = _roundoff_feasible(chart, trial, margins)
                 original_trial = _to_z(chart, trial)
                 step_norm = float(np.linalg.norm(trial - state))
@@ -376,7 +408,20 @@ def refine_anchor_projected(
                 mapping_unresolved = (diagnostic[3] is not None
                     or diagnostic[0] > reference_L * resolution
                     or (stationarity_tol is not None and diagnostic[0] > stationarity_tol))
-                if step_norm <= resolution and mapping_unresolved:
+                # A numerically exact fixed point can have a nonzero raw
+                # gradient balanced by L1 or constraint normals. Recognize it
+                # only when the independently scaled reference trial used
+                # closed-form proximal maps; an unresolved Dykstra iterate
+                # must not manufacture a no-op. Keep all uncertainty in the
+                # diagnostic, and never relax an explicit stopping tolerance.
+                reference_trial = trial_cache.get("result")
+                exact_fixed_budget_noop = (stationarity_tol is None
+                    and getattr(reference_trial, "closed_form", False)
+                    and diagnostic[3] is None
+                    and np.array_equal(reference_trial.value, state)
+                    and getattr(block_trial, "closed_form", False)
+                    and np.array_equal(trial, state))
+                if step_norm <= resolution and mapping_unresolved and not exact_fixed_budget_noop:
                     return _result(x, "numerical_stagnation",
                         "The feasible trial is at numerical resolution while its constrained residual is unresolved.",
                         iteration, history, rejects[-1] if rejects else None, "numerical_stagnation")
@@ -405,7 +450,7 @@ def refine_anchor_projected(
                     if not np.all(np.isfinite(gradient)):
                         raise FloatingPointError("nonfinite gradient")
                     diagnostic = _mapping(chart, state, gradient, reference_L, penalties, margins, tolerance,
-                                          stationarity_tol)
+                                          stationarity_tol, trial_cache=trial_cache)
                 except (ValueError, np.linalg.LinAlgError, FloatingPointError) as error:
                     diagnostic = (float("inf"), float("inf"), reference_L, str(error))
                     history.append(_record(chart, x, iteration + 1, smooth, penalty_value, L,

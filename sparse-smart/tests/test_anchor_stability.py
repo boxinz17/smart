@@ -215,6 +215,24 @@ def test_exact_stationary_point_with_unresolved_roundoff_floor_cannot_accept_zer
     np.testing.assert_array_equal(tiny.state, state)
 
 
+def test_default_fixed_budget_accepts_exact_optimum_without_claiming_stationarity():
+    from sparse_smart import ExactSource, PracticalCalibration, SparseSMART
+
+    options = dict(rank=1, source_rank=2, sparsity=(1, 1), margins=Margins(.01, 5., .01),
+                   calibration=PracticalCalibration(.01, 0., .5, (1, 1)), iterations=3)
+    source = ExactSource(np.eye(2), np.eye(2))
+    result = SparseSMART(**options).fit(np.eye(2), np.diag([.5, 0.]), source=source)
+    assert result.success_ and result.n_iter_ == 3 and result.status_ == 'completed'
+    assert not result.converged_ and result.termination_reason_ == 'max_iterations'
+    np.testing.assert_array_equal(result.coefficient_, np.diag([.5, 0.]))
+    assert result.result_.raw_gradient_norm == result.result_.mapping_displacement == 0.
+    assert result.result_.proximal_uncertainty > 0.  # Allowance remains reported.
+    assert all(row.step_norm == 0. for row in result.history_[2:])
+    strict = SparseSMART(**options, stationarity_tol=1e-16).fit(
+        np.eye(2), np.diag([.5, 0.]), source=source)
+    assert not strict.success_ and strict.status_ == 'numerical_stagnation'
+
+
 def test_mapping_refines_when_error_interval_straddles_tolerance_even_above_it(monkeypatch):
     # The approximate movement exceeds tolerance, but its proximal error can
     # explain that excess; a tighter solve may establish stationarity.
@@ -222,3 +240,106 @@ def test_mapping_refines_when_error_interval_straddles_tolerance_even_above_it(m
     assert len(calls) == 2 and calls[0] is None and calls[1] > 0.
     assert result[0] == pytest.approx(.9)
     assert result[4:] == (.8, .1, 1, False)
+
+
+def test_default_fixed_budget_accepts_exact_bounded_optimum():
+    from sparse_smart import ExactSource, PracticalCalibration, SparseSMART
+
+    options = dict(rank=1, source_rank=2, sparsity=(1, 1), margins=Margins(.01, .5, .01),
+                   calibration=PracticalCalibration(.3, 0., .5, (1, 1)), iterations=3)
+    data = (np.eye(2), np.diag([1., 0.]))
+    source = ExactSource(np.eye(2), np.eye(2))
+    model = SparseSMART(**options).fit(*data, source=source)
+    assert model.success_ and model.status_ == "completed" and model.n_iter_ == 3
+    np.testing.assert_array_equal(model.coefficient_, np.diag([.5, 0.]))
+    assert model.result_.raw_gradient_norm == .25
+    assert model.result_.mapping_displacement == 0.
+    assert model.result_.proximal_uncertainty > 0.
+    assert not model.converged_
+    strict = SparseSMART(**options, stationarity_tol=1e-16).fit(*data, source=source)
+    assert strict.status_ == "numerical_stagnation" and not strict.success_
+
+
+def test_default_fixed_budget_accepts_exact_l1_optimum():
+    chart = AnchorChart(2, 2, [0], [0], np.eye(1), np.eye(1))
+    state = chart.initial_state([[np.sqrt(.75)], [.5]], [1.], [[1.], [0.]])
+    design = np.sqrt(2.) * np.eye(2)
+    # The unconstrained entrywise L1 solution is exactly the initial coefficient.
+    response = design @ np.array([[np.sqrt(.75), 0.], [.75, 0.]])
+    options = dict(calibration=calibration(chart, penalties=(.25, .25)),
+                   margins=Margins(.01, 5., .01), iterations=3)
+    result = solver.refine_anchor_projected(chart, state, design, response, **options)
+    assert result.success and result.n_iter == 3
+    np.testing.assert_array_equal(result.state, state)
+    assert result.raw_gradient_norm > .2
+    assert result.history[-1].penalty_value == .125
+    assert result.mapping_displacement == 0. and result.proximal_uncertainty > 0.
+    strict = solver.refine_anchor_projected(chart, state, design, response,
+                                            stationarity_tol=1e-16, **options)
+    assert strict.status == "numerical_stagnation" and not strict.success
+
+
+def test_uncertain_iterative_prox_cannot_manufacture_fixed_budget_noop(monkeypatch):
+    from dataclasses import replace
+
+    original = solver._weighted_l1_ball_prox
+
+    def uncertain(*args, **kwargs):
+        # Even an unchanged approximate solution is not a closed-form fixed point.
+        return replace(original(*args, **kwargs), closed_form=False)
+
+    monkeypatch.setattr(solver, "_weighted_l1_ball_prox", uncertain)
+    chart = AnchorChart(2, 2, [0], [0], np.eye(1), np.eye(1))
+    state = chart.pack([], [], [.5], [[0.]], [[0.]])
+    result = solver.refine_anchor_projected(chart, state, np.eye(2), np.diag([.5, 0.]),
+        calibration=calibration(chart), margins=Margins(.01, 5., .01), iterations=3)
+    assert result.status == "numerical_stagnation" and not result.success
+    assert result.mapping_displacement == 0. and result.proximal_uncertainty > 0.
+
+
+@pytest.mark.parametrize("inverse", [.1, 10., 10000.])
+def test_reference_trial_reuse_preserves_states_and_backtracking(monkeypatch, inverse):
+    chart, state, design, response, margins = scalar_problem(curvature=1000.)
+    original_trial, original_mapping = solver._block_trial, solver._mapping
+    calls = []
+
+    def counted(*args, **kwargs):
+        calls.append(args[3])
+        return original_trial(*args, **kwargs)
+
+    monkeypatch.setattr(solver, "_block_trial", counted)
+    options = dict(calibration=calibration(chart, inverse=inverse), margins=margins, iterations=5)
+    reused = solver.refine_anchor_projected(chart, state, design, response, **options)
+    reused_calls = len(calls)
+
+    def uncached(*args, **kwargs):
+        kwargs.pop("trial_cache", None)
+        return original_mapping(*args, **kwargs)
+
+    monkeypatch.setattr(solver, "_mapping", uncached)
+    calls.clear()
+    baseline = solver.refine_anchor_projected(chart, state, design, response, **options)
+    assert reused.success and baseline.success
+    np.testing.assert_array_equal(reused.state, baseline.state)
+    assert reused.history == baseline.history
+    expected_savings = reused.n_iter if 1. <= inverse <= 1000. else 0
+    assert len(calls) - reused_calls == expected_savings
+
+
+def test_mapping_refinement_keeps_original_line_search_trial(monkeypatch):
+    initial = solver._BlockTrialResult(np.array([.9]), .3, False)
+    refined = solver._BlockTrialResult(np.array([.8]), .1, False)
+    calls = []
+
+    def trial(*args, absolute_gap_tol=None):
+        calls.append(absolute_gap_tol)
+        return initial if absolute_gap_tol is None else refined
+
+    monkeypatch.setattr(solver, "_block_trial", trial)
+    cache = {}
+    diagnostic = solver._mapping(object(), np.zeros(1), np.ones(1), 1., (0., 0.),
+                                  Margins(.01, 5., .01), 1e-11, 1., trial_cache=cache)
+    assert diagnostic[0] == pytest.approx(.9)
+    assert diagnostic[4:6] == (.8, .1)
+    assert cache["result"] is initial
+    assert len(calls) == 2 and calls[0] is None and calls[1] > 0.

@@ -216,8 +216,8 @@ The tuner splits target rows reproducibly into training and validation sets,
 or accepts `fit(..., validation_data=(X_validation,Y_validation))`. Both
 initialization and refinement use only training rows. Each candidate is fitted
 independently; its initializer and every accepted iterate are evaluated on the
-validation rows. The lowest validation mean squared prediction error selects
-the candidate and its iterate, with earliest ties retained. No coefficient
+validation rows. Selection targets mean squared prediction error using the
+stable comparison described below. No coefficient
 truth is accepted as a tuning input. `selection_history_` records every
 candidate, including failures; failed partial fits cannot win. If all fail,
 the tuner reports `no_successful_candidate` and exposes no winning coefficient.
@@ -230,15 +230,17 @@ the shorter fit or warm-start from another candidate. Thus `(500, 2000)` costs
 both sets of fits. There is no implicit refit on the combined training and
 validation rows.
 
-Within one tuner call, source preparation and data projections are shared,
+Within one tuner call, source preparation and training-data projections are shared,
 and identical Lasso initializers and anchors are reused across candidates and
 budgets. Support thresholding and refinement remain candidate-specific. A new
 `fit` starts a fresh preparation cache; fitted public arrays remain independent.
 
 `checkpoints_` maps each budget with successful candidates to that budget's
-best fitted estimator. Selection minimizes validation MSE across these
-successful checkpoints; ties prefer the earlier budget, then the original
-grid order. A later failure cannot erase a completed earlier checkpoint, and
+best fitted estimator. Selection directly compares each checkpoint's validation
+predictions with the incumbent using a stable pairwise loss difference. A
+negative difference replaces the incumbent; a computed zero retains the earlier
+budget, then the original grid order. A later failure cannot erase a completed
+earlier checkpoint, and
 the failed run's partial coefficient is still ineligible. A completed
 iteration budget need not be a converged fit.
 
@@ -263,15 +265,38 @@ can also be searched. Inspect the winning supports before enlarging that grid.
 
 `estimator_` is the winning fitted `SparseSMART`, and `best_params_`,
 `best_score_`, `train_indices_`, and `validation_indices_` record selection.
+`best_score_` reports absolute validation MSE; `best_selection_score_` records
+a relative loss for reporting. For prediction `P`, validation response `Y`, and a
+fixed reference prediction `P0`, this value is
+`mean(2 * (P0 - Y) * (P - P0) + (P - P0)**2)`. It represents the MSE change
+from the reference without subtracting two large absolute losses. The first
+evaluated initializer supplies `P0`, shared across every candidate and budget
+within one tuner `fit` and reset on the next call. A standalone estimator uses
+its own initializer. Scores from different fits need not share a reference.
+Selection instead evaluates
+`mean((P-P_incumbent) * ((P-Y) + (P_incumbent-Y)))`, with extended-precision
+products and accumulation where available. A negative difference wins; an
+exactly zero computed difference retains the incumbent. Neither absolute MSE
+nor the fixed-reference score breaks a pairwise tie. The reference is
+available as `validation_reference_prediction_` on the fitted tuner or
+standalone estimator; `diagnostics_["selection_reference"]` describes its origin.
+
+`selection_rule_="pairwise-validation-loss-v1"` identifies this rule. Validation
+history rows record `selection_rule` and `selection_comparison`, including the
+incumbent iteration and loss difference. Candidate rows record the corresponding
+global and per-budget comparisons, so the ordered decisions can be replayed.
+
 The returned fit uses the training subset; there is no implicit refit using
-validation outcomes as training data. Its validation score is a selection
-score, not an unbiased test error. Both the tuner and the estimator retain
+validation outcomes as training data. Its reported validation MSE describes the
+selected fit and is not an unbiased test error. Both the tuner and the estimator retain
 strict source-accuracy checks by default; use the explicit empirical option
 `enforce_source_accuracy=False` for experiments outside that condition.
 
 For a single candidate, `model.fit(X_train,Y_train,source=source,
 validation_data=(X_validation,Y_validation))` also selects the best iterate.
 `selected_iteration_` and `best_validation_loss_` identify it;
+`best_selection_score_` and each validation-history row's `selection_score`
+retain the relative reporting value, while the row's `loss` remains absolute MSE.
 `last_state_` and `last_coefficient_` retain the optimizer's final accepted
 state separately. Validation never changes gradients or training acceptance.
 History, `optimization_converged_`, and termination reasons describe the final
@@ -290,6 +315,15 @@ gradient-mapping residual. No coefficient-truth stopping rule is used.
 stalls, numerical stagnation, and exhausted backtracking. `converged_` requires
 selection of the stationary terminal state; completing T updates is not convergence.
 The mapping criterion is local and does not establish a global optimum.
+In fixed-budget anchor refinement, an exact proximal fixed point may produce
+repeated accepted no-op updates, including when penalties or active constraints
+balance a nonzero smooth gradient. Both the fixed-reference diagnostic trial
+and the line-search trial must use closed-form block proximal maps and return
+the current feasible state exactly; an unresolved iterative proximal solve
+does not qualify. This applies only when `stationarity_tol=None`; the
+conservative mapping uncertainty remains reported and no convergence is
+claimed. An explicit tolerance, however small, still requires the full
+constrained residual to pass and can produce numerical stagnation.
 
 Successful fits expose `coefficient_`, `singular_values_`, `left_factors_`,
 `right_factors_`, working-coordinate `factors_`, `anchors_`, `supports_`,
@@ -391,8 +425,9 @@ view without optimization. That view's `coefficient_` is the selected state;
 `last_coefficient_` is the checkpoint endpoint. At the lower level, pass
 `checkpoint_iterations` and `validation_interval` directly to `SparseSMART`.
 Checkpoint capture is in memory; it is not process-restart support.
-The tuner compares stored checkpoint scores and diagnostics before constructing
-independent fitted models for retained budget winners. This avoids building
+The tuner reconstructs validation predictions from compact checkpoint states
+and makes pairwise comparisons before constructing independent fitted models
+for retained budget winners. This avoids building
 dense coefficient matrices for every grid-by-budget checkpoint.
 
 Continuous tuner `selection_history_` records remain in budget-major order.
@@ -406,8 +441,12 @@ a fallback after failure before the first positive checkpoint.
 
 The separate simulation budget-study runner records validation MSE, diagnostic
 coefficient error, objective, movement, and stationarity at every checkpoint.
-Its summary compares best eligible validation scores across caps, separately
-from optimization diagnostics. Missing or failed extensions cannot establish
+Current artifacts also preserve the pairwise decisions and compact factors.
+The summary reconstructs predictions on regenerated validation data, verifies
+reported scores, and replays iterate/candidate/cap comparisons. Validation gains
+between caps use direct pairwise loss differences, separately from optimization
+diagnostics. Legacy artifacts retain their original selection rule when audited.
+Missing or failed extensions cannot establish
 a plateau. See [the budget-study guide](../simulation/SPARSE_SMART_V05_BUDGET_STUDY.md).
 
 Continuous mode stores all trajectory histories and compact checkpoint states;

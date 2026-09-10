@@ -15,9 +15,14 @@ from pathlib import Path
 
 import numpy as np
 
+from sparse_smart_selection import (selection_value, selection_values, selection_keys, validation_winner,
+                                    validate_selected_score, prediction_selection_score, pairwise_selection,
+                                    history_winner, PAIRWISE_RULE, pairwise_loss_difference)
+
 import external_validation_data
 import run_sparse_smart_budget_study as runner
 import run_sparse_smart_external as external_runner
+from batch_manifest import manifest_for_resume
 from run_restricted_rrr import DEFAULT_SEED_FILE, experiment_settings, load_experiment_seeds
 from run_sparse_smart import _atomic_json_dump, _digest_json, _json_value
 
@@ -73,8 +78,16 @@ def compare_caps(base, extended, *, absolute_threshold=1e-4, relative_threshold=
     gain = relative_gain = threshold = None
     if available:
         a, b = _number(base["validation_mse"], "base score"), _number(extended["validation_mse"], "extended score")
-        _require(b <= a + 1e-12, "Cumulative eligible validation minimum increased")
-        gain = max(0., a-b)
+        if pairwise_selection([base, extended]):
+            difference = _number(extended["validation_comparisons"][str(base["iteration_budget"])],
+                                 "pairwise cap loss difference", nonnegative=False)
+            _require(difference <= 0., "Cumulative eligible validation minimum increased")
+            gain = -difference
+        else:
+            ranking = selection_values([base, extended])
+            keys = selection_keys([base, extended])
+            _require(keys[1] <= keys[0], "Cumulative eligible validation minimum increased")
+            gain = max(0., ranking[0]-ranking[1] if ranking[0] != ranking[1] else a-b)
         relative_gain = gain/a if a > 0 else None
         threshold = max(absolute, relative*a)
     material = gain > threshold if complete else None
@@ -178,8 +191,11 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
              "Study training/validation counts mismatch")
     _require(record["all_training_rows_used"] is True and record["training_matches_legacy"] is True
              and record["refit_on_all_data"] is False and record["theorem_certified"] is False
-             and record["source_check_mode"] == "empirical" and record["applicable"] is True,
+             and record["source_check_mode"] == "empirical",
              "Study data-use or applicability flags mismatch")
+    inapplicability = setting.inapplicability_reason()
+    _require(type(record["applicable"]) is bool and record["applicable"] == (inapplicability is None),
+             "Study structural applicability mismatch")
     arguments = dict(n=setting.n, p=setting.p, q=setting.q, sigma0=setting.sigma0,
                      sigma=.5, r_star=5, r0_star=10, random_seed=int(random_seed))
     _require(record["generator_arguments"] == arguments, "Study generator arguments mismatch")
@@ -196,9 +212,27 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
     for key in ("training_observed_input_fingerprint","validation_observed_input_fingerprint",
                 "evaluation_truth_fingerprint","validation_seed_metadata"):
         _require(record[key] == data[key], f"Regenerated {key} mismatch")
+    if inapplicability is not None:
+        _require(record["status"] == "inapplicable" and record["success"] is False
+                 and record["failure_reason"] == inapplicability, "Inapplicable study status mismatch")
+        _require(all(record[key] == [] for key in ("selection_history", "trajectories", "cap_outcomes"))
+                 and record["tuning_diagnostics"] == {}, "Inapplicable study contains fitted trajectories")
+        _require(all(record[key] is None for key in ("selected_budget", "selected_candidate_id",
+                 "selected_iteration", "validation_loss", "avg_err")), "Inapplicable study contains a selected fit")
+        _require(_number(record["fit_time_sec"], "inapplicable fit time") == 0,
+                 "Inapplicable study reports fitting time")
+        return dict(model=record["model"], model_id=model_id, experiment=record["experiment"],
+            setting=setting.suffix, seed_id=seed_id, status="inapplicable", applicable=False,
+            inapplicability_reason=inapplicability, missing=False, caps=[],
+            trajectory_status_counts={}, trajectory_final_diagnostics=[], failed_trajectories=0,
+            verified_factor_states=0, configuration=_json_value(asdict(config)),
+            implementation_fingerprint=record["implementation_fingerprint"])
     grid = record["configuration"]["candidate_grid"]
     trajectories = record["trajectories"]
     _require(len(trajectories) == len(grid), "Missing candidate trajectory")
+    stable_selection = "selection_score" in record
+    pairwise = pairwise_selection([record])
+    reference = record.get("validation_reference_prediction")
     points = {}
     verified_factors = 0
     for j, trajectory in enumerate(trajectories):
@@ -208,6 +242,10 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
         history = trajectory["validation_history"]
         indices = _ordered(history, last, "validation history")
         losses = {row["iteration"]:_number(row["loss"], "validation loss") for row in history}
+        ranking = dict(zip(indices, selection_values(history, "loss")))
+        _require(pairwise_selection(history) == pairwise or not history, "Trajectory comparison rule mismatch")
+        _require(all(("selection_score" in row) == stable_selection for row in history),
+                 "Trajectory validation selection scheme mismatch")
         if indices:
             _require(indices[0] == 0, "Validation history omits initialization")
         optimization = trajectory["history"]
@@ -226,9 +264,13 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
             _require(np.allclose(left.T@left,np.eye(len(d)),atol=1e-8,rtol=1e-8)
                      and np.allclose(right.T@right,np.eye(len(d)),atol=1e-8,rtol=1e-8), "Nonorthonormal coefficient factors")
             coefficient = (left*d)@right.T
-            score = float(np.mean((data["Y"]-data["X"]@coefficient)**2))
+            prediction = ((data["X"]@left)*d)@right.T
+            score = float(np.mean((data["Y"]-prediction)**2))
             error = float(np.linalg.norm(coefficient-data["truth"])/np.sqrt(setting.p*setting.q))
             factor_scores[key] = score,error
+            if stable_selection and t in ranking:
+                relative_score = prediction_selection_score(prediction, data["Y"], reference)
+                _same(relative_score, ranking[t], "Factor prediction/selection history")
             if t in losses:
                 _same(score,losses[t],"Factor prediction/validation history")
             verified_factors += 1
@@ -256,6 +298,10 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
             _require(last == 0 and not checkpoints and not history and not factor_scores,
                      "Trajectory without optimization history contains refinement states")
         _require(set(factor_scores) == {str(t) for t in checkpoint_indices}, "Factor states differ from certified checkpoints")
+        def prediction(row):
+            return runner._factor_prediction(trajectory["factor_states"][str(row["iteration"])], data["X"])
+        # Validate the full decision chain against saved factors once.
+        history_winner(history, prediction=prediction if pairwise else None, response=data["Y"])
         previous_checkpoint = 0
         for cp in checkpoints:
             t, selected = cp["checkpoint_iteration"], _integer(cp["selected_iteration"],"selected iteration")
@@ -268,11 +314,15 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
                 _number(cp["interval_max_relative_step_norm"],"interval maximum relative step")
             previous_checkpoint = t
             _require(t in losses and selected in losses and selected <= t, "Checkpoint validation point missing")
-            best = min((i for i in indices if i <= t), key=lambda i:losses[i])
+            best = history_winner(row for row in history if row["iteration"] <= t)["iteration"]
             _require(selected == best, "Checkpoint does not retain earliest validation minimum")
+            _require(pairwise_selection([cp]) == pairwise, "Checkpoint selection rule mismatch")
             _require(cp["terminal_factor_key"] == str(t) and cp["selected_factor_key"] == str(selected), "Checkpoint factor key mismatch")
             _same(cp["terminal_validation_mse"],losses[t],"Checkpoint terminal score")
             _same(cp["selected_validation_mse"],losses[selected],"Checkpoint selected score")
+            if stable_selection:
+                _same(cp["selection_score"], ranking[selected], "Checkpoint selected relative score")
+                _same(cp["terminal_selection_score"], ranking[t], "Checkpoint terminal relative score")
             for which in ("terminal","selected"):
                 score,error = factor_scores[cp[f"{which}_factor_key"]]
                 _same(cp[f"{which}_validation_mse"],score,f"{which} prediction MSE")
@@ -320,10 +370,22 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
                      "Failed/uncertified partial prefix made eligible")
             _require(row["n_iter"] == t and row["selected_iteration"] == cp["selected_iteration"], "Retained prefix iteration mismatch")
             _same(row["validation_mse"],cp["selected_validation_mse"],"Retained prefix score")
+            validate_selected_score(row, cp)
             reached = t == budget or cp["termination_reason"] == "stationarity"
             _require(row["budget_reached"] == reached, "Unreached cap marked covered")
         else:
             _require(row["validation_mse"] is None and not row["budget_reached"], "Failed partial is eligible or covered")
+    def candidate_prediction(row):
+        cp = points[(row["grid_candidate_id"], row["trajectory_checkpoint_iteration"])]
+        factor = trajectories[row["grid_candidate_id"]]["factor_states"][cp["selected_factor_key"]]
+        return runner._factor_prediction(factor, data["X"])
+    if pairwise:
+        eligible = [row for row in rows if row["success"]]
+        validation_winner(eligible, prediction=candidate_prediction, response=data["Y"])
+        for budget in budgets:
+            validation_winner([row for row in eligible if row["iteration_budget"] == budget],
+                              comparison_key="budget_selection_comparison",
+                              prediction=candidate_prediction, response=data["Y"])
     outcomes = record["cap_outcomes"]
     _require([c["iteration_budget"] for c in outcomes] == list(budgets), "Cap outcomes missing or unordered")
     caps = []
@@ -355,7 +417,7 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
                 diagnostics=_diagnostics(cp["terminal_record"]) if cp else None,
                 checkpoint_interval=_interval(cp) if cp else None))
         if eligible:
-            winner = min(eligible,key=lambda r:(r["validation_mse"],r["candidate_id"]))
+            winner = validation_winner(eligible)
             cp = points[(winner["grid_candidate_id"],winner["trajectory_checkpoint_iteration"])]
             for name,expected in (("winner_candidate_id",winner["candidate_id"]),
                 ("winner_grid_candidate_id",winner["grid_candidate_id"]),("winner_origin_budget",winner["iteration_budget"]),
@@ -363,6 +425,9 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
                 ("selected_iteration",winner["selected_iteration"]),("selected_factor_key",cp["selected_factor_key"])):
                 _require(cap[name] == expected,f"Cumulative winner {name} mismatch")
             _same(cap["validation_mse"],winner["validation_mse"],"Cumulative validation minimum")
+            validate_selected_score(cap, winner)
+            if stable_selection:
+                result["selection_score"] = winner["selection_score"]
             _same(cap["coefficient_error"],cp["selected_coefficient_error"],"Cumulative coefficient error")
             for name in ("terminal_validation_mse","terminal_coefficient_error"):
                 _same(cap[name],cp[name],name)
@@ -375,8 +440,25 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
                 optimizer_converged=cp["optimization_converged"],selected_converged=cp["selected_converged"],
                 endpoint_diagnostics=_diagnostics(cp["terminal_record"]),selected_diagnostics=_diagnostics(cp["selected_record"]),
                 checkpoint_interval=_interval(cp))
+        if pairwise:
+            _require(pairwise_selection([cap]), "Cap selection rule mismatch")
+            comparisons = cap["validation_comparisons"]
+            _require(set(comparisons) == {str(base["iteration_budget"]) for base in caps},
+                     "Cap pairwise comparison scope mismatch")
+            for base in caps:
+                difference = comparisons[str(base["iteration_budget"])]
+                if base["success"] and result["success"]:
+                    actual = pairwise_loss_difference(candidate_prediction(rows[result["winner_candidate_id"]]),
+                        data["Y"], candidate_prediction(rows[base["winner_candidate_id"]]))
+                    _same(difference, actual, "Pairwise cap validation difference")
+                    _require((difference < 0) == (actual < 0), "Pairwise cap comparison sign mismatch")
+                else:
+                    _require(difference is None, "Failed cap has a pairwise loss comparison")
+            result.update(selection_rule=PAIRWISE_RULE, validation_comparisons=comparisons)
         caps.append(result)
     final = outcomes[-1]
+    if final["success"]:
+        validate_selected_score(record, final)
     _require(type(record["success"]) is bool and record["success"] == final["success"]
              and record["status"] == ("complete" if final["coverage_complete"] else
                                      "partial" if final["success"] else "all_candidates_failed"),
@@ -385,7 +467,7 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
                        ("selected_iteration","selected_iteration"),("validation_loss","validation_mse"),("avg_err","coefficient_error")):
         _require(record[key] == final[other],f"Overall winner {key} mismatch")
     return dict(model=record["model"],model_id=model_id,experiment=record["experiment"],setting=setting.suffix,
-        seed_id=seed_id,status=record["status"],missing=False,caps=caps,
+        seed_id=seed_id,status=record["status"],applicable=True,inapplicability_reason=None,missing=False,caps=caps,
         trajectory_status_counts=dict(Counter(t["status"] for t in trajectories)),
         trajectory_final_diagnostics=[dict(grid_candidate_id=t["grid_candidate_id"],status=t["status"],
             success=t["success"],n_iter=t["n_iter"],termination_reason=t["termination_reason"],
@@ -395,6 +477,9 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
 
 
 def _aggregate(cells, budgets, absolute, relative, *, model=False):
+    cells = [cell for cell in cells if cell.get("applicable", True)]
+    if not cells:
+        return []
     reports = []
     for a,b in _budget_pairs(budgets):
         pairs = [(c,next(t for t in c["transitions"] if t["base_budget"] == a and t["extended_budget"] == b))
@@ -429,6 +514,8 @@ def summarize(result_root=DEFAULT_ROOT, *, model_ids=(0,1,2),seed_ids=(0,1,2,3,4
     manifest_path = Path(result_root)/"budget_study_manifest.json"
     manifest_info = None
     if manifest_scope:
+        manifest_path = manifest_for_resume(manifest_path)
+        _require(manifest_path is not None, "Missing budget-study manifest or resumable attempt")
         manifest = json.loads(manifest_path.read_text())
         _require(manifest["schema_version"] == 1 and manifest["method"] == "SparseSMARTBudgetStudy", "Wrong study manifest")
         _require(manifest["seed_file_sha256"] == hashlib.sha256(Path(seed_file).read_bytes()).hexdigest(),
@@ -460,9 +547,13 @@ def summarize(result_root=DEFAULT_ROOT, *, model_ids=(0,1,2),seed_ids=(0,1,2,3,4
                 requested.extend((m,e,s) for s in selected)
     if manifest is not None:
         _require(requested and manifest["expected_cells"] == len(requested)*len(seed_ids),"Manifest scope/count mismatch")
-        _require(all(s.inapplicability_reason() is None for _,_,s in requested),
-                 "Budget-gain summary requires structurally applicable settings")
-    cells,files,cache,configs,implementations = [],[],{},set(),set()
+        expected_applicable = sum(s.inapplicability_reason() is None for _, _, s in requested)*len(seed_ids)
+        for key, expected in (("expected_applicable", expected_applicable),
+                              ("expected_inapplicable", len(requested)*len(seed_ids)-expected_applicable)):
+            if key in manifest:
+                _require(manifest[key] == expected, "Manifest applicability/count mismatch")
+    cells,files,cache,configs = [],[],{},set()
+    implementations = {True: set(), False: set()}
     generator = generate_data_fn
     budgets = tuple(manifest["configuration"]["iteration_budgets"]) if manifest else None
     for m,e,setting in requested:
@@ -470,7 +561,10 @@ def summarize(result_root=DEFAULT_ROOT, *, model_ids=(0,1,2),seed_ids=(0,1,2,3,4
         for seed in seed_ids:
             path = runner.result_path(Path(result_root),model=f"model{m+1}",experiment=f"exp{e+1}",setting=setting,seed_id=seed)
             if not path.exists():
-                cells.append(dict(model=f"model{m+1}",model_id=m,experiment=f"exp{e+1}",setting=suffix,seed_id=seed,missing=True,caps=[],transitions=[]))
+                reason = setting.inapplicability_reason()
+                cells.append(dict(model=f"model{m+1}",model_id=m,experiment=f"exp{e+1}",setting=suffix,
+                    seed_id=seed,applicable=reason is None,inapplicability_reason=reason,
+                    missing=True,caps=[],transitions=[]))
                 continue
             try:
                 raw = path.read_bytes()
@@ -482,20 +576,24 @@ def summarize(result_root=DEFAULT_ROOT, *, model_ids=(0,1,2),seed_ids=(0,1,2,3,4
                 configs.add(json.dumps(cell["configuration"],sort_keys=True))
                 if manifest is not None:
                     _require(cell["configuration"] == manifest["configuration"], "Record configuration differs from declared manifest")
-                implementations.add(cell["implementation_fingerprint"])
+                implementations[cell["applicable"]].add(cell["implementation_fingerprint"])
                 budgets = tuple(cell["configuration"]["iteration_budgets"])
                 cell["transitions"] = _transitions(cell["caps"],absolute,relative)
                 cells.append(cell)
                 files.append(dict(path=str(path.resolve()),sha256=hashlib.sha256(raw).hexdigest()))
             except (KeyError,TypeError,ValueError,OverflowError) as error:
                 raise ValueError(f"Invalid budget study record {path}: {error}") from error
-    _require(len(configs) <= 1 and len(implementations) <= 1,"Cannot pool different study configurations or implementations")
+    _require(len(configs) <= 1 and all(len(values) <= 1 for values in implementations.values()),
+             "Cannot pool different study configurations or implementations within an applicability class")
     budgets = budgets or DEFAULT_BUDGETS
     groups = []
     for m,e,setting in requested:
         suffix=setting.suffix
         group = [c for c in cells if c["model_id"] == m and c["experiment"] == f"exp{e+1}" and c["setting"] == suffix]
         groups.append(dict(model=f"model{m+1}",experiment=f"exp{e+1}",setting=suffix,
+            applicable=setting.inapplicability_reason() is None,
+            inapplicability_reason=setting.inapplicability_reason(),
+            expected_cells=len(group),recorded_cells=sum(not c["missing"] for c in group),
             transitions=_aggregate(group,budgets,absolute,relative)))
     return dict(schema_version=1,method="SparseSMARTBudgetStudySummary",no_fits_performed=True,
         result_root=str(Path(result_root).resolve()),model_ids=list(model_ids),seed_ids=list(seed_ids),
@@ -504,8 +602,15 @@ def summarize(result_root=DEFAULT_ROOT, *, model_ids=(0,1,2),seed_ids=(0,1,2,3,4
         material_rule="gain > max(absolute_threshold, relative_threshold * base_validation_mse)",
         threshold_scope="predeclared descriptive practical thresholds; not a significance test",
         expected_cells=len(cells),recorded_cells=len(files),missing_cells=sum(c["missing"] for c in cells),
+        expected_applicable_cells=sum(c["applicable"] for c in cells),
+        expected_inapplicable_cells=sum(not c["applicable"] for c in cells),
+        recorded_inapplicable_cells=sum(not c["applicable"] and not c["missing"] for c in cells),
+        missing_inapplicable_cells=sum(not c["applicable"] and c["missing"] for c in cells),
         regenerated_unique_datasets=len(cache),verified_factor_states=sum(c.get("verified_factor_states",0) for c in cells),
-        configurations=[json.loads(c) for c in configs],implementation_fingerprints=sorted(implementations),
+        configurations=[json.loads(c) for c in configs],
+        implementation_fingerprints=sorted(set.union(*implementations.values())),
+        implementation_fingerprints_by_applicability={"applicable" if key else "inapplicable": sorted(values)
+                                                     for key, values in implementations.items()},
         input_files=files,cells=cells,per_setting=groups,
         per_model=[dict(model=f"model{m+1}",transitions=_aggregate([c for c in cells if c["model_id"]==m],budgets,absolute,relative,model=True)) for m in model_ids],
         interpretation="Unreached or failed extensions cannot establish a plateau; retained earlier fits remain eligible. Validation is reused for tuning. Coefficient truth is descriptive only. No universal sufficient-budget or convergence claim follows.")
@@ -521,10 +626,11 @@ def write_outputs(report, output_root):
     _atomic_json_dump(report,output/"summary.json")
     lines = ["# SparseSMART continuous iteration-budget study", "",
         f"Audited {report['recorded_cells']}/{report['expected_cells']} expected cells; {report['missing_cells']} missing. No estimators were fitted by this summary.", "",
+        f"The scope contains {report['expected_applicable_cells']} structurally applicable cells and {report['expected_inapplicable_cells']} inapplicable cells ({report['recorded_inapplicable_cells']} recorded, {report['missing_inapplicable_cells']} records missing). Recorded inapplicable cells are audited and excluded from validation-gain denominators; they are not failed fits or unresolved optimization caps.", "",
         ("Scope follows exactly the manifest's declared settings and seeds, including requested cells whose result is still missing."
          if report["manifest_scope"] else "Scope includes the three declared difficult settings for every requested model and saved seed."), "",
         f"A gain is material when it exceeds max({_fmt(report['absolute_threshold'])}, {_fmt(report['relative_threshold'])} × the earlier validation MSE). Both absolute and relative gains are retained per cell in summary.json. These are predeclared practical thresholds, not significance tests.", "",
-        "Cumulative minima retain successful earlier checkpoints, including before a later failure. A plateau is not established when any candidate has failed or not reached the comparison cap. Genuine earlier stationarity is checked separately. Ties preserve budget-major candidate order, and each trajectory retains its earliest evaluated validation minimum.", "",
+        "Cumulative minima retain successful earlier checkpoints, including before a later failure. Current records compare each prediction directly with the incumbent using stable pairwise validation loss differences; zero differences preserve budget-major candidate order and the earliest evaluated iterate. Saved factors independently verify these decisions and pairwise cap gains, even when reported MSE and reference-relative scores round equal. Historical records retain their recorded selection rules. A plateau is not established when any candidate has failed or not reached the comparison cap. Genuine earlier stationarity is checked separately.", "",
         "## Paired validation gains", "",
         "The 2000 → 8000 comparison is included alongside adjacent caps whenever available: two adjacent gains below the threshold can jointly exceed it.", "",
         "Means and SEs below use only seeds with complete candidate coverage at both caps. Incomplete pairs are explicitly excluded; one pair has no estimable SE. Coefficient errors are descriptive diagnostics and never select stopping or a budget.", "",

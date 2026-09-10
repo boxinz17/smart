@@ -35,11 +35,12 @@ diagnostic; its exact RRR candidate at `t=0` and later safeguards are retained.
 
 ## Installation
 
-From the surrounding `code/` directory:
+Create the [shared Python 3.12 environment](../environment/README.md). From the
+surrounding `code/` directory:
 
 ```bash
-conda activate smart-boxinj
-python -m pip install -e './bi-smart[test]'
+source .venv/bin/activate
+python -m pip install --no-build-isolation -c python-constraints.txt -e './bi-smart[test]'
 ```
 
 Verify the import:

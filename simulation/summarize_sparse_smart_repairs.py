@@ -17,6 +17,7 @@ import re
 import numpy as np
 
 from run_sparse_smart import _digest_json
+from sparse_smart_selection import selection_keys, validation_winner, validate_selected_score, history_winner
 
 
 HERE = Path(__file__).resolve().parent
@@ -54,8 +55,9 @@ def _validation_candidate(candidate, budget):
              "Incomplete candidate validation history")
     for value in history:
         _finite(value["loss"], "validation loss")
-    best = min(history, key=lambda v: v["loss"])
+    best = history_winner(history)
     _require(candidate["selected_iteration"] == best["iteration"], "Candidate did not select minimum validation iterate")
+    validate_selected_score(candidate, best)
     _close(candidate["validation_mse"], best["loss"], "Candidate validation score mismatch")
     if candidate["status"] == "completed":
         _require(count == budget and candidate["termination_reason"] == "max_iterations",
@@ -138,7 +140,8 @@ def validate_pair(old, new):
     eligible = [c for c in after if c["success"]]
     if new["success"]:
         _require(bool(eligible), "Selected result has no eligible candidate")
-        winner = min(eligible, key=lambda c: c["validation_mse"])
+        winner = validation_winner(eligible)
+        validate_selected_score(new, winner)
         _require(new["best_params"] == winner["params"] and new["selected_iteration"] == winner["selected_iteration"]
                  and new["n_iter"] == winner["n_iter"] and new["termination_reason"] == winner["termination_reason"],
                  "Selected model does not match minimum-validation winner")

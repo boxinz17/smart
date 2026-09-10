@@ -71,6 +71,22 @@ def test_valid_pair_counts_projection_without_claiming_convergence():
     assert audited["selected_iteration"] == 1 and audited["n_iter"] == 3
 
 
+def test_relative_scores_select_iterates_and_candidates_when_absolute_losses_tie():
+    old, new = valid_pair()
+    for index, candidate in enumerate(new["selection_history"]):
+        for row, score in zip(candidate["validation_history"], (0., -1.-index, -2.-index, -1.-index)):
+            row.update(loss=1e24, selection_score=score)
+        candidate.update(selected_iteration=2, validation_mse=1e24, selection_score=-2.-index)
+    winner = new["selection_history"][1]
+    new.update(selected_iteration=2, validation_loss=1e24, selection_score=winner["selection_score"],
+               validation_history=deepcopy(winner["validation_history"]))
+    audited = summary.validate_pair(old, new)
+    assert audited["selected_iteration"] == 2
+    new["selection_score"] = 0.
+    with pytest.raises(ValueError, match="selection score mismatch"):
+        summary.validate_pair(old, new)
+
+
 @pytest.mark.parametrize("key", summary.HASH_KEYS)
 def test_changed_training_validation_or_truth_is_rejected(key):
     old, new = valid_pair()

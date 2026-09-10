@@ -62,21 +62,37 @@ def _positive_real(value, name):
     return float(value)
 
 
+def _reorthogonalize(vector, basis, tol):
+    """Two matrix projection passes, with scalar fallback near dependence."""
+    original = vector.copy()
+    for _ in range(2):
+        vector -= basis @ (basis.T @ vector)
+    # Preserve coordinate-order decisions at nearly dependent candidates.
+    # Such rare residuals are sensitive to the accumulation order, so retain
+    # the original modified Gram-Schmidt calculation there.
+    if np.linalg.norm(vector) <= max(8 * tol, np.sqrt(np.finfo(float).eps) * np.linalg.norm(original)):
+        vector = original
+        for _ in range(2):
+            for column in range(basis.shape[1]):
+                existing = basis[:, column]
+                vector -= existing * np.dot(existing, vector)
+    return vector
+
+
 def _canonical_subspace(frame, tol):
     """Coordinate-order orthogonalization in an orthonormal column space."""
     dimension = frame.shape[1]
-    selected = []
+    selected = np.empty((frame.shape[0], dimension), order="F")
+    count = 0
     for row in range(frame.shape[0]):
         vector = frame @ frame[row, :]
-        # Reorthogonalization prevents loss of orthogonality near dependence.
-        for _ in range(2):
-            for existing in selected:
-                vector -= existing * np.dot(existing, vector)
+        vector = _reorthogonalize(vector, selected[:, :count], tol)
         norm = np.linalg.norm(vector)
         if norm > tol:
-            selected.append(vector / norm)
-        if len(selected) == dimension:
-            return np.column_stack(selected)
+            selected[:, count] = vector / norm
+            count += 1
+        if count == dimension:
+            return selected
     if dimension == 0:
         return np.empty((frame.shape[0], 0))
     raise ValueError("Could not determine a numerical coordinate-order basis; reduce tie_tol")
@@ -103,21 +119,24 @@ def complete_basis(frame, *, tol=1e-12, n_columns=None):
         raise ValueError("frame must have orthonormal columns")
     if n_columns == columns:
         return frame
-    basis = [frame[:, j].copy() for j in range(columns)]
+    # Column-major storage gives every partial completion the same contiguous
+    # prefixes and projection order as the corresponding full completion.
+    basis = np.empty((rows, n_columns), order="F")
+    basis[:, :columns] = frame
+    count = columns
     for index in range(rows):
         vector = np.zeros(rows)
         vector[index] = 1.0
-        for _ in range(2):
-            for existing in basis:
-                vector -= existing * np.dot(existing, vector)
+        vector = _reorthogonalize(vector, basis[:, :count], tol)
         norm = np.linalg.norm(vector)
         if norm > tol:
-            basis.append(vector / norm)
-        if len(basis) == n_columns:
+            basis[:, count] = vector / norm
+            count += 1
+        if count == n_columns:
             break
-    if len(basis) != n_columns:
+    if count != n_columns:
         raise ValueError("Could not complete source basis; reduce tie_tol")
-    return np.column_stack(basis) if rows else np.empty((0, 0))
+    return basis
 
 
 def deterministic_svd(matrix, *, tie_tol=1e-12):

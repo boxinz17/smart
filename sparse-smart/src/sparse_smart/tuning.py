@@ -16,6 +16,7 @@ import numpy as np
 from .calibration import Margins, PracticalCalibration
 from .estimator import FitFailure, SparseSMART, _FitPreparationCache, _data
 from .source import ExactSource, NoisySource
+from .validation import SELECTION_RULE, validation_loss_difference
 
 
 _DEFAULT_PENALTIES = (.00125, .0025, .005, .01, .02, .04)
@@ -168,15 +169,31 @@ class SparseSMARTTuner:
         return X[self.train_indices_], Y[self.train_indices_], X[self.validation_indices_], Y[self.validation_indices_]
 
     @staticmethod
-    def _validation_mse(model, Xv, Yv, *, allow_partial=False):
+    def _validation_mse(model, Xv, Yv, *, allow_partial=False, selection_reference=None,
+                        return_prediction=False):
         prediction = np.asarray(model.predict(Xv, allow_partial=allow_partial))
+        result = SparseSMARTTuner._prediction_score(prediction, Yv, selection_reference)
+        if return_prediction:
+            return (*result, prediction)
+        return result if selection_reference is not None else result[0]
+
+    @staticmethod
+    def _prediction_score(prediction, Yv, selection_reference=None):
         if prediction.shape != Yv.shape or not np.isfinite(prediction).all():
             raise ValueError("candidate validation predictions must be finite and match validation responses")
         with np.errstate(over="raise", invalid="raise"):
             score = float(np.mean((prediction - Yv) ** 2))
         if not np.isfinite(score):
             raise ValueError("candidate validation loss is nonfinite")
-        return score
+        if selection_reference is not None:
+            return score, selection_reference.score(prediction, Yv)
+        return score, None
+
+    @staticmethod
+    def _comparison(prediction, incumbent_prediction, Yv, incumbent_id):
+        return dict(incumbent_candidate_id=incumbent_id,
+            loss_difference=None if incumbent_prediction is None else
+            validation_loss_difference(prediction, incumbent_prediction, Yv))
 
     def _continuous_search(self, grid, Xtr, Ytr, Xv, Yv, source, preparation):
         """Fit each grid point once; compare certified prefixes at each cap.
@@ -212,6 +229,8 @@ class SparseSMARTTuner:
                     refinement_solver=self.refinement_solver,
                     checkpoint_iterations=schedule, validation_interval=self.checkpoint_interval_)
                 model._fit_cache = preparation
+                preparation.validation_context = dict(grid_candidate_id=grid_id,
+                                                       iteration_budget=self.iterations)
                 model.fit(Xtr, Ytr, source=source, validation_data=(Xv, Yv))
             except (ValueError, np.linalg.LinAlgError, FloatingPointError, ArithmeticError, FitFailure) as error:
                 exception = error
@@ -228,6 +247,7 @@ class SparseSMARTTuner:
                 diagnostics=getattr(model, "diagnostics_", {}).copy(), elapsed_time_sec=elapsed))
 
         budget_scores, winner_ids = {}, {}
+        global_prediction = None
         for budget in self.iteration_budgets_:
             budget_records = []
             for grid_id, (full_model, trajectory) in enumerate(zip(self.trajectory_models_, self.trajectory_history_)):
@@ -235,7 +255,8 @@ class SparseSMARTTuner:
                 record = dict(candidate_id=candidate_id, grid_candidate_id=grid_id,
                     iteration_budget=budget, params=trajectory["params"].copy(),
                     success=False, status=trajectory["status"], message=trajectory["message"],
-                    validation_mse=None, partial_validation_mse=None,
+                    validation_mse=None, selection_score=None, selection_rule=SELECTION_RULE,
+                    partial_validation_mse=None,
                     has_partial_coefficient=hasattr(full_model, "coefficient_"),
                     selected_iteration=None, n_iter=min(budget, trajectory["n_iter"]),
                     termination_reason=trajectory["termination_reason"], validation_history=[],
@@ -254,48 +275,97 @@ class SparseSMARTTuner:
                     try:
                         summary = full_model._checkpoint_summary(endpoint)
                         score = summary["validation_mse"]
+                        selection_score = summary["selection_score"]
                         if not summary["success"]:
                             raise FitFailure(summary["status"], "Checkpoint is not a successful prefix")
                         if score is None or not np.isfinite(score):
                             raise ValueError("checkpoint validation loss is nonfinite")
+                        if selection_score is None or not np.isfinite(selection_score):
+                            raise ValueError("checkpoint validation selection score is nonfinite")
                         record.update(summary, has_partial_coefficient=False,
                             trajectory_checkpoint_iteration=endpoint,
                             budget_reached=(endpoint == budget or terminal_stationary))
                     except (ValueError, np.linalg.LinAlgError, FloatingPointError, ArithmeticError, FitFailure) as error:
                         record.update(success=False, status=type(error).__name__, message=str(error),
-                                      validation_mse=None, budget_reached=False)
+                                      validation_mse=None, selection_score=None, budget_reached=False)
                 self.selection_history_.append(record)
                 budget_records.append(record)
-            # The snapshots already contain the validation minima observed
-            # during fitting. Construct an independent dense model only for
-            # the final winner, trying the next candidate if reconstruction
-            # or prediction validation fails.
-            for record in sorted((r for r in budget_records if r["success"]),
-                                 key=lambda r: r["validation_mse"]):
-                try:
-                    checkpoint = self.trajectory_models_[record["grid_candidate_id"]].checkpoint_model(
-                        record["trajectory_checkpoint_iteration"])
-                    if not checkpoint.success_:
-                        raise FitFailure(checkpoint.status_, "Checkpoint is not a successful prefix")
-                    checked_score = self._validation_mse(checkpoint, Xv, Yv)
-                    score = record["validation_mse"]
-                    if not np.isclose(checked_score, score, rtol=1e-10, atol=1e-12):
-                        raise ValueError("checkpoint predictions disagree with its recorded validation loss")
-                except (ValueError, np.linalg.LinAlgError, FloatingPointError, ArithmeticError, FitFailure) as error:
-                    record.update(success=False, status=type(error).__name__, message=str(error),
-                                  validation_mse=None, budget_reached=False)
+            # Compare selected factor predictions directly. Only incumbent
+            # predictions live during this pass; snapshots never retain a
+            # validation-sized array. Materialize final winners only, replaying
+            # comparisons if reconstruction disqualifies one of them.
+            while True:
+                best_budget, budget_prediction = None, None
+                best_global = (self.selection_history_[self.selected_candidate_id_]
+                               if self.selected_candidate_id_ is not None else None)
+                next_global_prediction = global_prediction
+                for record in budget_records:
+                    record.pop("selection_comparison", None)
+                    record.pop("budget_selection_comparison", None)
+                    if not record["success"]:
+                        continue
+                    try:
+                        prediction = self.trajectory_models_[record["grid_candidate_id"]]._checkpoint_prediction(
+                            record["trajectory_checkpoint_iteration"], Xv)
+                        checked_score, checked_selection = self._prediction_score(
+                            prediction, Yv, preparation.validation_reference)
+                        self._check_checkpoint_scores(record, checked_score, checked_selection)
+                        local = self._comparison(prediction, budget_prediction, Yv,
+                            best_budget["candidate_id"] if best_budget is not None else None)
+                        overall = self._comparison(prediction, next_global_prediction, Yv,
+                            best_global["candidate_id"] if best_global is not None else None)
+                    except (ValueError, np.linalg.LinAlgError, FloatingPointError, ArithmeticError, FitFailure) as error:
+                        record.update(success=False, status=type(error).__name__, message=str(error),
+                                      validation_mse=None, selection_score=None, budget_reached=False)
+                        continue
+                    record["budget_selection_comparison"], record["selection_comparison"] = local, overall
+                    if best_budget is None or local["loss_difference"] < 0:
+                        best_budget, budget_prediction = record, prediction.copy()
+                    if best_global is None or overall["loss_difference"] < 0:
+                        best_global, next_global_prediction = record, prediction.copy()
+                if best_budget is None:
+                    break
+                required = [best_budget]
+                if (best_global["candidate_id"] != self.selected_candidate_id_
+                        and best_global is not best_budget):
+                    required.append(best_global)
+                materialized = {}
+                for record in required:
+                    try:
+                        checkpoint = self.trajectory_models_[record["grid_candidate_id"]].checkpoint_model(
+                            record["trajectory_checkpoint_iteration"])
+                        if not checkpoint.success_:
+                            raise FitFailure(checkpoint.status_, "Checkpoint is not a successful prefix")
+                        checked_score, checked_selection = self._validation_mse(checkpoint, Xv, Yv,
+                            selection_reference=preparation.validation_reference)
+                        self._check_checkpoint_scores(record, checked_score, checked_selection)
+                        materialized[record["candidate_id"]] = checkpoint
+                    except (ValueError, np.linalg.LinAlgError, FloatingPointError, ArithmeticError, FitFailure) as error:
+                        record.update(success=False, status=type(error).__name__, message=str(error),
+                                      validation_mse=None, selection_score=None, budget_reached=False)
+                        break
+                if len(materialized) != len(required):
                     continue
-                self.checkpoints_[budget] = checkpoint
-                budget_scores[budget], winner_ids[budget] = score, record["candidate_id"]
-                if self.best_score_ is None or score < self.best_score_:
-                    self.best_score_, self.best_params_ = score, record["params"].copy()
-                    self.model_ = self.estimator_ = checkpoint
-                    self.selected_budget_, self.selected_candidate_id_ = budget, record["candidate_id"]
+                self.checkpoints_[budget] = materialized[best_budget["candidate_id"]]
+                budget_scores[budget], winner_ids[budget] = best_budget["validation_mse"], best_budget["candidate_id"]
+                if best_global["candidate_id"] != self.selected_candidate_id_:
+                    self.best_score_, self.best_params_ = best_global["validation_mse"], best_global["params"].copy()
+                    self.best_selection_score_ = best_global["selection_score"]
+                    self.model_ = self.estimator_ = materialized[best_global["candidate_id"]]
+                    self.selected_budget_, self.selected_candidate_id_ = budget, best_global["candidate_id"]
+                    global_prediction = next_global_prediction
                 break
         self.diagnostics_.update(trajectory_fits=len(grid),
             successful_trajectories=sum(t["success"] for t in self.trajectory_history_),
             failed_trajectories=sum(not t["success"] for t in self.trajectory_history_))
         return budget_scores, winner_ids
+
+    @staticmethod
+    def _check_checkpoint_scores(record, score, selection_score):
+        if not np.isclose(score, record["validation_mse"], rtol=1e-10, atol=1e-12):
+            raise ValueError("checkpoint predictions disagree with its recorded validation loss")
+        if not np.isclose(selection_score, record["selection_score"], rtol=1e-10, atol=1e-12):
+            raise ValueError("checkpoint predictions disagree with its recorded selection score")
 
     def fit(self, X, Y, *, source: ExactSource | NoisySource, validation_data=None):
         """Fit training-only candidates and retain the successful validation winner.
@@ -346,12 +416,15 @@ class SparseSMARTTuner:
         self.selection_history_ = []
         self.success_, self.status_ = False, "no_successful_candidate"
         self.best_params_, self.best_score_, self.selected_iteration_ = None, None, None
+        self.best_selection_score_ = None
+        self.selection_rule_ = SELECTION_RULE
         self.selected_budget_, self.selected_candidate_id_ = None, None
         self.checkpoints_ = {}
         budget_scores, budget_winner_ids = {}, {}
         self.model_, self.estimator_ = None, None
         self.diagnostics_ = {
-            "theorem_certified": False, "selection_metric": "mean_validation_squared_prediction_error",
+            "theorem_certified": False, "selection_metric": "pairwise_validation_loss_difference",
+            "selection_rule": SELECTION_RULE,
             "refit_on_all_data": False, "split_mode": self.split_mode_,
             "training_rows": Xtr.shape[0], "validation_rows": Xv.shape[0],
             "validation_score_is_independent_test_estimate": False,
@@ -367,13 +440,17 @@ class SparseSMARTTuner:
         if self.checkpoint_execution == "continuous":
             budget_scores, budget_winner_ids = self._continuous_search(grid, Xtr, Ytr, Xv, Yv, source, preparation)
         else:
+            global_prediction, budget_prediction, current_budget = None, None, None
             for candidate_id, (budget, (grid_id, values)) in enumerate(product(self.iteration_budgets_, enumerate(grid))):
+                if budget != current_budget:
+                    budget_prediction, current_budget = None, budget
                 init, pu, pv, limits = values
                 params = dict(init_penalty=init, penalty_u=pu, penalty_v=pv,
                               support_limits=limits, step_size_inverse=self.step_size_inverse)
                 record = dict(candidate_id=candidate_id, grid_candidate_id=grid_id,
                               iteration_budget=budget, params=params, success=False,
-                              status=None, message=None, validation_mse=None,
+                              status=None, message=None, validation_mse=None, selection_score=None,
+                              selection_rule=SELECTION_RULE,
                               partial_validation_mse=None, has_partial_coefficient=False,
                               selected_iteration=None, n_iter=0, termination_reason=None,
                               validation_history=[], elapsed_time_sec=None)
@@ -395,6 +472,7 @@ class SparseSMARTTuner:
                         refinement_solver=self.refinement_solver,
                     )
                     model._fit_cache = preparation
+                    preparation.validation_context = dict(grid_candidate_id=grid_id, iteration_budget=budget)
                     model.fit(Xtr, Ytr, source=source, validation_data=(Xv, Yv))
                     record.update(success=bool(model.success_), status=model.status_,
                                   message=model.message_, n_iter=int(model.n_iter_),
@@ -403,25 +481,45 @@ class SparseSMARTTuner:
                                   validation_history=getattr(model, "validation_history_", []))
                     record["diagnostics"] = getattr(model, "diagnostics_", {}).copy()
                     if model.success_:
-                        score = self._validation_mse(model, Xv, Yv)
+                        score, checked_selection, prediction = self._validation_mse(model, Xv, Yv,
+                            selection_reference=preparation.validation_reference, return_prediction=True)
+                        selection_score = getattr(model, "best_selection_score_", checked_selection)
+                        if selection_score is None or not np.isfinite(selection_score):
+                            raise ValueError("candidate validation selection score is nonfinite")
+                        if not np.isclose(checked_selection, selection_score, rtol=1e-10, atol=1e-12):
+                            raise ValueError("candidate predictions disagree with its recorded selection score")
                         record["validation_mse"] = score
-                        if budget not in budget_scores or score < budget_scores[budget]:
+                        record["selection_score"] = selection_score
+                        local_comparison = self._comparison(prediction, budget_prediction, Yv,
+                                                            budget_winner_ids.get(budget))
+                        global_comparison = self._comparison(prediction, global_prediction, Yv,
+                                                             self.selected_candidate_id_)
+                        record["budget_selection_comparison"] = local_comparison
+                        record["selection_comparison"] = global_comparison
+                        if budget_prediction is None or local_comparison["loss_difference"] < 0:
                             self.checkpoints_[budget] = model
                             budget_scores[budget], budget_winner_ids[budget] = score, candidate_id
-                        if self.best_score_ is None or score < self.best_score_:
+                            budget_prediction = prediction.copy()
+                        if global_prediction is None or global_comparison["loss_difference"] < 0:
                             self.best_score_, self.best_params_ = score, params.copy()
+                            self.best_selection_score_ = selection_score
                             self.model_ = self.estimator_ = model
                             self.selected_budget_, self.selected_candidate_id_ = budget, candidate_id
+                            global_prediction = prediction.copy()
                     elif hasattr(model, "coefficient_"):
                         record["has_partial_coefficient"] = True
                         record["partial_validation_mse"] = self._validation_mse(model, Xv, Yv, allow_partial=True)
                 except (ValueError, np.linalg.LinAlgError, FloatingPointError, FitFailure) as error:
-                    record.update(success=False, status=type(error).__name__, message=str(error))
+                    record.update(success=False, status=type(error).__name__, message=str(error),
+                                  validation_mse=None, selection_score=None)
                     if model is not None:
                         record["has_partial_coefficient"] = hasattr(model, "coefficient_")
                 record["elapsed_time_sec"] = time.perf_counter() - started
                 self.selection_history_.append(record)
         self.n_candidates_ = len(self.selection_history_)
+        self.diagnostics_["selection_reference"] = preparation.validation_reference.metadata
+        if preparation.validation_reference.prediction is not None:
+            self.validation_reference_prediction_ = preparation.validation_reference.prediction.copy()
         winner = (self.selection_history_[self.selected_candidate_id_]
                   if self.selected_candidate_id_ is not None else None)
         continuations = [dict(candidate_id=record["candidate_id"], iteration_budget=record["iteration_budget"],
@@ -436,12 +534,16 @@ class SparseSMARTTuner:
             budget_statuses.append(dict(iteration_budget=budget, success=bool(successful),
                 successful_candidates=successful, failed_candidates=len(records)-successful,
                 best_candidate_id=budget_winner_ids.get(budget), best_validation_mse=budget_scores.get(budget)))
+            budget_statuses[-1]["best_selection_score"] = (
+                self.selection_history_[budget_winner_ids[budget]]["selection_score"]
+                if budget in budget_winner_ids else None)
             if self.checkpoint_execution == "continuous":
                 reached = sum(record["budget_reached"] for record in records)
                 budget_statuses[-1].update(budget_reached_candidates=reached,
                     unreached_candidates=len(records)-reached, budget_fully_covered=(reached == len(records)))
         n_successful = sum(record["success"] for record in self.selection_history_)
         self.diagnostics_.update(selected_budget=self.selected_budget_,
+            best_selection_score=self.best_selection_score_,
             selected_candidate_id=self.selected_candidate_id_,
             selected_checkpoint_status=winner["status"] if winner is not None else None,
             selected_checkpoint_termination_reason=winner["termination_reason"] if winner is not None else None,

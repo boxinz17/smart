@@ -17,10 +17,14 @@ import re
 
 import numpy as np
 
+from sparse_smart_selection import (selection_value, selection_values, selection_keys, validation_winner,
+                                    validate_selected_score, history_winner)
+
 from run_restricted_rrr import DEFAULT_SEED_FILE, experiment_settings, load_experiment_seeds
 from run_sparse_smart import _digest_json, _json_value
 from run_sparse_smart_tuned import RunnerConfig, resolved_configuration, result_path
 from summarize_sparse_smart import DEFAULT_REFERENCE, _stats
+from paper_reference import read_reference
 
 HERE = Path(__file__).resolve().parent
 PAPER_METHODS = ("SMART", "SMART_fixed", "RRR", "SRRR", "SOFAR", "RSSVD")
@@ -117,7 +121,7 @@ def _validate_checkpoint_metadata(record, config, grid_size):
     _require(isinstance(diagnostics, dict), "Invalid checkpoint tuning diagnostics")
     budgets = config.iteration_budgets or (config.iterations,)
     eligible = [candidate for candidate in candidates if candidate["success"]]
-    winner = min(eligible, key=lambda candidate: candidate["validation_mse"]) if eligible else None
+    winner = validation_winner(eligible) if eligible else None
     selected_budget = _candidate_budget(winner, config) if winner is not None else None
     winner_grid_id = winner["candidate_id"] % grid_size if winner is not None else None
     continuations = [dict(candidate_id=candidate["candidate_id"],
@@ -130,11 +134,16 @@ def _validate_checkpoint_metadata(record, config, grid_size):
     for budget in budgets:
         records = [candidate for candidate in candidates if _candidate_budget(candidate, config) == budget]
         successful = [candidate for candidate in records if candidate["success"]]
-        best = min(successful, key=lambda candidate: candidate["validation_mse"]) if successful else None
+        best = validation_winner(successful, comparison_key="budget_selection_comparison") if successful else None
         budget_statuses.append(dict(iteration_budget=budget, success=bool(successful),
             successful_candidates=len(successful), failed_candidates=len(records)-len(successful),
             best_candidate_id=best["candidate_id"] if best is not None else None,
             best_validation_mse=best["validation_mse"] if best is not None else None))
+    if any("selection_score" in candidate for candidate in candidates):
+        for status, budget in zip(budget_statuses, budgets):
+            best = validation_winner((c for c in candidates if c["success"] and _candidate_budget(c, config) == budget),
+                                     comparison_key="budget_selection_comparison")
+            status["best_selection_score"] = best["selection_score"] if best is not None else None
     expected = dict(iteration_budgets=list(budgets), checkpoint_execution="independent_fits",
         selected_budget=selected_budget, selected_candidate_id=winner["candidate_id"] if winner is not None else None,
         selected_checkpoint_status=winner["status"] if winner is not None else None,
@@ -158,8 +167,10 @@ def _validate_validation_history(record):
     _require([item["iteration"] for item in history] == list(range(n_iter + 1)),
              "Incomplete candidate validation history")
     scores = [_finite(item["loss"], "candidate validation loss") for item in history]
-    _require(selected == min(range(len(scores)), key=scores.__getitem__),
+    best = history_winner(history)
+    _require(selected == best["iteration"],
              "Selected iterate is not the earliest validation minimum")
+    validate_selected_score(record, history[selected])
     score = _finite(record["validation_mse"], "candidate validation_mse")
     _require(math.isclose(score, scores[selected], rel_tol=1e-10, abs_tol=1e-12),
              "Candidate score disagrees with selected validation iterate")
@@ -254,7 +265,8 @@ def validate_record(record, path, *, setting, random_seed, model, experiment, se
                  "All-candidates-failed record contains a selected model")
     if record["success"]:
         _require(record["all_candidates_failed"] is False and bool(eligible), "No eligible successful winner")
-        winner = min(eligible, key=lambda c: c["validation_mse"])
+        winner = validation_winner(eligible)
+        validate_selected_score(record, winner)
         winner_budget = _validate_selected_budget(record, winner, config)
         _require(record["best_params"] == winner["params"], "Selected candidate is not the validation winner")
         _require(record["selected_iteration"] == winner["selected_iteration"]
@@ -284,9 +296,9 @@ def validate_record(record, path, *, setting, random_seed, model, experiment, se
 
 
 def _paper_reference(path, model_id, experiments):
-    with Path(path).open() as stream:
-        paper = [r for r in csv.DictReader(stream) if int(r["model_id"]) == model_id
-                 and r["experiment"] in {f"exp{i+1}" for i in experiments}]
+    reference_rows, _ = read_reference(path)
+    paper = [r for r in reference_rows if int(r["model_id"]) == model_id
+             and r["experiment"] in {f"exp{i+1}" for i in experiments}]
     for exp_id in experiments:
         for setting in experiment_settings(model_id, exp_id):
             x = float(setting.suffix.split("=", 1)[1])

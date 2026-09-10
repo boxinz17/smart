@@ -17,6 +17,9 @@ from pathlib import Path
 
 import numpy as np
 
+from sparse_smart_selection import (selection_value, selection_values, validation_winner,
+                                    validate_selected_score, prediction_selection_score)
+
 import external_validation_data
 import run_sparse_smart_external as runner
 from run_restricted_rrr import DEFAULT_SEED_FILE, experiment_settings, load_experiment_seeds
@@ -46,8 +49,63 @@ def _data_audit(setting, seed, config, cache, generator):
             evaluation_truth_fingerprint=runner.old_runner._array_fingerprint(data, ("C_star",)),
             validation_seed_metadata=_json_value(data["validation_seed_metadata"]),
             _truth=np.asarray(data["C_star"]).copy(),
+            _X_validation=np.asarray(data["X_validation"]).copy(),
+            _Y_validation=np.asarray(data["Y_validation"]).copy(),
         )
     return cache[key]
+
+
+def _audit_selected_predictions(record, setting, data):
+    """Verify the selected fit against regenerated validation observations."""
+    coefficient = np.asarray(record["C_hat"], dtype=float)
+    X, Y = data["_X_validation"], data["_Y_validation"]
+    factors = record.get("selected_factors")
+    if factors is None:
+        _require(record.get("selection_rule") != "pairwise-validation-loss-v1",
+                 "Pairwise-selected result is missing selected coefficient factors")
+        prediction = X @ coefficient
+    else:
+        _require(isinstance(factors, dict), "Invalid selected coefficient factors")
+        left, d, right = (np.asarray(factors[name], dtype=float)
+                          for name in ("left", "singular_values", "right"))
+        rank = setting.target_rank
+        _require(left.shape == (setting.p, rank) and d.shape == (rank,)
+                 and right.shape == (setting.q, rank) and np.all(d > 0)
+                 and all(np.isfinite(a).all() for a in (left, d, right)),
+                 "Invalid selected coefficient factor dimensions or values")
+        _require(np.allclose(left.T @ left, np.eye(rank), rtol=1e-8, atol=1e-8)
+                 and np.allclose(right.T @ right, np.eye(rank), rtol=1e-8, atol=1e-8),
+                 "Selected coefficient factors are not orthonormal")
+        _require(np.allclose((left * d) @ right.T, coefficient, rtol=1e-10, atol=1e-12),
+                 "Selected coefficient factors disagree with saved coefficient")
+        # Match the estimator's factor grouping: dense C_hat prediction can
+        # differ by roundoff that is visible in a small relative loss score.
+        prediction = ((X @ left) * d) @ right.T
+    _require(np.isfinite(prediction).all(), "Nonfinite selected validation prediction")
+    with np.errstate(over="ignore", invalid="ignore"):
+        loss = float(np.mean((Y - prediction) ** 2))
+    _require(math.isfinite(loss) and math.isclose(record["validation_loss"], loss,
+                                                rel_tol=1e-10, abs_tol=1e-12),
+             "Selected validation MSE disagrees with saved coefficient predictions")
+    if "selection_score" in record:
+        score = prediction_selection_score(prediction, Y,
+                                           record.get("validation_reference_prediction"))
+        tolerance = 1e-12
+        if factors is None:
+            # Historical records do not preserve the canonical factor product.
+            # Bound reassociation error by the coefficient's Frobenius scale;
+            # zero-design rows have zero allowance even with huge responses.
+            eps = np.finfo(float).eps
+            prediction_error = (16 * eps * (setting.p + setting.q + setting.target_rank)
+                                * np.linalg.norm(X, axis=1, keepdims=True)
+                                * np.linalg.norm(coefficient, ord="fro"))
+            residual = prediction.astype(np.longdouble) - Y
+            allowance = np.mean(2 * np.abs(residual) * prediction_error
+                                + prediction_error ** 2, dtype=np.longdouble)
+            _require(np.isfinite(allowance), "Nonfinite validation roundoff allowance")
+            tolerance += float(allowance)
+        _require(math.isclose(selection_value(record), score, rel_tol=1e-10, abs_tol=tolerance),
+                 "Selected validation selection score disagrees with saved coefficient predictions")
 
 
 def _validate_selection(record, setting, config, resolved):
@@ -101,7 +159,8 @@ def _validate_selection(record, setting, config, resolved):
                      "All-candidates-failed record contains a selected model")
         return
     _require(record["all_candidates_failed"] is False and eligible, "No eligible winner")
-    winner = min(eligible, key=lambda c: c["validation_mse"])
+    winner = validation_winner(eligible)
+    validate_selected_score(record, winner)
     winner_budget = _validate_selected_budget(record, winner, config)
     _require(record["best_params"] == winner["params"], "Selected candidate is not the validation winner")
     _require(record["selected_iteration"] == winner["selected_iteration"]
@@ -183,13 +242,14 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
     _validate_selection(record, setting, config, resolved)
     actual = _data_audit(setting, random_seed, config, data_cache, generate_data_fn)
     for key, value in actual.items():
-        if key == "_truth":
+        if key.startswith("_"):
             continue
         _require(record[key] == value, f"Regenerated {key} differs from the saved result")
     if record["success"]:
         error = np.linalg.norm(np.asarray(record["C_hat"])-actual["_truth"],ord="fro") / np.sqrt(setting.p*setting.q)
         _require(math.isclose(record["avg_err"],float(error),rel_tol=1e-10,abs_tol=1e-12),
                  "Saved coefficient error disagrees with regenerated truth and the paper metric")
+        _audit_selected_predictions(record, setting, actual)
     return config
 
 
@@ -266,7 +326,7 @@ def summarize(result_root, reference_path=DEFAULT_REFERENCE, *, model_ids=(0,1,2
     config = json.loads(next(iter(configs))) if configs else None
     duplicates = _duplicates(records,model_ids,seed_ids)
     paper = [r for m in model_ids for r in _paper_reference(reference_path,m,experiments)]
-    pdfs = _paper_provenance(reference_path)
+    provenance = _paper_provenance(reference_path)
     rows = []
     for (m,experiment,suffix),(exp_id,setting) in settings.items():
         cell = [records[(m,experiment,suffix,seed)] for seed in seed_ids if (m,experiment,suffix,seed) in records]
@@ -330,9 +390,11 @@ def summarize(result_root, reference_path=DEFAULT_REFERENCE, *, model_ids=(0,1,2
                        for m,e,suffix in settings for seed in seed_ids if (m,e,suffix,seed) not in records],
         actual_base_training_n={f"model{m+1}":experiment_settings(m,0)[0].n for m in model_ids},
         additional_validation_rows=100,refit_on_all_data=False,paper_repetitions=100,
-        paper_pdf_hashes_verified=pdfs,comparison_has_equal_tuning_data=False,
+        paper_pdf_hashes_verified=[dict(pdf=source["pdf"],sha256=source["sha256"])
+            for source in provenance["source_pdfs"] if source["verification"] == "verified"],
+        paper_reference_verification=provenance,comparison_has_equal_tuning_data=False,
         source_rank_semantics_match_paper=False,
-        artifact_validation="identities/configurations/seeds/splits/candidates/winners; actual regenerated training/validation/truth hashes and coefficient errors; duplicate default cells; original PDF hashes",
+        artifact_validation="identities/configurations/seeds/splits/candidates/winners; actual regenerated training/validation/truth hashes and coefficient errors; duplicate default cells; paper-reference CSV checksum and provenance; hashes of source PDFs available locally",
         result_root=str(Path(result_root).resolve()),paper_reference=str(Path(reference_path).resolve()))
     return rows,paper,metadata
 
@@ -353,7 +415,8 @@ def write_outputs(rows,paper,metadata,output_dir):
         "The paper references summarize 100 repetitions, whereas new means/SEs use only the requested seeds. New fits receive 100 extra observations for penalty/iterate selection: this is not an equal-data-budget comparison with the paper. Validation loss is a reused selection score, not independent test performance. Coefficient error is ||C_hat-C_star||_F / sqrt(p*q). Figure aggregates do not permit paired seed-level significance tests.", "",
         "Experiment 3 is SparseSMART source-rank sensitivity on the paper grid. Its source_rank controls the reduced initializer and source-coordinate construction. The paper's r_s instead specifies leading source directions left unpenalized. These parameters have different meanings; the experiment is not an identical parameter comparison. Automatically ranked paper SMART is a horizontal reference in Experiments 2 and 3; fixed-rank SMART is the closer rank-sensitivity reference.", "",
         "Fitted target rank 11 exceeds source rank 10, and source ranks 0/3 are below fitted rank 5. These cells are inapplicable and are never clamped or assigned zero error. Failures at otherwise applicable settings remain failures; initialization_spectrum_failed means the initializer violates the declared spectral margins before refinement. Means/SEs include successful fits only, with denominators and failure counts shown. Where failures occur, means are conditional on success. Missing results remain distinct.", "",
-        f"The audit regenerated {metadata['regenerated_unique_datasets']} distinct training/validation datasets for {metadata['verified_input_records']} saved records, sharing cached data across fitted-rank settings. Training, validation and evaluation-truth hashes were checked directly. Repeated default cells across the four experiments were checked for matching fingerprints and outcomes (numerical agreement tolerance 1e-10). No earlier 160/40 result files are required.", ""]
+        f"The audit regenerated {metadata['regenerated_unique_datasets']} distinct training/validation datasets for {metadata['verified_input_records']} saved records, sharing cached data across fitted-rank settings. Training, validation and evaluation-truth hashes were checked directly. Repeated default cells across the four experiments were checked for matching fingerprints and outcomes (numerical agreement tolerance 1e-10). No earlier 160/40 result files are required.", "",
+        "The paper-reference CSV checksum and provenance were verified. Source PDF hashes are checked when those files are available locally; unavailable PDFs do not prevent use of the reference bundle and are not claimed as verified. validation_audit.json records every source's verification status.", ""]
     for model_id in metadata["model_ids"]:
         report += [f"## Model {['I','II','III'][model_id]}", "",
             "| Experiment / setting | Training n | Success / requested | Failed / inapplicable / missing | Error (SE) | Paper fixed-rank SMART | Paper SMART |",

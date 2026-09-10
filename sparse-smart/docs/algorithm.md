@@ -187,8 +187,8 @@ T, preserving the original single-budget behavior, including T=0. An explicit
 schedule must consist of positive strictly increasing integers whose last
 value is T. For example, `(500,2000)` runs each candidate once with budget 500
 and independently again with budget 2000. The training and validation arrays
-are split or validated once and reused unchanged. Source preparation and data
-projections are cached within this call, and identical Lasso/anchor results
+are split or validated once and reused unchanged. Source preparation and
+training-data projections are cached within this call, and identical Lasso/anchor results
 are cached per initialization configuration. Support thresholding and all
 refinement state remain candidate-specific. Cached preparations are not reused
 by a later `fit`, and public fitted arrays are copied independently. There is
@@ -203,10 +203,11 @@ Only the best successful fitted model per budget is kept in `checkpoints_`,
 keyed by budget, to avoid storing all candidate model objects. Budgets with no
 successful candidate have no model in this mapping.
 
-The global winner minimizes validation prediction MSE over all successful
-checkpoints. Strict improvement is required to replace it, so ties prefer the
-earlier budget and then earlier grid position. This gives the same global
-minimum as retaining every successful candidate model. A failed longer fit
+The global winner uses the stable validation comparison below over all
+successful checkpoints. A strictly negative pairwise loss difference is required
+to replace it, so a computed zero prefers the earlier budget and then earlier
+grid position. This gives the same winner as retaining every successful
+candidate model. A failed longer fit
 cannot invalidate the shorter fit that completed successfully. Its partial
 coefficient is still excluded, even if that partial validation score is lower.
 Completion at a declared budget is distinct from stationarity.
@@ -221,6 +222,56 @@ later failure. These continuation records describe independent refits. There
 is no implicit refit on training plus validation data, and coefficient truth
 does not select a budget. Validation scores used repeatedly for this selection
 are not independent test-error estimates.
+
+### Stable validation selection
+
+Each newly evaluated prediction `P` is compared directly with the incumbent
+prediction `P_incumbent`, using
+
+```text
+loss_difference = mean((P-P_incumbent) * ((P-Y) + (P_incumbent-Y)))
+```
+
+Products and accumulation use extended precision where the platform supports
+it. A negative difference replaces the incumbent; an exactly zero computed
+difference retains the earlier iterate, candidate, or budget. This removes
+unchanged prediction entries and avoids subtracting large complete losses.
+Neither a rounded absolute MSE nor a rounded fixed-reference score breaks a
+pairwise tie. The rule does not change training, the validation schedule, or
+checkpoint eligibility.
+
+One fixed validation prediction `P0` is taken from the first evaluated
+initializer and shared across all candidates, iterates, and budgets in a
+tuner `fit`. A standalone estimator uses its own initializer; a new `fit`
+starts a new reference. For reporting, compute
+`selection_score = mean(2*(P0-Y)*(P-P0) + (P-P0)**2)` with extended-precision
+products and accumulation where the platform supports them. This evaluates
+the MSE change from the reference without subtracting complete losses that
+may share a large response-only term. It is not used to rank current fits.
+Validation predictions use ambient factors in the same multiplication order
+as public `predict` and the saved-factor summary checks:
+`((X_validation @ left_factors) * singular_values) @ right_factors.T`.
+Validation designs are not projected into source coordinates for caching.
+
+`best_selection_score_`, history
+`selection_score`, and checkpoint `best_selection_score` store the relative
+value. `best_score_`/`best_validation_loss_` and history `loss` still report
+absolute MSE. `validation_reference_prediction_` on the tuner or standalone
+estimator and diagnostic `selection_reference` preserve the common reference
+and its origin. Relative values from separate fits are not comparable unless
+their references match.
+
+The estimator and tuner expose `selection_rule_="pairwise-validation-loss-v1"`.
+Saved histories include this `selection_rule` and a `selection_comparison`
+containing `incumbent_iteration` and `loss_difference`; the first comparison
+has null values. Candidate records use `incumbent_candidate_id` and include
+both global `selection_comparison` and `budget_selection_comparison`. Replaying
+these ordered decisions reconstructs the winners without ranking rounded
+reporting scores. Budget artifacts additionally save factors at every evaluated
+checkpoint, enabling independent validation of the differences themselves.
+Historical records without the marker retain their recorded rule: relative
+score with absolute-MSE tie-breaking when the relative field exists, otherwise
+absolute MSE. Comparisons cannot mix these legacy rules with the current marker.
 
 ### Stable objective differences in both solvers
 
@@ -285,8 +336,17 @@ selected step. The terminal `precision_limited` flag is true for numerical
 stagnation or a precision-limited terminal mapping; optimization convergence
 still requires stationarity termination. A precision-limited diagnostic does not certify
 stationarity or automatically make a failed partial fit eligible. A collapsed
-trial with an unresolved constrained residual still produces a numerical
-failure status, allowing the tuner to retain an earlier successful budget.
+trial with an unresolved constrained residual produces numerical stagnation,
+except for a narrow fixed-budget case in the anchor solver: with
+`stationarity_tol=None`, both the fixed-reference diagnostic trial and the
+line-search trial must use closed-form block proximal maps and return the
+current feasible state exactly. This recognizes fixed points with a nonzero
+smooth gradient balanced by an L1 penalty or active constraint. An unresolved
+Dykstra iterate cannot supply this certificate. The accepted update is a no-op;
+the mapping uncertainty remains in diagnostics, and these updates do not establish
+stationarity. Any explicit stopping tolerance retains the full residual check;
+an unresolved arithmetic floor can still cause numerical stagnation. Failed
+fits remain ineligible, allowing the tuner to retain an earlier successful budget.
 Neither this diagnostic nor budget-checkpoint selection establishes global
 optimality or the manuscript's statistical assumptions.
 
@@ -302,9 +362,9 @@ The default independent-budget mode is unchanged.
 The capture schedule is the union of iteration zero, multiples of
 `checkpoint_interval` (250 by default in continuous mode), all requested
 comparison budgets, and the maximum budget. Validation is evaluated only at
-those scheduled points, plus an earlier stationary terminal iterate. Equal
-scores retain the earlier evaluated state. Validation never modifies a
-gradient or an acceptance condition. The initializer participates in validation
+those scheduled points, plus an earlier stationary terminal iterate. A computed
+pairwise loss difference of zero retains the earlier evaluated state.
+Validation never modifies a gradient or an acceptance condition. The initializer participates in validation
 selection once a positive prefix completes, but cannot by itself rescue a
 trajectory that fails before its first positive checkpoint. A stationary
 initializer is a successful terminal fit and does cover later caps.
@@ -316,9 +376,10 @@ are independent of the ongoing or failed parent estimator's mutable arrays.
 Nonfinite objective/gradient callback records do not become successful
 checkpoints. Capturing state is not a disk-resume protocol.
 
-Continuous tuning compares stored validation minima and lightweight prefix
-metadata first, then constructs models only for retained budget winners. The
-global winner reuses its budget's fitted view. Checkpoint copies omit derived
+Continuous tuning reconstructs canonical validation predictions from compact
+checkpoint states and compares them pairwise, then constructs models only for
+retained budget winners. The global winner reuses its budget's fitted view.
+Checkpoint copies omit derived
 dense coefficient/factor arrays before reconstructing them for the requested
 prefix; mutable public outputs remain independent of the parent and other views.
 
@@ -328,22 +389,31 @@ stop may cover all later caps. `success` means a usable completed prefix;
 `budget_reached` means the requested cap is covered. Later numerical failure
 does not erase an earlier dense checkpoint, and retained fallbacks do not
 establish cap coverage. Candidate records stay in budget-major order, with
-strict validation improvement replacing the winner; ties retain earlier caps
-and then grid order. Per-trajectory timing is reported once rather than charged
-again to every prefix.
+a negative pairwise validation loss difference replacing the winner; a computed
+zero retains earlier caps and then grid order. Per-trajectory timing is
+reported once rather than charged again to every prefix.
 
 The simulation study compares cumulative validation minima at 500, 1,000,
 2,000, 4,000, and 8,000 updates. It saves compact ambient singular factors for
 checkpoint endpoint and selected states. Training/validation fingerprints and
 the saved factors allow independent reconstruction of prediction and coefficient
-errors. Coefficient truth enters only this post-fit evaluation and never the
+errors. Current artifacts carry `selection_rule="pairwise-validation-loss-v1"`;
+the summary independently rescores the factors, checks comparison signs and
+values, and replays the iterate and candidate incumbent chains. Saved
+`validation_comparisons` also record direct differences between selected cap
+predictions. Coefficient truth enters only this post-fit evaluation and never the
 tuner or the material-gain rule.
 
 Statistical stabilization and optimization convergence are separate outputs.
 Material validation gain is configurable; the study's default is an absolute
 gain exceeding `max(1e-4, 1e-3 * baseline_validation_MSE)`. This is a practical
-comparison threshold, not a hypothesis test or a theorem. Missing cells,
-unattained caps, and failed extensions cannot count as evidence of a plateau.
+comparison threshold, not a hypothesis test or a theorem. Current artifacts
+compute gains directly between the selected predictions at two caps, using the
+same stable pairwise identity. Absolute MSE supplies the baseline in the
+threshold; relative reference scores remain reporting quantities. Historical
+artifacts remain readable under their original relative-score/absolute-MSE or
+absolute-MSE rule. Missing cells, unattained caps, and failed extensions cannot
+count as evidence of a plateau.
 The strict numerical residual retains its original tolerance, and a
 validation-stable result can still be unconverged or precision-limited.
 

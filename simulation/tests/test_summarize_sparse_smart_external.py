@@ -1,6 +1,7 @@
 """External-sample result auditing and historical-comparison accounting."""
 from copy import deepcopy
 from dataclasses import asdict, fields
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -10,6 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import summarize_sparse_smart_external as summary
+import summarize_sparse_smart_external_grid as grid_summary
 from run_sparse_smart import _digest_json, _json_value
 from run_sparse_smart_tuned import RunnerConfig as PreviousConfig
 import test_summarize_sparse_smart_tuned as previous_fixture
@@ -173,14 +175,62 @@ def test_report_and_plot_label_different_data_budgets_and_distinct_convergence(t
     assert (destination/"comparison.png").stat().st_size > 10000
 
 
-def test_paper_pdf_hashes_are_checked_against_existing_provenance(tmp_path):
-    reference=tmp_path/"v1_simulation_curves.csv"
-    reference.write_bytes(summary.DEFAULT_REFERENCE.read_bytes())
-    provenance=json.loads(summary.DEFAULT_REFERENCE.with_name("provenance.json").read_text())
-    provenance["sources"][0]["sha256"]="0"*64
-    reference.with_name("provenance.json").write_text(json.dumps(provenance))
+def copied_paper_reference(root):
+    root.mkdir(parents=True,exist_ok=True)
+    reference=root/summary.DEFAULT_REFERENCE.name
+    for source in (summary.DEFAULT_REFERENCE,summary.DEFAULT_REFERENCE.with_name("provenance.json")):
+        (root/source.name).write_bytes(source.read_bytes())
+    return reference
+
+
+def test_paper_pdf_hashes_are_checked_when_a_source_pdf_is_present(tmp_path,monkeypatch):
+    reference=copied_paper_reference(tmp_path/"reference")
+    manuscript=tmp_path/"manuscript"
+    monkeypatch.setattr(summary,"REPO_ROOT",manuscript)
+    provenance=json.loads(reference.with_name("provenance.json").read_text())
+    pdf=manuscript/provenance["sources"][0]["pdf"]
+    pdf.parent.mkdir(parents=True,exist_ok=True)
+    pdf.write_bytes(b"This present PDF does not match the reference source.")
     with pytest.raises(ValueError,match="Paper PDF hash differs"):
         summary.summarize(tmp_path/"external",reference,previous_root=tmp_path/"previous")
+
+
+@pytest.mark.parametrize("consumer",["external","grid"])
+def test_offline_paper_bundle_supports_both_summary_consumers(tmp_path,monkeypatch,consumer):
+    reference=copied_paper_reference(tmp_path/"reference")
+    manuscript=tmp_path/"manuscript"
+    manuscript.mkdir()
+    monkeypatch.setattr(summary,"REPO_ROOT",manuscript)
+    if consumer == "external":
+        write(tmp_path,*record())
+        rows,paper,audit=summarize(tmp_path,reference_path=reference,seed_ids=(0,))
+        assert rows[1]["complete"] == 1
+    else:
+        rows,paper,audit=grid_summary.summarize(tmp_path/"no-runs",reference,
+                                               model_ids=(0,),experiments=(3,),seed_ids=(0,))
+        assert all(row["missing"] == 1 for row in rows)
+    assert len(rows) == 6 and len(paper) == 36
+    assert audit["paper_pdf_hashes_verified"] == []
+    verification=audit["paper_reference_verification"]
+    assert verification["csv_hash_verified"] is True
+    assert verification["csv_sha256"] == hashlib.sha256(reference.read_bytes()).hexdigest()
+    assert verification["provenance_sha256"] == hashlib.sha256(reference.with_name("provenance.json").read_bytes()).hexdigest()
+    assert verification["row_count"] == 432
+    assert len(verification["source_pdfs"]) == 3
+    assert {source["verification"] for source in verification["source_pdfs"]} == {"unavailable"}
+
+
+@pytest.mark.parametrize("consumer",["external","grid"])
+def test_offline_bundle_csv_corruption_is_rejected(tmp_path,monkeypatch,consumer):
+    reference=copied_paper_reference(tmp_path/"reference")
+    monkeypatch.setattr(summary,"REPO_ROOT",tmp_path/"no-pdfs")
+    # Appending whitespace keeps CSV parsing valid but changes its exact bytes.
+    reference.write_bytes(reference.read_bytes()+b"\n")
+    with pytest.raises(ValueError,match="CSV"):
+        if consumer == "external":
+            summarize(tmp_path,reference_path=reference,seed_ids=(0,))
+        else:
+            grid_summary.summarize(tmp_path/"no-runs",reference,model_ids=(0,),experiments=(3,),seed_ids=(0,))
 
 
 def _rehash_identity(value):

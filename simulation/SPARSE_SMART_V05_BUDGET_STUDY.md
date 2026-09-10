@@ -1,5 +1,13 @@
 # SparseSMART v0.5: continuous iteration-budget study
 
+This guide describes the current source workflow. The
+[historical results section](#historical-implementation-checks-and-targeted-results)
+preserves the original v0.5 verification snapshot, recorded in repository
+commit `d4b6e7b` on **2026-09-09**. The saved
+[v0.5.0 wheel](../sparse-smart/dist/sparse_smart-0.5.0-py3-none-any.whl) is archival;
+it does not contain the later audit fixes. Use the editable source installation
+in the [environment guide](../environment/README.md) for current runs.
+
 The budget study uses one continuous solver trajectory per parameter setting.
 It captures checkpoints every 250 updates and compares maximum budgets 500,
 1,000, 2,000, 4,000, and 8,000. The existing independent-budget runners retain
@@ -14,10 +22,30 @@ rows and 100 independent validation rows are used; the training size is 200,
 300, or 500 according to the paper-grid setting. No competing method is fitted.
 
 At every checkpoint, the artifact records endpoint and best-so-far validation
-MSE, diagnostic coefficient RMSE, objective, movement, and stationarity
-components. Compact ambient factors make both selected and endpoint scores
+MSE and relative `selection_score`, diagnostic coefficient RMSE, objective,
+movement, and stationarity components. Compact ambient factors make both selected and endpoint scores
 independently reproducible. Coefficient truth is read for reporting after
 selection; it is never supplied to the tuner.
+
+Selection compares each prediction `P` directly with the incumbent using
+`mean((P-P_incumbent)*((P-Y)+(P_incumbent-Y)))`, with extended-precision
+products and accumulation where available. A negative difference replaces the
+incumbent; an exactly zero computed difference retains the earlier iterate,
+grid candidate, or budget. Absolute MSE and relative `selection_score` are
+reporting quantities and do not break pairwise ties. The relative score is
+`mean(2*(P0-Y)*(P-P0) + (P-P0)**2)`, using one fixed initializer prediction
+`P0` per cell; scores from different cells need not share a reference.
+
+Current records carry `selection_rule="pairwise-validation-loss-v1"`,
+`selection_comparison` incumbent records, per-budget candidate comparisons,
+and `validation_comparisons` between selected cap predictions. The summary
+regenerates validation observations, reconstructs the canonical predictions
+from saved factors, verifies the reported absolute and relative scores using
+`validation_reference_prediction`, and checks/replays the pairwise decisions.
+Historical artifacts without the marker remain readable under their original
+rule: relative score with absolute-MSE tie-breaking when `selection_score`
+exists, otherwise absolute MSE. They are not silently converted to the current
+selection rule or pooled with it.
 
 ## Eligibility, coverage, and stabilization
 
@@ -30,6 +58,10 @@ cannot replace it. A stationary early endpoint does cover later caps.
 The summary compares cumulative eligible validation minima, especially 2k–4k,
 4k–8k, and 2k–8k. By default, a material gain must exceed
 `max(0.0001, 0.001 * baseline_validation_MSE)`; both thresholds are configurable.
+Current gains use the direct pairwise loss difference between the selected
+predictions at the two caps, independently checked against saved factors.
+Historical records retain their original score-difference calculation. The
+threshold's baseline remains absolute MSE.
 This is a practical comparison threshold, not a significance test. Missing
 cells and incomplete candidate extensions cannot establish a validation
 plateau. Selection near the cap is reported separately.
@@ -43,8 +75,10 @@ automatically imply numerical convergence.
 
 ## Commands
 
-From `code/simulation`, use the v0.5 source package and the shared pinned
-environment created by the [environment guide](../environment/README.md):
+From `code/simulation`, use the current source package and the shared pinned
+environment created by the [environment guide](../environment/README.md).
+The examples use output roots separate from the historical runs linked below;
+choose another fresh root whenever the source or configuration changes:
 
 ```sh
 export PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
@@ -59,7 +93,7 @@ Inspect the complete five-seed study without fitting:
 ```sh
 ../.venv/bin/python \
   run_sparse_smart_budget_study.py --seed-count 5 --workers 3 \
-  --output-root result/sparse_smart_v05_budget_study --dry-run
+  --output-root result/sparse_smart_budget_study_current --dry-run
 ```
 
 Remove `--dry-run` to execute those 45 cells. The full five-seed study was not
@@ -70,16 +104,31 @@ Summarize the completed study with independent factor/data checks:
 ```sh
 ../.venv/bin/python \
   summarize_sparse_smart_budget_study.py \
-  --result-root result/sparse_smart_v05_budget_study \
-  --output-root result/sparse_smart_v05_budget_study/summary \
+  --result-root result/sparse_smart_budget_study_current \
+  --output-root result/sparse_smart_budget_study_current/summary \
   --absolute-threshold 0.0001 --relative-threshold 0.001
 ```
 
 Each cell is saved atomically after its trajectories finish. Rerunning an
 identical study verifies configuration, code, and regenerated data fingerprints
 before skipping existing cells. The runner rejects unrelated result roots and
-incompatible study manifests. Checkpoint capture preserves the continuous
-in-memory trajectory; it is not a process-restart/resume protocol for a cell
+incompatible study manifests. Current implementation fingerprints use
+`sparse-smart-source-content-v1`: logical file names and content hashes form
+`implementation_manifest`, while absolute source locations are separate
+provenance. Identical source copies in different worker directories therefore
+have the same implementation digest. The saved configuration/identity payload
+is checked against its stored digest before reuse. Legacy records with no
+supported implementation scheme cannot be resumed; use a fresh output root
+to recompute them. They remain readable by historical summaries.
+
+Progress is written to a unique file in `budget_study_manifest_attempts/`.
+`budget_study_manifest.json` is published only when all requested tasks return
+without task exceptions; recorded numerical failures or inapplicable settings
+do not by themselves make the batch incomplete. Failed or interrupted attempts
+retain their progress/errors without overwriting a prior completed manifest.
+Resume and manifest-scope summaries prefer the canonical manifest, or the
+latest attempt when no canonical manifest exists. Checkpoint capture preserves
+the continuous in-memory trajectory; it is not a process-restart/resume protocol for a cell
 whose process was interrupted.
 
 For a single Model III source-rank case:
@@ -88,7 +137,7 @@ For a single Model III source-rank case:
 ../.venv/bin/python \
   run_sparse_smart_budget_study.py --models 2 --experiments 2 \
   --setting-index 3 --seed-ids 3 --workers 1 \
-  --output-root result/sparse_smart_v05_budget_smoke/model3_rs7
+  --output-root result/sparse_smart_budget_smoke_current/model3_rs7
 ```
 
 For Model I with source noise 0.5:
@@ -97,7 +146,7 @@ For Model I with source noise 0.5:
 ../.venv/bin/python \
   run_sparse_smart_budget_study.py --models 0 --experiments 3 \
   --setting-index 5 --seed-ids 0 --workers 1 \
-  --output-root result/sparse_smart_v05_budget_smoke/model1_noise05
+  --output-root result/sparse_smart_budget_smoke_current/model1_noise05
 ```
 
 These cases validate the workflow; they cannot settle the budget for the full
@@ -109,12 +158,27 @@ audits every cell declared in that study's manifest, including missing cells:
 ```sh
 ../.venv/bin/python \
   summarize_sparse_smart_budget_study.py \
-  --result-root result/sparse_smart_v05_budget_smoke/model3_rs7 \
-  --output-root result/sparse_smart_v05_budget_smoke/model3_rs7/summary \
+  --result-root result/sparse_smart_budget_smoke_current/model3_rs7 \
+  --output-root result/sparse_smart_budget_smoke_current/model3_rs7/summary \
   --manifest-scope
 ```
 
-## Implementation checks and targeted results
+The same flag supports `--profile full` studies, including structurally
+inapplicable target/source-rank combinations. Their records still undergo
+identity, configuration, and regenerated-data fingerprint checks. They count
+toward the declared scope and the audit's `expected_inapplicable_cells`,
+`recorded_inapplicable_cells`, and `missing_inapplicable_cells`, but are excluded
+from validation-gain denominators. A recorded inapplicable cell is neither a
+missing record nor an unresolved optimization cap. A missing inapplicable
+record is reported explicitly. An entirely inapplicable scope has no budget
+gain comparisons and requires no fits.
+
+## Historical implementation checks and targeted results
+
+The counts and results below describe the original v0.5 implementation checks,
+as recorded in the **2026-09-09** repository snapshot (`d4b6e7b`).
+They are retained as historical evidence and do not report the later audit
+fixes or establish the current source's numerical trajectories.
 
 The package suite passed 322 tests from source and from an isolated wheel
 installation. The SparseSMART simulation suites passed 314 tests, including
@@ -148,4 +212,8 @@ These are two individual-seed checks, not the full 45-cell study. They validate
 the study infrastructure and checkpoint retention but do not settle a common
 iteration budget or establish readiness for 100 seeds.
 
-The installable package is [the v0.5.0 wheel](../sparse-smart/dist/sparse_smart-0.5.0-py3-none-any.whl).
+The saved [v0.5.0 wheel](../sparse-smart/dist/sparse_smart-0.5.0-py3-none-any.whl)
+is archival. Use the current source and pinned environment above to run the
+repaired implementation; the archived wheel does not contain subsequent audit
+fixes, and the historical counts above do not certify current source or a
+newly rebuilt wheel.

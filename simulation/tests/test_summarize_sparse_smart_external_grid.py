@@ -4,6 +4,7 @@ from dataclasses import asdict
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -37,17 +38,18 @@ def record(model=0,experiment=0,index=0,seed=0,*,error=.1,status="complete",conf
         configuration=resolved,generator_arguments=arguments)
     split=dict(mode="independent_external_validation",n_train=setting.n,n_validation=100,
         train_indices=None,validation_indices=None,all_training_rows_used=True,refit_on_all_data=False)
+    coefficient=actual["_truth"]+error
+    score=float(np.mean((actual["_Y_validation"]-actual["_X_validation"]@coefficient)**2))
     candidates=[]
     for i,pu in enumerate(config.penalties_u):
-        losses=[2.+i]*(config.iterations+1);losses[selected]=.5+i
+        losses=[score+1.5+i]*(config.iterations+1);losses[selected]=score+i
         candidates.append(dict(candidate_id=i,params=dict(init_penalty=.03,penalty_u=pu,penalty_v=.01,
             support_limits=resolved["support_limits"][0],step_size_inverse=20.),success=True,status="completed",
-            message="completed",validation_mse=.5+i,partial_validation_mse=None,has_partial_coefficient=False,
+            message="completed",validation_mse=score+i,partial_validation_mse=None,has_partial_coefficient=False,
             selected_iteration=selected,n_iter=config.iterations,termination_reason="max_iterations",
             validation_history=[dict(iteration=j,loss=v) for j,v in enumerate(losses)],elapsed_time_sec=.01))
-    coefficient=actual["_truth"]+error
     value=dict(identity,configuration_fingerprint=_digest_json(identity),implementation_fingerprint="a"*64,
-        **{k:v for k,v in actual.items() if k!="_truth"},input_fingerprint=_digest_json(dict(
+        **{k:v for k,v in actual.items() if not k.startswith("_")},input_fingerprint=_digest_json(dict(
             training_observed=actual["training_observed_input_fingerprint"],
             validation_observed=actual["validation_observed_input_fingerprint"],
             evaluation_truth=actual["evaluation_truth_fingerprint"])),
@@ -57,7 +59,7 @@ def record(model=0,experiment=0,index=0,seed=0,*,error=.1,status="complete",conf
         source_check_mode="empirical",theorem_certified=False,avg_err=float(np.linalg.norm(coefficient-actual["_truth"])/np.sqrt(setting.p*setting.q)),
         initial_avg_err=.4,C_hat=coefficient.tolist(),selection_history=candidates,fit_errors=[],
         best_params=deepcopy(candidates[0]["params"]),selected_iteration=selected,n_iter=config.iterations,
-        validation_loss=.5,validation_history=deepcopy(candidates[0]["validation_history"]),
+        validation_loss=score,validation_history=deepcopy(candidates[0]["validation_history"]),
         history=[dict(iteration=j,support_u=1,support_v=1) for j in range(config.iterations+1)],
         selected_supports=dict(u=[0],v=[0]),termination_reason="max_iterations",
         diagnostics=dict(optimization_converged=False,selected_converged=False),
@@ -241,3 +243,112 @@ def test_removing_a_new_key_without_matching_historical_identity_hash_is_rejecte
     write(tmp_path,value)
     with pytest.raises(ValueError,match="Configuration fingerprint"):
         summarize(tmp_path,model_ids=(0,),experiments=(0,),seed_ids=(0,))
+
+
+def test_coefficient_substitution_with_same_truth_error_is_rejected(tmp_path):
+    value = record()
+    setting = summary.experiment_settings(0, 0)[0]
+    actual = summary._data_audit(setting, SEEDS[0], summary._config(value["configuration"]["runner"]), {}, data)
+    coefficient = np.asarray(value["C_hat"])
+    # Reflection preserves the saved Frobenius error but changes predictions.
+    value["C_hat"] = (2 * actual["_truth"] - coefficient).tolist()
+    write(tmp_path, value)
+    with pytest.raises(ValueError, match="Selected validation MSE disagrees"):
+        summarize(tmp_path, model_ids=(0,), experiments=(0,), seed_ids=(0,))
+
+
+def test_scalar_coefficient_one_to_three_cannot_keep_old_validation_score():
+    setting = SimpleNamespace(p=1, q=1, target_rank=1)
+    actual = dict(_X_validation=np.ones((2, 1)), _Y_validation=np.ones((2, 1)),
+                  _truth=np.array([[2.]]))
+    value = dict(C_hat=[[1.]], avg_err=1., validation_loss=0.)
+    summary._audit_selected_predictions(value, setting, actual)
+    value["C_hat"] = [[3.]]
+    assert np.linalg.norm(np.asarray(value["C_hat"]) - actual["_truth"]) == value["avg_err"]
+    with pytest.raises(ValueError, match="Selected validation MSE disagrees"):
+        summary._audit_selected_predictions(value, setting, actual)
+
+
+def test_consistent_but_forged_relative_scores_are_independently_rejected(tmp_path):
+    value = record()
+    setting = summary.experiment_settings(0, 0)[0]
+    actual = summary._data_audit(setting, SEEDS[0], summary._config(value["configuration"]["runner"]), {}, data)
+    prediction = actual["_X_validation"] @ np.asarray(value["C_hat"])
+    reference = np.zeros_like(prediction)
+    score = summary.prediction_selection_score(prediction, actual["_Y_validation"], reference)
+    value["selection_score"] = score
+    value["validation_reference_prediction"] = reference.tolist()
+    for candidate in value["selection_history"]:
+        candidate["selection_score"] = score + candidate["candidate_id"]
+        for row in candidate["validation_history"]:
+            row["selection_score"] = candidate["selection_score"] + row["loss"] - candidate["validation_mse"]
+    value["validation_history"] = deepcopy(value["selection_history"][0]["validation_history"])
+    write(tmp_path, value)
+    summarize(tmp_path, model_ids=(0,), experiments=(0,), seed_ids=(0,))
+
+    value["selection_score"] += .25
+    for candidate in value["selection_history"]:
+        candidate["selection_score"] += .25
+        for row in candidate["validation_history"]:
+            row["selection_score"] += .25
+    value["validation_history"] = deepcopy(value["selection_history"][0]["validation_history"])
+    write(tmp_path, value)
+    with pytest.raises(ValueError, match="Selected validation selection score disagrees"):
+        summarize(tmp_path, model_ids=(0,), experiments=(0,), seed_ids=(0,))
+
+
+def factor_prediction_fixture():
+    rng = np.random.default_rng(107)
+    setting = SimpleNamespace(p=9, q=7, target_rank=3)
+    X = rng.normal(size=(12, setting.p))
+    Y = 1e12 * rng.normal(size=(12, setting.q))
+    left = np.linalg.qr(rng.normal(size=(setting.p, setting.target_rank)))[0]
+    right = np.linalg.qr(rng.normal(size=(setting.q, setting.target_rank)))[0]
+    d = np.array([3., 2., 1.])
+    coefficient = (left * d) @ right.T
+    prediction = ((X @ left) * d) @ right.T
+    value = dict(C_hat=coefficient.tolist(), validation_loss=float(np.mean((Y-prediction)**2)),
+                 selection_score=0., validation_reference_prediction=prediction.tolist(),
+                 selected_factors=dict(left=left.tolist(), singular_values=d.tolist(), right=right.tolist()))
+    return value, setting, dict(_X_validation=X, _Y_validation=Y)
+
+
+def test_canonical_factor_prediction_and_legacy_reassociation_are_auditable():
+    value, setting, actual = factor_prediction_fixture()
+    dense_prediction = actual["_X_validation"] @ np.asarray(value["C_hat"])
+    # A harmless grouping change is visible in relative scores under a large
+    # response; new artifacts preserve the canonical factors to avoid it.
+    dense_score = summary.prediction_selection_score(dense_prediction, actual["_Y_validation"],
+                                                     value["validation_reference_prediction"])
+    assert abs(dense_score) > 1e-8
+    value["selection_rule"] = "pairwise-validation-loss-v1"
+    summary._audit_selected_predictions(value, setting, actual)
+    del value["selection_rule"]
+    del value["selected_factors"]
+    summary._audit_selected_predictions(value, setting, actual)
+
+
+@pytest.mark.parametrize("mutate,match", [
+    (lambda r: r.update(selection_rule="pairwise-validation-loss-v1", selected_factors=None), "missing selected"),
+    (lambda r: r["selected_factors"].update(left=[[1.]]), "factor dimensions"),
+    (lambda r: r["selected_factors"]["singular_values"].__setitem__(0, -1.), "factor dimensions"),
+    (lambda r: r["selected_factors"]["singular_values"].__setitem__(0, float("nan")), "factor dimensions"),
+    (lambda r: r["selected_factors"]["right"][0].__setitem__(0, 2.), "not orthonormal"),
+    (lambda r: r["C_hat"][0].__setitem__(0, 100.), "disagree with saved coefficient"),
+])
+def test_selected_factor_provenance_is_checked(mutate, match):
+    value, setting, actual = factor_prediction_fixture()
+    mutate(value)
+    with pytest.raises(ValueError, match=match):
+        summary._audit_selected_predictions(value, setting, actual)
+
+
+def test_zero_design_huge_response_cannot_hide_forged_relative_score():
+    setting = SimpleNamespace(p=1, q=1, target_rank=1)
+    actual = dict(_X_validation=np.array([[1.], [0.]]), _Y_validation=np.array([[2.], [1e12]]))
+    value = dict(C_hat=[[1.]], validation_loss=5e23, selection_score=-1.5,
+                 validation_reference_prediction=[[0.], [0.]])
+    summary._audit_selected_predictions(value, setting, actual)
+    value["selection_score"] = -.5
+    with pytest.raises(ValueError, match="selection score disagrees"):
+        summary._audit_selected_predictions(value, setting, actual)

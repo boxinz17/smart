@@ -3686,5 +3686,9 @@
         }
       ]
     }
-  ]
+  ],
+  "csv": {
+    "file": "v1_simulation_curves.csv",
+    "sha256": "508d55c17bb0fb28c73e8520fdd627da0c281e801fef90eb16b786371fb6dbdd"
+  }
 }

@@ -46,8 +46,9 @@ def test_preparation_is_shared_and_matches_uncached_candidates(monkeypatch, mode
     cached = tuner(mode).fit(X, Y, source=source, validation_data=(Xv, Yv))
     assert cached.success_
     assert counts == {'prepare_source': 1, 'reduced_lasso': 2, 'select_anchor': 4}
-    for name in ('leading_data', 'training_data', 'validation_data'):
+    for name in ('leading_data', 'training_data'):
         assert computed.count(name) == 1
+    assert 'validation_data' not in computed  # Validation uses the public factor association.
     assert cached.n_candidates_ == 32
 
     monkeypatch.setattr(estimator._FitPreparationCache, 'get', lambda self, key, compute: compute())

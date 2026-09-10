@@ -18,8 +18,8 @@ import time
 import numpy as np
 
 from run_restricted_rrr import SimulationSetting
-from run_sparse_smart import _atomic_json_dump
 from run_sparse_smart_external import RunnerConfig, run_setting
+from batch_manifest import BatchManifest
 
 HERE = Path(__file__).resolve().parent
 
@@ -102,24 +102,24 @@ def main(argv=None):
     if args.dry_run:
         return 0
     path = output / "repair_manifest.json"
-    _atomic_json_dump(manifest, path)
     started = time.perf_counter()
-    with ProcessPoolExecutor(max_workers=args.workers,
-                             mp_context=multiprocessing.get_context("spawn")) as pool:
-        futures = {pool.submit(fit_record, task): task[0] for task in tasks}
-        for future in as_completed(futures):
-            try:
-                cell = future.result()
-                manifest["cells"].append(cell)
-                print(json.dumps(dict(done=len(manifest["cells"]), total=len(tasks), **cell)), flush=True)
-            except Exception as error:
-                failure = dict(path=str(futures[future]), exception=type(error).__name__, message=str(error))
-                manifest["errors"].append(failure)
-                print(json.dumps(failure), flush=True)
-            manifest["status_counts"] = dict(Counter(v["status"] for v in manifest["cells"]))
-            _atomic_json_dump(manifest, path)
-    manifest.update(finished=datetime.now(timezone.utc).isoformat(), wall_seconds=time.perf_counter()-started)
-    _atomic_json_dump(manifest, path)
+    with BatchManifest(path, manifest) as attempt:
+        with ProcessPoolExecutor(max_workers=args.workers,
+                                 mp_context=multiprocessing.get_context("spawn")) as pool:
+            futures = {pool.submit(fit_record, task): task[0] for task in tasks}
+            for future in as_completed(futures):
+                try:
+                    cell = future.result()
+                    manifest["cells"].append(cell)
+                    print(json.dumps(dict(done=len(manifest["cells"]), total=len(tasks), **cell)), flush=True)
+                except Exception as error:
+                    failure = dict(path=str(futures[future]), exception=type(error).__name__, message=str(error))
+                    manifest["errors"].append(failure)
+                    print(json.dumps(failure), flush=True)
+                manifest["status_counts"] = dict(Counter(v["status"] for v in manifest["cells"]))
+                attempt.update()
+        manifest.update(finished=datetime.now(timezone.utc).isoformat(), wall_seconds=time.perf_counter()-started)
+        attempt.finish(not manifest["errors"] and len(manifest["cells"]) == len(tasks))
     print(json.dumps({k:manifest[k] for k in ("status_counts", "errors", "wall_seconds")}), flush=True)
     return int(bool(manifest["errors"]) or len(manifest["cells"]) != len(tasks))
 

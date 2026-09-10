@@ -22,11 +22,17 @@ import time
 
 import numpy as np
 
+from sparse_smart_selection import (selection_payload, validation_winner, validate_selected_score,
+                                    pairwise_selection, PAIRWISE_RULE, pairwise_loss_difference)
+
 import external_validation_data
 import run_sparse_smart_external as external_runner
+from batch_manifest import BatchManifest, manifest_for_resume
 from run_restricted_rrr import (DEFAULT_SEED_FILE, MODEL_NAMES, EXPERIMENT_NAMES,
     SimulationSetting, experiment_settings, load_experiment_seeds)
 from run_sparse_smart import MARGINS, _atomic_json_dump, _coefficient_error, _digest_json, _json_value
+from sparse_smart_provenance import (implementation_provenance, validate_resume_identity,
+                                     validate_resume_implementation)
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_ROOT = HERE / 'result' / 'sparse_smart_budget_study'
@@ -109,11 +115,17 @@ def result_path(output_root, *, model, experiment, setting, seed_id):
     return Path(output_root)/model/experiment/f'BudgetStudy_result_{model}_{experiment}_{setting.suffix}_rd_seed_id={seed_id}.json'
 
 
+def _implementation_files():
+    return (*external_runner._implementation_files(), Path(__file__),
+            Path(__file__).with_name("batch_manifest.py"))
+
+
+def _implementation_provenance(api, generator):
+    return implementation_provenance(api, generator, _implementation_files())
+
+
 def _implementation_fingerprint(api, generator):
-    digest = hashlib.sha256(external_runner._implementation_fingerprint(api, generator).encode())
-    digest.update(str(Path(__file__).resolve()).encode())
-    digest.update(Path(__file__).read_bytes())
-    return digest.hexdigest()
+    return _implementation_provenance(api, generator)["implementation_fingerprint"]
 
 
 def _require(condition, message):
@@ -128,9 +140,15 @@ def _factor_state(model, state, iteration):
     return dict(iteration=int(iteration), left=left, singular_values=singular, right=right)
 
 
+def _factor_prediction(factors, design):
+    left, d, right = (np.asarray(factors[key]) for key in ("left", "singular_values", "right"))
+    return ((design @ left)*d) @ right.T
+
+
 def _factor_scores(factors, data):
     coefficient = (factors['left']*factors['singular_values']) @ factors['right'].T
-    validation = float(np.mean((data['Y_validation']-data['X_validation']@coefficient)**2))
+    prediction = _factor_prediction(factors, data['X_validation'])
+    validation = float(np.mean((data['Y_validation']-prediction)**2))
     _require(math.isfinite(validation), 'Nonfinite checkpoint validation score')
     return validation, _coefficient_error(coefficient, data['C_star'])
 
@@ -182,6 +200,12 @@ def _encode_trajectory(model, metadata, data):
             terminal_record=history[k], selected_record=history[selected],
             optimization_converged=snapshot.status == 'converged',
             selected_converged=snapshot.status == 'converged' and selected == k, endpoint_selected=selected == k))
+        validation_rows = {row["iteration"]:row for row in value["validation_history"]}
+        if validation_rows.get(selected, {}).get("selection_rule") == PAIRWISE_RULE:
+            value["checkpoints"][-1]["selection_rule"] = PAIRWISE_RULE
+        if "selection_score" in validation_rows.get(selected, {}):
+            value["checkpoints"][-1].update(selection_score=validation_rows[selected]["selection_score"],
+                terminal_selection_score=validation_rows[k]["selection_score"])
         previous_checkpoint = k
     # Keep diagnostic history once at declared checkpoints and the final endpoint.
     # A final failed partial endpoint is diagnostic-only, never in checkpoints.
@@ -190,7 +214,7 @@ def _encode_trajectory(model, metadata, data):
     return value
 
 
-def _cap_outcomes(candidates, trajectories, resolved, config):
+def _cap_outcomes(candidates, trajectories, resolved, config, data=None):
     count = resolved['trajectory_count']
     _require(len(candidates) == resolved['candidate_count'], 'Incomplete continuous budget search')
     lookup = {(t['grid_candidate_id'], c['checkpoint_iteration']):c
@@ -207,6 +231,7 @@ def _cap_outcomes(candidates, trajectories, resolved, config):
             k = candidate['trajectory_checkpoint_iteration']
             _require((grid_id, k) in lookup and k <= budget, 'Eligible candidate has no attained checkpoint')
             checkpoint = lookup[(grid_id, k)]
+            validate_selected_score(candidate, checkpoint)
             _require(k > 0 or checkpoint['optimization_converged'], 'Unconverged initializer is not a completed positive prefix')
             _require(not candidate['budget_reached'] or k == budget or checkpoint['optimization_converged'],
                      'Unattained comparison cap incorrectly reported complete')
@@ -215,12 +240,17 @@ def _cap_outcomes(candidates, trajectories, resolved, config):
         else:
             _require(candidate['validation_mse'] is None and not candidate['budget_reached'],
                      'Failed partial candidate cannot be eligible or resolve a cap')
+    pairwise = pairwise_selection(candidates)
+    def prediction(outcome):
+        trajectory = trajectories[outcome["winner_grid_candidate_id"]]
+        factors = trajectory["factor_states"][outcome["selected_factor_key"]]
+        return _factor_prediction(factors, data["X_validation"])
     outcomes = []
     for budget in config.iteration_budgets:
         rows = [c for c in candidates if c['iteration_budget'] == budget]
         unresolved = [c['grid_candidate_id'] for c in rows if not c['budget_reached']]
         eligible = [c for c in candidates if c['iteration_budget'] <= budget and c['success']]
-        winner = min(eligible, key=lambda c:c['validation_mse']) if eligible else None
+        winner = validation_winner(eligible) if eligible else None
         outcome = dict(iteration_budget=budget, coverage_complete=not unresolved,
             budget_reached_count=len(rows)-len(unresolved), unresolved_grid_candidate_ids=unresolved,
             status='unresolved' if unresolved else 'resolved', success=winner is not None,
@@ -238,6 +268,14 @@ def _cap_outcomes(candidates, trajectories, resolved, config):
                 terminal_validation_mse=checkpoint['terminal_validation_mse'],
                 terminal_coefficient_error=checkpoint['terminal_coefficient_error'], selected_factor_key=checkpoint['selected_factor_key'],
                 optimization_converged=checkpoint['optimization_converged'], selected_converged=checkpoint['selected_converged'])
+        if any("selection_score" in c for c in candidates):
+            outcome["selection_score"] = winner["selection_score"] if winner is not None else None
+        if pairwise:
+            _require(data is not None, "Pairwise cap comparisons require validation data")
+            outcome["selection_rule"] = PAIRWISE_RULE
+            outcome["validation_comparisons"] = {str(base["iteration_budget"]):
+                pairwise_loss_difference(prediction(outcome), data["Y_validation"], prediction(base))
+                if base["success"] and outcome["success"] else None for base in outcomes}
         outcomes.append(outcome)
     return outcomes
 
@@ -255,24 +293,25 @@ def run_setting(*, setting: SimulationSetting, model, experiment, seed_id, rando
     destination = Path(destination)
     existing = json.loads(destination.read_text()) if destination.exists() else None
     if existing is not None:
-        _require(existing.get('configuration_fingerprint') == fingerprint
-                 and all(existing.get(key) == value for key, value in identity.items()),
-                 f'Existing budget-study configuration differs: {destination}')
+        validate_resume_identity(existing, identity, destination, digest=_digest_json)
     generator = generate_data_fn or external_runner.old_runner._load_generator()
     data = external_validation_data.generate_external_validation(n_train=setting.n,p=setting.p,q=setting.q,
         sigma0=setting.sigma0,random_seed=int(random_seed),n_validation=config.n_validation,
         seed_tag=config.validation_seed_tag,generate_data_fn=generator)
     reason = setting.inapplicability_reason()
     api = sparse_api if sparse_api is not None else (external_runner.old_runner._load_sparse_api() if reason is None else None)
+    provenance = _implementation_provenance(api, generator)
     hashes = dict(training_observed_input_fingerprint=external_runner.old_runner._array_fingerprint(data, ('X','Y','C0')),
         validation_observed_input_fingerprint=external_runner.old_runner._array_fingerprint(data, ('X_validation','Y_validation')),
         evaluation_truth_fingerprint=external_runner.old_runner._array_fingerprint(data, ('C_star',)),
-        implementation_fingerprint=_implementation_fingerprint(api,generator))
+        implementation_fingerprint=provenance['implementation_fingerprint'])
     hashes['input_fingerprint'] = _digest_json(dict(training_observed=hashes['training_observed_input_fingerprint'],
         validation_observed=hashes['validation_observed_input_fingerprint'],evaluation_truth=hashes['evaluation_truth_fingerprint']))
     if existing is not None:
-        _require(all(existing.get(key) == value for key,value in hashes.items()),
+        _require(all(existing.get(key) == value for key,value in hashes.items()
+                     if key != 'implementation_fingerprint'),
                  f'Existing budget-study data, truth, or implementation differs: {destination}')
+        validate_resume_implementation(existing, provenance, destination)
         _require(existing.get('validation_seed_metadata') == _json_value(data['validation_seed_metadata']),
                  'Validation seed metadata differs')
         return 'skipped', existing
@@ -287,6 +326,7 @@ def run_setting(*, setting: SimulationSetting, model, experiment, seed_id, rando
         factor_encoding='ambient C_hat=(left*singular_values)@right.T; factor_states keyed by actual iteration',
         error_metric='norm(C_hat-C_star,fro)/sqrt(p*q)',
         evaluation_scope='targeted finite-budget study; truth errors are evaluation-only; not a paper aggregate')
+    value.update(provenance)
     if reason is None:
         if setting.sigma0 == 0:
             U, _, Vt = np.linalg.svd(data['C0'],full_matrices=False)
@@ -304,6 +344,7 @@ def run_setting(*, setting: SimulationSetting, model, experiment, seed_id, rando
         fit_started = time.perf_counter()
         tuner.fit(data['X'], data['Y'], source=source, validation_data=(data['X_validation'],data['Y_validation']))
         value['fit_time_sec'] = time.perf_counter()-fit_started
+        value.update(selection_payload(tuner, include_factors=False))
         # No coefficient truth reaches fitting or selection. All error evaluation
         # and factor-based independent score checks occur after tuner.fit returns.
         models, metadata = tuner.trajectory_models_, tuner.trajectory_history_
@@ -311,10 +352,11 @@ def run_setting(*, setting: SimulationSetting, model, experiment, seed_id, rando
         value['trajectories'] = [_encode_trajectory(fit,meta,data) for fit,meta in zip(models,metadata)]
         value['selection_history'] = [{key:item for key,item in row.items() if key != 'validation_history'}
                                        for row in _json_value(tuner.selection_history_)]
-        value['cap_outcomes'] = _cap_outcomes(value['selection_history'],value['trajectories'],resolved,config)
+        value['cap_outcomes'] = _cap_outcomes(value['selection_history'],value['trajectories'],resolved,config,data)
         final = value['cap_outcomes'][-1]
         _require(bool(tuner.success_) == final['success'], 'Tuner and cumulative-cap eligibility disagree')
         if final['success']:
+            validate_selected_score(value, final)
             _require(tuner.selected_candidate_id_ == final['winner_candidate_id']
                      and math.isclose(tuner.best_score_,final['validation_mse'],rel_tol=1e-10,abs_tol=1e-12),
                      'Tuner winner differs from cumulative checkpoint selection')
@@ -406,8 +448,9 @@ def main(argv=None):
         expected_cells=len(tasks),expected_applicable=sum(t[2].inapplicability_reason() is None for t in tasks),
         expected_inapplicable=sum(t[2].inapplicability_reason() is not None for t in tasks))
     manifest_path = output_root/'budget_study_manifest.json'
-    if manifest_path.exists():
-        previous = json.loads(manifest_path.read_text())
+    resume_manifest = manifest_for_resume(manifest_path)
+    if resume_manifest is not None:
+        previous = json.loads(resume_manifest.read_text())
         if any(previous.get(key) != value for key,value in identity.items()):
             parser.error('Existing study manifest has different configuration or requested cells; use a fresh output root')
     elif output_root.exists() and any(output_root.iterdir()):
@@ -417,7 +460,6 @@ def main(argv=None):
     print(json.dumps({k:v for k,v in manifest.items() if k not in ('cells','errors')}),flush=True)
     if args.dry_run:
         return 0
-    _atomic_json_dump(manifest,manifest_path)
     started = time.perf_counter()
     def collect(task, future=None):
         try:
@@ -430,17 +472,18 @@ def main(argv=None):
             manifest['errors'].append(failure)
             print(json.dumps(failure),flush=True)
         manifest['status_counts'] = dict(Counter(c['status'] for c in manifest['cells']))
-        _atomic_json_dump(manifest,manifest_path)
-    if args.workers == 1:
-        for task in tasks:
-            collect(task)
-    else:
-        with ProcessPoolExecutor(max_workers=args.workers,mp_context=multiprocessing.get_context('spawn')) as pool:
-            futures = {pool.submit(fit_cell,task):task for task in tasks}
-            for future in as_completed(futures):
-                collect(futures[future],future)
-    manifest.update(finished=datetime.now(timezone.utc).isoformat(),wall_seconds=time.perf_counter()-started)
-    _atomic_json_dump(manifest,manifest_path)
+        attempt.update()
+    with BatchManifest(manifest_path, manifest) as attempt:
+        if args.workers == 1:
+            for task in tasks:
+                collect(task)
+        else:
+            with ProcessPoolExecutor(max_workers=args.workers,mp_context=multiprocessing.get_context('spawn')) as pool:
+                futures = {pool.submit(fit_cell,task):task for task in tasks}
+                for future in as_completed(futures):
+                    collect(futures[future],future)
+        manifest.update(finished=datetime.now(timezone.utc).isoformat(),wall_seconds=time.perf_counter()-started)
+        attempt.finish(not manifest['errors'] and len(manifest['cells']) == len(tasks))
     return int(bool(manifest['errors']) or len(manifest['cells']) != len(tasks))
 
 

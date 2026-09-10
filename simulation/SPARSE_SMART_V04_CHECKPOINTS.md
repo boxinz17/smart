@@ -1,7 +1,17 @@
 # SparseSMART v0.4.0: checkpoint and solver regression
 
-The three requested changes are implemented in the package and simulation
-runners. Historical v0.3 pilot artifacts are unchanged.
+**Archival report.** This document preserves the v0.4.0 regression, test
+counts, commands, and wheel recorded in the September 9, 2026 repository
+snapshot. Its numerical results have not been regenerated for later fixes.
+In particular, the warm-started line-search rule below is historical; the
+current solvers reset the trial inverse step at every iteration. For current
+setup and behavior, see the [environment guide](../environment/README.md),
+[package README](../sparse-smart/README.md),
+[algorithm documentation](../sparse-smart/docs/algorithm.md), and
+[budget-study guide](SPARSE_SMART_V05_BUDGET_STUDY.md).
+
+The v0.4.0 package and simulation runners implemented the three changes
+recorded below. Historical v0.3 numerical artifacts were unchanged.
 
 1. `SparseSMARTTuner(iterations=2000, iteration_budgets=(500, 2000), ...)`
    retains the best successful fitted model at each budget in `checkpoints_`.
@@ -66,6 +76,9 @@ readiness of every experiment for a final 100-seed run.
 
 ## Validation and reproduction
 
+These are the checks recorded for the v0.4.0 snapshot, not current test counts
+or a current-source wheel verification:
+
 - 281 package tests passed from source and from an isolated installation of
   the v0.4.0 wheel.
 - 252 SparseSMART simulation runner and summary tests passed.
@@ -78,7 +91,10 @@ readiness of every experiment for a final 100-seed run.
 - Synthetic failure tests separately verify earlier-checkpoint retention when
   a later fit fails, including exclusion of a lower-scoring failed partial fit.
 
-From `code/simulation`, with the v0.4.0 source package:
+The historical invocation below requires the matching v0.4.0 source package,
+simulation runner, and recorded environment, from `code/simulation`. A current
+source installation follows different optimization paths. Use a fresh output
+root for any new run; the saved root below identifies the historical artifact.
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
@@ -100,4 +116,6 @@ The saved implementation fingerprint is
 `9dbdb0c6d8d915abc2ec4e292a188c2e35405b1573dc9e873723bd63f27dae56`.
 
 [Raw regression result](result/sparse_smart_v04_checkpoint_regression/model3/exp3/SparseSMARTExternal_result_model3_exp3_rs=7_rd_seed_id=3.json)
-and [v0.4.0 wheel](../sparse-smart/dist/sparse_smart-0.4.0-py3-none-any.whl).
+and [archival v0.4.0 wheel](../sparse-smart/dist/sparse_smart-0.4.0-py3-none-any.whl).
+This wheel preserves the earlier implementation and does not include subsequent
+source changes.

@@ -1,6 +1,8 @@
 """Tests for the helpers exported from smart.utils."""
 
 import numpy as np
+import pytest
+from sklearn.linear_model import LinearRegression, RidgeCV
 
 from smart import (
     evaluate_model_avg_err,
@@ -49,3 +51,31 @@ def test_fit_baseline_ridge_recovers_reasonable_fit(tiny_problem):
     baseline_err = evaluate_model_avg_err(np.zeros_like(C_true), C_true)
     ridge_err = evaluate_model_avg_err(C_hat, C_true)
     assert ridge_err < baseline_err
+
+
+@pytest.mark.parametrize("model_type", ["ols", "ridge"])
+@pytest.mark.parametrize("n,p,q,rank_deficient", [
+    (80, 12, 4, False), (24, 48, 3, True), (50, 6, 1, False),
+])
+def test_batched_baselines_preserve_independent_response_fits(model_type, n, p, q,
+                                                           rank_deficient):
+    rng = np.random.default_rng(928)
+    X = rng.normal(size=(n, p)) + 2.0
+    if rank_deficient:
+        X[:, -1] = X[:, 0]
+    Y = X @ rng.normal(size=(p, q)) + np.arange(q) + 4.0
+    Y += rng.normal(size=(n, q)) * np.linspace(.01, 8., q)
+    alpha_grid = np.logspace(-4, 3, 12)
+    models = [
+        (LinearRegression() if model_type == "ols" else RidgeCV(alphas=alpha_grid)).fit(X, Y[:, j])
+        for j in range(q)
+    ]
+    coefficient, selected = fit_baseline(X, Y, model_type=model_type, alphas=alpha_grid)
+
+    assert coefficient.shape == (p, q)
+    np.testing.assert_allclose(coefficient, np.column_stack([model.coef_ for model in models]),
+                               rtol=1e-10, atol=1e-11)
+    expected_alphas = [None] * q if model_type == "ols" else [model.alpha_ for model in models]
+    assert selected == expected_alphas
+    if model_type == "ridge" and q > 1:
+        assert len(set(selected)) > 1, "The fixture must exercise distinct per-response alphas"

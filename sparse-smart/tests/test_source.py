@@ -115,3 +115,52 @@ def test_svd_reconstruction_orthogonality_and_signs_rectangular():
 def test_source_validation(source):
     with pytest.raises(ValueError):
         prepare_source(source, 2, 3, 3)
+
+
+def _scalar_completion(frame, *, tol=1e-12):
+    """Previous coordinate-order MGS algorithm, used as an independent reference."""
+    basis = [column.copy() for column in frame.T]
+    for index in range(frame.shape[0]):
+        if len(basis) == frame.shape[0]:
+            break
+        vector = np.eye(frame.shape[0])[:, index]
+        for _ in range(2):
+            for column in basis:
+                vector -= column * np.dot(column, vector)
+        norm = np.linalg.norm(vector)
+        if norm > tol:
+            basis.append(vector / norm)
+    return np.column_stack(basis) if basis else np.empty((0, 0))
+
+
+@pytest.mark.parametrize("rows,columns", [(0, 0), (8, 0), (8, 8), (80, 7), (80, 79)])
+def test_vectorized_completion_preserves_input_and_canonical_coordinates(rows, columns):
+    rng = np.random.default_rng(141)
+    frame = np.linalg.qr(rng.normal(size=(rows, columns)))[0]
+    original = frame.copy()
+    actual = complete_basis(frame)
+    expected = _scalar_completion(frame)
+    np.testing.assert_array_equal(frame, original)
+    np.testing.assert_array_equal(actual[:, :columns], original)
+    np.testing.assert_allclose(actual, expected, atol=3e-13, rtol=3e-13)
+    np.testing.assert_allclose(actual.T @ actual, np.eye(rows), atol=3e-13)
+    for count in sorted({columns, min(rows, columns + 1), rows}):
+        np.testing.assert_array_equal(complete_basis(frame, n_columns=count), actual[:, :count])
+
+
+@pytest.mark.parametrize("angle", [0., 2.5e-13, 4e-12, 1e-9])
+def test_completion_retains_nearly_dependent_coordinate_decisions(angle):
+    frame = np.array([[np.cos(angle)], [np.sin(angle)], [0.], [0.]])
+    actual = complete_basis(frame)
+    np.testing.assert_allclose(actual, _scalar_completion(frame), atol=1e-14, rtol=1e-14)
+    np.testing.assert_allclose(actual.T @ actual, np.eye(4), atol=1e-14)
+
+
+def test_vectorized_tied_subspace_is_rotation_invariant():
+    rng = np.random.default_rng(142)
+    frame = np.linalg.qr(rng.normal(size=(100, 12)))[0]
+    rotation = np.linalg.qr(rng.normal(size=(12, 12)))[0]
+    canonical = source_module._canonical_subspace(frame, 1e-12)
+    rotated = source_module._canonical_subspace(frame @ rotation, 1e-12)
+    np.testing.assert_allclose(canonical, rotated, atol=2e-13, rtol=2e-13)
+    np.testing.assert_allclose(canonical.T @ canonical, np.eye(12), atol=2e-13)

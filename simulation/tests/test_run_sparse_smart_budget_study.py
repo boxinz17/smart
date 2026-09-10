@@ -188,8 +188,10 @@ def test_matching_checkpoint_skips_only_after_data_truth_and_code_verification(t
         return value
     with pytest.raises(ValueError,match='data, truth, or implementation differs'):
         run(tmp_path,api=api,generator=changed_data)
-    monkeypatch.setattr(runner,'_implementation_fingerprint',lambda *args:'0'*64)
-    with pytest.raises(ValueError,match='implementation differs'):
+    original_provenance = runner._implementation_provenance
+    monkeypatch.setattr(runner, '_implementation_provenance', lambda *args: dict(
+        original_provenance(*args), implementation_fingerprint='0'*64))
+    with pytest.raises(ValueError,match='[Ii]mplementation differs'):
         run(tmp_path,api=api)
     assert (tmp_path/'record.json').read_bytes() == original
     assert first['n_train'] == 6 and first['n_validation'] == 100

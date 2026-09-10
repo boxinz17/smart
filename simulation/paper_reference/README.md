@@ -6,9 +6,52 @@ the three existing `v1/fig_smart/simulation_model*.pdf` figures used by
 and all plotted x coordinates. No other estimator was run to obtain these
 references.
 
+These values are already saved and versioned in the software repository.
+**Cluster runs should read this CSV; they do not need the manuscript PDF,
+figure PDFs, or `pdfplumber`.** Transfer the `paper_reference/` directory with
+the source checkout. `provenance.json` now binds the CSV bytes with a SHA-256
+checksum, in addition to retaining the original figure fingerprints.
+
 The measurement is `||C_hat - C_star||_F / sqrt(p*q)`, as defined in the
 manuscript's simulation section. `mean` and `se` are in this unscaled metric;
 the printed figure axes use a multiplier of `1e-2`.
+Compare these numbers with the simulation runner's coefficient error `avg_err`,
+not its validation MSE or training objective.
+
+## Use on Discovery without PDFs
+
+From the software repository's `simulation/` directory:
+
+```sh
+python -m paper_reference
+```
+
+This checks the CSV checksum, all 432 rows, the complete model/experiment/method
+grid, numeric values, and source metadata using the Python standard library.
+It does not open any PDF or fit an estimator. The existing comparison scripts
+use the saved reference by default. External-data comparison summaries also
+check source PDFs if available; absent PDFs are recorded as `unavailable`,
+while a mismatched available PDF still raises an error. Their metadata records
+`paper_reference_verification`; `paper_pdf_hashes_verified` lists only files
+actually checked on that machine.
+
+For example, read the paper comparison for the single Model I noise-0.5 trial:
+
+```python
+from paper_reference import read_reference
+
+rows, verification = read_reference()
+for row in rows:
+    if (row["model_id"] == "0" and row["experiment"] == "exp4"
+            and float(row["x"]) == 0.5):
+        print(row["method"], row["mean"], row["se"])
+```
+
+To additionally verify the source PDFs on a workstation that has the manuscript,
+use `python -m paper_reference --manuscript-root /path/to/SMART_BoxinJinchi`.
+Verification distinguishes recorded source hashes from hashes checked locally.
+The saved metadata is an extraction audit trail; CSV consistency checks do not
+constitute a fresh extraction or verification of unavailable PDF files.
 
 ## Reading the CSV
 
@@ -36,7 +79,9 @@ does not assign a meaning to that sentinel.
 
 ## Reproduce the extraction
 
-From the repository root, using Python with `pdfplumber` installed:
+This is optional maintenance when paper figures change, not a cluster setup
+step. From the manuscript repository root, using Python with `pdfplumber`
+installed:
 
 ```sh
 python code/simulation/paper_reference/extract_paper_curves.py

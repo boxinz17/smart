@@ -156,7 +156,9 @@ def test_resume_checks_config_and_data_then_skips_fitting(tmp_path):
 
 def test_resume_rejects_changed_implementation(tmp_path, monkeypatch):
     fit(tmp_path)
-    monkeypatch.setattr(runner, "_implementation_fingerprint", lambda api: "changed")
+    original = runner._implementation_provenance
+    monkeypatch.setattr(runner, "_implementation_provenance", lambda *args: dict(
+        original(*args), implementation_fingerprint="changed"))
     with pytest.raises(ValueError, match="Implementation differs.*--force"):
         fit(tmp_path)
 

@@ -22,6 +22,9 @@ from typing import Any
 
 import numpy as np
 
+import run_restricted_rrr as simulation_grid
+from sparse_smart_provenance import (implementation_provenance, validate_resume_identity,
+                                     validate_resume_implementation)
 from run_restricted_rrr import (
     DEFAULT_OUTPUT_ROOT, EXPERIMENT_NAMES, MODEL_NAMES, SimulationSetting,
     experiment_settings, load_experiment_seeds,
@@ -91,16 +94,16 @@ def input_fingerprint(data):
     return digest.hexdigest()
 
 
-def _implementation_fingerprint(api):
-    digest = hashlib.sha256(Path(__file__).read_bytes())
-    module_file = getattr(api, "__file__", None)
-    if module_file:
-        for path in sorted(Path(module_file).parent.glob("*.py")):
-            digest.update(path.name.encode())
-            digest.update(path.read_bytes())
-    else:
-        digest.update(b"injected_test_api")
-    return digest.hexdigest()
+def _implementation_files():
+    return (Path(__file__), Path(simulation_grid.__file__))
+
+
+def _implementation_provenance(api, generator=None):
+    return implementation_provenance(api, generator, _implementation_files())
+
+
+def _implementation_fingerprint(api, generator=None):
+    return _implementation_provenance(api, generator)["implementation_fingerprint"]
 
 
 def _atomic_json_dump(value, destination):
@@ -191,8 +194,8 @@ def run_setting(*, setting: SimulationSetting, model: str, experiment: str, seed
             existing = json.loads(destination.read_text())
         except (ValueError, OSError) as error:
             raise ValueError(f"Cannot validate existing result {destination}; use --force") from error
-        if existing.get("configuration_fingerprint") != fingerprint:
-            raise ValueError(f"Existing result configuration differs at {destination}; use --force")
+        validate_resume_identity(existing, identity, destination, digest=_digest_json,
+                                 extra_identity={"method": "SparseSMART"})
     if generate_data_fn is None:
         generate_data_fn = _load_generator()
     data = generate_data_fn(**generator_arguments)
@@ -200,12 +203,12 @@ def run_setting(*, setting: SimulationSetting, model: str, experiment: str, seed
     reason = setting.inapplicability_reason()
     if reason is None and sparse_api is None:
         sparse_api = _load_sparse_api()
-    implementation_hash = _implementation_fingerprint(sparse_api)
+    provenance = _implementation_provenance(sparse_api, generate_data_fn)
+    implementation_hash = provenance["implementation_fingerprint"]
     if existing is not None:
         if existing.get("input_fingerprint") != data_hash:
             raise ValueError(f"Generated inputs differ from {destination}; use --force")
-        if existing.get("implementation_fingerprint") != implementation_hash:
-            raise ValueError(f"Implementation differs from {destination}; use --force")
+        validate_resume_implementation(existing, provenance, destination)
         return "skipped", existing
 
     result = dict(identity, method="SparseSMART", configuration_fingerprint=fingerprint,
@@ -217,6 +220,7 @@ def run_setting(*, setting: SimulationSetting, model: str, experiment: str, seed
                   fit_time_sec=0., elapsed_time_sec=None, n_iter=0, history=[], diagnostics={},
                   source_check_mode="strict" if config.strict_source_check else "empirical",
                   error_metric="norm(C_hat-C_star, fro) / sqrt(p*q)", theorem_certified=False)
+    result.update(provenance)
     if reason is not None:
         result["failure_message"] = "Requires 1 <= fitted rank <= fitted source rank <= min(p,q); dimensions were not clamped."
     else:

@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
-import hashlib
 import json
 from pathlib import Path
 import time
 
 import numpy as np
+
+from sparse_smart_selection import selection_payload
+from sparse_smart_provenance import (implementation_provenance, validate_resume_identity,
+                                     validate_resume_implementation)
 
 import external_validation_data
 import run_sparse_smart_tuned as old_runner
@@ -59,12 +62,16 @@ def resolved_configuration(setting, config):
     return value
 
 
+def _implementation_files():
+    return (*old_runner._implementation_files(), Path(__file__), Path(external_validation_data.__file__))
+
+
+def _implementation_provenance(api, generator):
+    return implementation_provenance(api, generator, _implementation_files())
+
+
 def _implementation_fingerprint(api, generator):
-    digest = hashlib.sha256(old_runner._implementation_fingerprint(api, generator).encode())
-    for path in (Path(__file__), Path(external_validation_data.__file__)):
-        digest.update(str(path.resolve()).encode())
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
+    return _implementation_provenance(api, generator)["implementation_fingerprint"]
 
 
 def result_path(output_root, *, model, experiment, setting, seed_id):
@@ -104,8 +111,7 @@ def run_setting(*, setting: SimulationSetting, model: str, experiment: str, seed
             existing = json.loads(destination.read_text())
         except (ValueError, OSError) as error:
             raise ValueError(f"Cannot validate existing result {destination}; use --force") from error
-        if existing.get("configuration_fingerprint") != config_hash:
-            raise ValueError(f"Existing result configuration differs at {destination}; use --force")
+        validate_resume_identity(existing, identity, destination, digest=_digest_json)
     generator = generate_data_fn if generate_data_fn is not None else old_runner._load_generator()
     data = external_validation_data.generate_external_validation(
         n_train=setting.n, p=setting.p, q=setting.q, sigma0=setting.sigma0, random_seed=int(random_seed),
@@ -118,7 +124,8 @@ def run_setting(*, setting: SimulationSetting, model: str, experiment: str, seed
     reason = setting.inapplicability_reason()
     if sparse_api is None and reason is None:
         sparse_api = old_runner._load_sparse_api()
-    implementation_hash = _implementation_fingerprint(sparse_api, generator)
+    provenance = _implementation_provenance(sparse_api, generator)
+    implementation_hash = provenance["implementation_fingerprint"]
     if existing is not None:
         if existing.get("training_observed_input_fingerprint") != train_hash:
             raise ValueError(f"Training inputs differ from {destination}; use --force")
@@ -128,8 +135,7 @@ def run_setting(*, setting: SimulationSetting, model: str, experiment: str, seed
             raise ValueError(f"Evaluation truth differs from {destination}; use --force")
         if existing.get("validation_seed_metadata") != _json_value(data["validation_seed_metadata"]):
             raise ValueError(f"Validation seed metadata differs from {destination}; use --force")
-        if existing.get("implementation_fingerprint") != implementation_hash:
-            raise ValueError(f"Implementation differs from {destination}; use --force")
+        validate_resume_implementation(existing, provenance, destination)
         return "skipped", existing
     result = dict(identity, configuration_fingerprint=config_hash,
         training_observed_input_fingerprint=train_hash, validation_observed_input_fingerprint=validation_hash,
@@ -146,6 +152,7 @@ def run_setting(*, setting: SimulationSetting, model: str, experiment: str, seed
         source_check_mode="strict" if config.strict_source_check else "empirical",
         error_metric="norm(C_hat-C_star, fro) / sqrt(p*q)",
         evaluation_scope="all_legacy_training_rows_plus_independent_validation; not a paper aggregate")
+    result.update(provenance)
     if reason is not None:
         result["failure_message"] = "Invalid fitted dimensions are recorded without clamping or fitting."
     else:
@@ -169,6 +176,7 @@ def run_setting(*, setting: SimulationSetting, model: str, experiment: str, seed
                 initialization_spectrum=config.initialization_spectrum,
                 refinement_solver=config.refinement_solver)
             tuner.fit(X, Y, source=source, validation_data=(Xv, Yv))
+            result.update(selection_payload(tuner))
             candidates = _json_value(tuner.selection_history_)
             result.update(estimator_status=tuner.status_, success=bool(tuner.success_),
                 status="complete" if tuner.success_ else "all_candidates_failed",

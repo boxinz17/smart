@@ -16,6 +16,7 @@ from .source import ExactSource, NoisySource, _positive_real, prepare_source
 from .spectral import project_singular_values
 from .support import coordinate_support
 from .thresholding import hard_threshold
+from .validation import SELECTION_RULE, ValidationReference, validation_loss_difference
 
 
 class FitFailure(RuntimeError):
@@ -31,6 +32,8 @@ class _FitPreparationCache:
     def __init__(self):
         self.context = None
         self.entries = {}
+        self.validation_reference = ValidationReference()
+        self.validation_context = {}
 
     def bind(self, context):
         if self.context is None:
@@ -53,6 +56,11 @@ def _data(value, name):
     return x
 
 
+def _factor_prediction(design, left, singular_values, right):
+    """Canonical ambient factor association for validation and public prediction."""
+    return ((design @ left) * singular_values) @ right.T
+
+
 @dataclass(frozen=True)
 class TrajectoryCheckpoint:
     """Lightweight successful finite prefix; states use original Z coordinates."""
@@ -66,6 +74,7 @@ class TrajectoryCheckpoint:
     status: str
     termination_reason: str
     message: str
+    best_selection_score: float | None = None
 
 
 def _checkpoint_schedule(values, iterations):
@@ -141,6 +150,7 @@ class SparseSMART:
         never enter initialization, gradients, or line-search acceptance.
         """
         cache = self.__dict__.pop("_fit_cache", None)
+        validation_reference = cache.validation_reference if cache is not None else ValidationReference()
         for name in list(vars(self)):
             if name.endswith("_"):
                 delattr(self, name)
@@ -189,9 +199,11 @@ class SparseSMART:
         if not isinstance(self.margins, Margins):
             raise ValueError("margins must be Margins")
         self.n_features_in_, self.n_responses_ = X.shape[1], Y.shape[1]
+        self.selection_rule_ = SELECTION_RULE
         self.n_iter_, self.history_, self.success_ = 0, [], False
         self.termination_reason_, self.converged_, self.optimization_converged_ = None, False, False
         self.diagnostics_ = {"theorem_certified": False, "arithmetic": "float64",
+                             "selection_rule": SELECTION_RULE,
                              "same_target_data": True, "input_rescaling": False}
         source_noise = source.noise_std if isinstance(source, NoisySource) else 0.
         source_gap = source.gap_lower if isinstance(source, NoisySource) else None
@@ -330,11 +342,10 @@ class SparseSMART:
         Z, W, loss_offset = prepared(("training_data", source_key), training_projection)
         self.validation_history_ = []
         self.best_validation_loss_ = None
+        self.best_selection_score_ = None
         selected_state = None
         selected_iteration = None
-        if validation_data is not None:
-            validation_design = prepared(("validation_data", source_key), lambda: XV @ self.source_.left)
-
+        selected_prediction = None
         def observe(iteration, state, record):
             nonlocal selected_state, selected_iteration
             self.history_.append(record)
@@ -347,19 +358,30 @@ class SparseSMART:
                 capture(iteration, state, record)
 
         def evaluate_validation(iteration, state):
-            nonlocal selected_state, selected_iteration
+            nonlocal selected_state, selected_iteration, selected_prediction
             if self.validation_history_ and self.validation_history_[-1]["iteration"] == iteration:
                 return
             P, d, Q = self.chart_.reconstruct(state)
-            prediction = ((validation_design @ P) * d) @ (self.source_.right @ Q).T
+            prediction = _factor_prediction(XV, self.source_.left @ P, d, self.source_.right @ Q)
             with np.errstate(over="ignore", invalid="ignore"):
                 score = float(np.mean((YV - prediction) ** 2))
             if not np.isfinite(score):
                 raise FloatingPointError("Nonfinite validation prediction loss")
-            self.validation_history_.append({"iteration": iteration, "loss": score})
-            if self.best_validation_loss_ is None or score < self.best_validation_loss_:
+            selection_score = validation_reference.score(prediction, YV,
+                metadata={"reference_validation_mse": score,
+                          **(cache.validation_context if cache is not None else {})})
+            self.diagnostics_["selection_reference"] = validation_reference.metadata.copy()
+            difference = (None if selected_prediction is None else
+                          validation_loss_difference(prediction, selected_prediction, YV))
+            self.validation_history_.append({"iteration": iteration, "loss": score,
+                "selection_score": selection_score, "selection_rule": SELECTION_RULE,
+                "selection_comparison": {"incumbent_iteration": selected_iteration,
+                                         "loss_difference": difference}})
+            if selected_prediction is None or difference < 0:
                 self.best_validation_loss_ = score
+                self.best_selection_score_ = selection_score
                 selected_state, selected_iteration = state.copy(), iteration
+                selected_prediction = prediction.copy()
 
         def capture(iteration, state, record, *, terminal=None):
             # Solvers also observe an accepted state whose subsequent gradient
@@ -386,7 +408,7 @@ class SparseSMART:
             self.checkpoints_[iteration] = TrajectoryCheckpoint(
                 iteration, endpoint, chosen, iteration if selected_iteration is None else selected_iteration,
                 self.best_validation_loss_, len(self.history_), len(self.validation_history_),
-                status, reason, message)
+                status, reason, message, self.best_selection_score_)
             self.checkpoint_iterations_ = tuple(sorted(self.checkpoints_))
 
         solver_options = dict(calibration=self.calibration_, margins=self.margins,
@@ -403,6 +425,8 @@ class SparseSMART:
                 evaluate_validation(result.n_iter, result.state)
             if requested_checkpoints is not None and result.history:
                 capture(result.n_iter, result.state, result.history[-1], terminal=result)
+        if cache is None and validation_reference.prediction is not None:
+            self.validation_reference_prediction_ = validation_reference.prediction.copy()
         return self._finalize_refinement(result, selected_state, selected_iteration)
 
     def _finalize_refinement(self, result, selected_state, selected_iteration):
@@ -422,14 +446,15 @@ class SparseSMART:
         self.singular_values_ = d.copy()
         self.coefficient_ = (self.left_factors_ * d) @ self.right_factors_.T
         self.supports_, self.raw_supports_, self.support_tolerances_, metadata = self._refinement_metadata(
-            result, self.state_, self.selected_iteration_, self.best_validation_loss_)
+            result, self.state_, self.selected_iteration_, self.best_validation_loss_, self.best_selection_score_)
         self.diagnostics_.update(metadata)
         if not result.success:
             return self._failure(result.status, result.message)
         self.status_, self.message_, self.success_ = result.status, result.message, True
         return self
 
-    def _refinement_metadata(self, result, state, selected_iteration, best_validation_loss):
+    def _refinement_metadata(self, result, state, selected_iteration, best_validation_loss,
+                             best_selection_score=None):
         """Derive selected/terminal diagnostics without constructing coefficients."""
         selected_record = next((record for record in result.history
                                 if record.iteration == selected_iteration), None)
@@ -460,6 +485,7 @@ class SparseSMART:
             optimization_converged=optimization_converged,
             selected_converged=optimization_converged and selected_iteration == result.n_iter,
             selected_iteration=selected_iteration, best_validation_loss=best_validation_loss,
+            best_selection_score=best_selection_score,
             fitted_support_counts=tuple(len(supports[side]) for side in ("u", "v")),
             raw_fitted_support_counts=tuple(len(raw_supports[side]) for side in ("u", "v")),
             support_tolerances=tolerances.copy(),
@@ -485,14 +511,22 @@ class SparseSMART:
         result = _result(snapshot.state, snapshot.status, snapshot.message, snapshot.iteration,
                          self.history_[:snapshot.history_length], termination_reason=snapshot.termination_reason)
         _, _, _, metadata = self._refinement_metadata(
-            result, snapshot.selected_state, snapshot.selected_iteration, snapshot.best_validation_loss)
+            result, snapshot.selected_state, snapshot.selected_iteration, snapshot.best_validation_loss,
+            snapshot.best_selection_score)
         diagnostics = deepcopy(self.diagnostics_)
         diagnostics.update(metadata)
         return dict(success=result.success, status=snapshot.status, message=snapshot.message,
                     validation_mse=snapshot.best_validation_loss, selected_iteration=snapshot.selected_iteration,
+                    selection_score=snapshot.best_selection_score, selection_rule=SELECTION_RULE,
                     n_iter=snapshot.iteration, termination_reason=snapshot.termination_reason,
                     validation_history=deepcopy(self.validation_history_[:snapshot.validation_history_length]),
                     diagnostics=diagnostics)
+
+    def _checkpoint_prediction(self, iteration, X):
+        """Predict a selected prefix directly, without constructing a fitted view."""
+        snapshot = self._checkpoint_snapshot(iteration)
+        P, d, Q = self.chart_.reconstruct(snapshot.selected_state)
+        return _factor_prediction(X, self.source_.left @ P, d, self.source_.right @ Q)
 
     def checkpoint_model(self, iteration):
         """Reconstruct an independent fitted view of an available finite prefix.
@@ -505,7 +539,8 @@ class SparseSMART:
         view = object.__new__(type(self))
         excluded = {"checkpoints_", "history_", "validation_history_", "result_",
                     "coefficient_", "last_coefficient_", "factors_", "left_factors_", "right_factors_",
-                    "singular_values_", "state_", "last_state_", "supports_", "raw_supports_"}
+                    "singular_values_", "state_", "last_state_", "supports_", "raw_supports_",
+                    "validation_reference_prediction_"}
         view.__dict__ = deepcopy({key: value for key, value in vars(self).items() if key not in excluded})
         view.iterations = snapshot.iteration
         view.checkpoints_ = deepcopy({key: value for key, value in self.checkpoints_.items()
@@ -514,6 +549,7 @@ class SparseSMART:
         view.checkpoint_iterations = view.checkpoint_iterations_
         view.validation_history_ = deepcopy(self.validation_history_[:snapshot.validation_history_length])
         view.best_validation_loss_ = snapshot.best_validation_loss
+        view.best_selection_score_ = snapshot.best_selection_score
         result = _result(snapshot.state.copy(), snapshot.status, snapshot.message, snapshot.iteration,
                          deepcopy(self.history_[:snapshot.history_length]),
                          termination_reason=snapshot.termination_reason)
@@ -528,4 +564,4 @@ class SparseSMART:
         X = _data(X, "X")
         if X.shape[1] != self.n_features_in_:
             raise ValueError("X has the wrong number of predictors")
-        return ((X @ self.left_factors_) * self.singular_values_) @ self.right_factors_.T
+        return _factor_prediction(X, self.left_factors_, self.singular_values_, self.right_factors_)

@@ -12,7 +12,6 @@ import argparse
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 import hashlib
-import inspect
 import json
 import math
 from pathlib import Path
@@ -20,8 +19,11 @@ import time
 
 import numpy as np
 
+from sparse_smart_selection import selection_payload
+
 import run_sparse_smart as fixed_runner
-import run_restricted_rrr as simulation_grid
+from sparse_smart_provenance import (implementation_provenance, validate_resume_identity,
+                                     validate_resume_implementation)
 from run_sparse_smart import MARGINS, _atomic_json_dump, _coefficient_error, _digest_json, _json_value
 from run_restricted_rrr import (
     DEFAULT_OUTPUT_ROOT, DEFAULT_SEED_FILE, EXPERIMENT_NAMES, MODEL_NAMES,
@@ -121,20 +123,17 @@ def _array_fingerprint(data, names):
     return digest.hexdigest()
 
 
+def _implementation_files():
+    return (*fixed_runner._implementation_files(), Path(__file__),
+            Path(__file__).with_name("sparse_smart_selection.py"))
+
+
+def _implementation_provenance(api, generator):
+    return implementation_provenance(api, generator, _implementation_files())
+
+
 def _implementation_fingerprint(api, generator):
-    paths = {Path(__file__), Path(fixed_runner.__file__), Path(simulation_grid.__file__)}
-    if getattr(api, "__file__", None):
-        paths.update(Path(api.__file__).resolve().parent.rglob("*.py"))
-    generator_file = inspect.getsourcefile(generator)
-    if generator_file is not None:
-        paths.add(Path(generator_file))
-    digest = hashlib.sha256()
-    for path in sorted(paths):
-        digest.update(str(path.resolve()).encode())
-        digest.update(path.read_bytes())
-    if not getattr(api, "__file__", None):
-        digest.update(b"injected_test_api")
-    return digest.hexdigest()
+    return _implementation_provenance(api, generator)["implementation_fingerprint"]
 
 
 def _load_generator():
@@ -186,22 +185,21 @@ def run_setting(*, setting: SimulationSetting, model: str, experiment: str, seed
             existing = json.loads(destination.read_text())
         except (ValueError, OSError) as error:
             raise ValueError(f"Cannot validate existing result {destination}; use --force") from error
-        if existing.get("configuration_fingerprint") != config_hash:
-            raise ValueError(f"Existing result configuration differs at {destination}; use --force")
+        validate_resume_identity(existing, identity, destination, digest=_digest_json)
     generator = generate_data_fn if generate_data_fn is not None else _load_generator()
     data = generator(**arguments)
     observed_hash = _array_fingerprint(data, ("X", "Y", "C0"))
     reason = setting.inapplicability_reason()
     if sparse_api is None and reason is None:
         sparse_api = _load_sparse_api()
-    implementation_hash = _implementation_fingerprint(sparse_api, generator)
+    provenance = _implementation_provenance(sparse_api, generator)
+    implementation_hash = provenance["implementation_fingerprint"]
     if existing is not None:
         if existing.get("observed_input_fingerprint") != observed_hash:
             raise ValueError(f"Generated inputs differ from {destination}; use --force")
         if existing.get("evaluation_truth_fingerprint") != _array_fingerprint(data, ("C_star",)):
             raise ValueError(f"Evaluation truth differs from {destination}; use --force")
-        if existing.get("implementation_fingerprint") != implementation_hash:
-            raise ValueError(f"Implementation differs from {destination}; use --force")
+        validate_resume_implementation(existing, provenance, destination)
         return "skipped", existing
     result = dict(identity, configuration_fingerprint=config_hash,
                   observed_input_fingerprint=observed_hash, implementation_fingerprint=implementation_hash,
@@ -216,6 +214,7 @@ def run_setting(*, setting: SimulationSetting, model: str, experiment: str, seed
                   source_check_mode="strict" if config.strict_source_check else "empirical",
                   error_metric="norm(C_hat-C_star, fro) / sqrt(p*q)",
                   evaluation_scope="one_replicate_of_requested_pilot; not a 100-replicate paper aggregate")
+    result.update(provenance)
     if reason is not None:
         result["failure_message"] = "Invalid fitted dimensions are recorded without clamping or fitting."
     else:
@@ -239,6 +238,7 @@ def run_setting(*, setting: SimulationSetting, model: str, experiment: str, seed
                 stationarity_tol=config.stationarity_tol,
             )
             tuner.fit(X, Y, source=source)
+            result.update(selection_payload(tuner))
             candidates = _json_value(tuner.selection_history_)
             result.update(estimator_status=tuner.status_, success=bool(tuner.success_),
                           status="complete" if tuner.success_ else "all_candidates_failed",

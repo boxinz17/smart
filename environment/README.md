@@ -49,9 +49,18 @@ check. The [cluster guide](../hpc/discovery/README.md) explains deployment and
 Slurm use. Editing the local configuration does not deploy it or submit a job.
 Existing saved simulation artifacts retain their original version fingerprints.
 
-Local validation of this setup passed 325 SparseSMART tests, 110 BI-SMART
-tests, 8 SMART tests, and 353 simulation tests (796 total). The built SparseSMART
-wheel also passed its 325 tests and all three example modes in this environment.
+## Historical verification snapshot
+
+The verification recorded on **2026-09-09** in repository commit `d4b6e7b`
+passed 325 SparseSMART tests, 110 BI-SMART tests, 8 SMART tests, and 353
+simulation tests (796 total). The SparseSMART wheel built for that snapshot
+also passed its 325 tests and all three example modes in this environment.
+These counts describe the source and wheel checked then; they are not current
+test totals or verification of subsequent source changes. The saved
+[v0.5.0 wheel](../sparse-smart/dist/sparse_smart-0.5.0-py3-none-any.whl) is archival
+and predates later audit fixes. Use the editable source installation above
+for current development and runs.
+
 Run the general suites in separate processes using their existing CI commands;
 the simulation fixtures use pytest's default import mode. These checks do not
 constitute a remote CI or cluster run.

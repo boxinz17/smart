@@ -83,6 +83,39 @@ These produce `SMART_result_*.pkl` and `SMARTCV_result_*.pkl` files under
 `result/<model>/<exp>/`. The package default `gamma=2.0` matches the value used for
 the paper's main figures.
 
+### SparseSMART workflows and result reuse
+
+The [SparseSMART package guide](../sparse-smart/README.md) describes current
+numerical behavior. The [continuous budget-study guide](SPARSE_SMART_V05_BUDGET_STUDY.md)
+provides the current source/environment commands and checkpoint audit workflow.
+Earlier SparseSMART pilot documents and saved reports retain their historical
+results; rerunning current source need not reproduce an older solver's trajectory.
+
+Current fixed, tuned, external-validation, and budget-study cell runners use
+the `sparse-smart-source-content-v1` implementation fingerprint scheme. The
+digest covers a manifest of logical source names and content hashes, including
+the generator and relevant runner/package code. Absolute checkout paths are
+stored separately in `implementation_source_locations` and do not affect the
+digest, so identical source copies can be pooled across worker directories.
+The pinned environment remains a separate runtime requirement. Resume checks
+recompute the stored configuration/identity digest from its payload and verify
+the requested configuration, source contents, and regenerated data. A legacy
+or missing implementation scheme is rejected for resume; choose a fresh output
+root, or use `--force` where that runner supports intentional replacement.
+Historical summaries remain readable without enabling legacy resume.
+
+The external-grid, repair, and budget-study batch drivers write progress to a
+unique JSON file under `<manifest_stem>_attempts/`. After execution starts,
+task errors and caught driver failures are saved there. A canonical manifest
+is published only after every requested task returns without a task exception.
+Numerical fit failures and structurally inapplicable cells are recorded
+experimental outcomes and can belong to a completed batch. A failed or
+interrupted rerun preserves the previous completed canonical manifest and
+earlier attempt files. Budget-study resume and `--manifest-scope` summaries
+prefer that canonical manifest; if none exists, they use the latest attempt
+to recover the declared scope and completed-cell provenance. This resumes
+completed cells, not an interrupted optimization trajectory.
+
 ### Full-sample restricted-RRR pilot
 
 `run_restricted_rrr.py` regenerates the same synthetic sample and fits exactly

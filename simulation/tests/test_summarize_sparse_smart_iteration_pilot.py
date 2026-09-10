@@ -100,6 +100,48 @@ def rehash(value):
     value["configuration_fingerprint"]=_digest_json(identity)
 
 
+def relative_pair():
+    base, extended = make_record(budget=2), make_record(budget=4)
+    for value in (base, extended):
+        value["validation_reference_prediction"] = [[0.]]
+        for candidate in value["selection_history"]:
+            for row in candidate["validation_history"]:
+                row.update(selection_score=-float(row["iteration"])+candidate["candidate_id"],
+                           loss=1e24 if row["iteration"] <= 2 else float(np.nextafter(1e24, np.inf)))
+            last = candidate["validation_history"][-1]
+            candidate.update(selected_iteration=last["iteration"], selection_score=last["selection_score"],
+                             validation_mse=last["loss"])
+        winner = value["selection_history"][0]
+        value.update(selection_score=winner["selection_score"], validation_loss=winner["validation_mse"],
+                     selected_iteration=winner["selected_iteration"])
+    return base, extended
+
+
+def test_relative_reference_comparison_retains_improvement_despite_rounded_absolute_mse():
+    base, extended = relative_pair()
+    assert extended["validation_loss"] > base["validation_loss"]
+    audited = summary.validate_pair(base, extended, base_budget=2, extended_budget=4)
+    assert audited["base_winner_eligible_in_extended"]
+    assert audited["validation_change"] == -2.
+    assert audited["validation_change_basis"] == "common_reference_with_absolute_mse_tiebreak"
+
+
+def test_cross_fit_relative_scores_require_same_reference_prediction():
+    base, extended = relative_pair()
+    extended["validation_reference_prediction"] = [[1.]]
+    with pytest.raises(ValueError, match="selection references differ"):
+        summary.validate_pair(base, extended, base_budget=2, extended_budget=4)
+
+
+def test_cross_fit_relative_scores_use_absolute_mse_to_break_rounded_score_ties():
+    base, extended = relative_pair()
+    # Isolate the pair comparison after the constituent records have passed
+    # their own selection checks: equal relative scores still use absolute MSE.
+    extended["selection_score"] = base["selection_score"]
+    with pytest.raises(ValueError, match="Validation worsened"):
+        summary.validate_pair(base, extended, base_budget=2, extended_budget=4)
+
+
 def test_empty_expected_grid_has45_pairs_and_explicit_missingness(tmp_path):
     rows,audit=summary.summarize(tmp_path/"short",tmp_path/"long",generate_data_fn=data)
     assert len(rows)==9 and audit["expected_pairs"]==45

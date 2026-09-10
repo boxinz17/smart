@@ -52,11 +52,18 @@ def validation_loss(candidate: Candidate, validation: FoldData) -> float:
     an infinite-loss convention.
     """
 
-    # PSEUDOCODE 1: Enforce the appendix rule that failed branches are deleted.
+    prediction = _validation_prediction(candidate, validation)
+    residual = validation.Y - prediction
+    return float(np.linalg.norm(residual, ord="fro") ** 2 / validation.n_samples)
+
+
+def _validation_prediction(candidate: Candidate, validation: FoldData) -> np.ndarray:
+    """Validate a successful coefficient and evaluate it once."""
+    # Enforce the appendix rule that failed branches are deleted.
     if candidate.status is not CandidateStatus.SUCCESSFUL or candidate.matrix is None:
         raise ValueError("validation_loss requires a successful candidate.")
 
-    # PSEUDOCODE 2: Check coefficient dimensions before multiplying X_val C.
+    # Check coefficient dimensions before multiplying X_val C.
     expected = (validation.n_features, validation.n_responses)
     if candidate.matrix.shape != expected:
         raise ValueError(
@@ -64,9 +71,7 @@ def validation_loss(candidate: Candidate, validation: FoldData) -> float:
             f"validation expects {expected}."
         )
 
-    # PSEUDOCODE 3: Evaluate Eq. (bismart-validation-selector).
-    residual = validation.Y - validation.X @ candidate.matrix
-    return float(np.linalg.norm(residual, ord="fro") ** 2 / validation.n_samples)
+    return validation.X @ candidate.matrix
 
 
 def score_and_select_candidates(
@@ -77,8 +82,9 @@ def score_and_select_candidates(
 
     Input order is the deterministic order required by the appendix
     (budget--partition--weight--radius--cap--iteration--safeguard).  This
-    function deliberately preserves that order and uses ``numpy.argmin``, whose
-    first-minimum behavior supplies the paper's tie rule.
+    function preserves that order and compares each prediction directly with
+    the incumbent. Exactly equal prediction losses retain the earlier label;
+    a large common residual cannot conceal an otherwise visible improvement.
 
     Returns
     -------
@@ -98,24 +104,35 @@ def score_and_select_candidates(
     if not successful:
         raise ValueError("The validation library contains no successful candidate.")
 
-    # PSEUDOCODE 2: Compute losses without mutating caller-owned candidate data.
-    losses = np.asarray(
-        [validation_loss(candidate, validation) for candidate in successful],
-        dtype=float,
-    )
-    if not np.all(np.isfinite(losses)):
-        raise ValueError("Validation produced a non-finite loss.")
-
+    # PSEUDOCODE 2: Report absolute losses while selecting with local pairwise
+    # differences, without mutating caller-owned candidate data.
     scored = []
-    for candidate, loss in zip(successful, losses):
+    selected_index, incumbent = None, None
+    for index, candidate in enumerate(successful):
+        prediction = _validation_prediction(candidate, validation)
+        residual = prediction - validation.Y
+        loss = float(np.linalg.norm(residual, ord="fro") ** 2 / validation.n_samples)
+        if not np.isfinite(loss):
+            raise ValueError("Validation produced a non-finite loss.")
+        difference = None
+        if incumbent is not None:
+            new, old, response = (np.asarray(a, dtype=np.longdouble)
+                                  for a in (prediction, incumbent, validation.Y))
+            difference = float(np.sum((new-old)*((new-response)+(old-response)),
+                                      dtype=np.longdouble) / validation.n_samples)
+            if not np.isfinite(difference):
+                raise ValueError("Validation produced a non-finite loss difference.")
         metadata = dict(candidate.metadata)
         metadata["validation_loss"] = float(loss)
+        metadata["selection_rule"] = "pairwise-validation-loss-v1"
+        metadata["selection_comparison"] = dict(incumbent_candidate_index=selected_index,
+                                                 loss_difference=difference)
         scored.append(replace(candidate, metadata=metadata))
+        if incumbent is None or difference < 0:
+            selected_index, incumbent = index, prediction
     scored_tuple = tuple(scored)
 
-    # PSEUDOCODE 3: np.argmin returns the first minimum, exactly matching the
-    # deterministic tie convention for the already ordered candidate library.
-    selected_index = int(np.argmin(losses))
+    # PSEUDOCODE 3: Strict improvement supplies the deterministic first-tie rule.
     return scored_tuple[selected_index], scored_tuple
 
 

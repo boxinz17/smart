@@ -9,7 +9,6 @@ import argparse
 from collections import Counter
 import csv
 from dataclasses import asdict
-import hashlib
 from itertools import product
 import json
 import math
@@ -17,6 +16,10 @@ from pathlib import Path
 import re
 
 import numpy as np
+
+from paper_reference import verify_reference
+from sparse_smart_selection import (selection_value, selection_values, validation_winner,
+                                    validate_selected_score)
 
 import run_sparse_smart_external as external_runner
 from run_restricted_rrr import DEFAULT_SEED_FILE, experiment_settings, load_experiment_seeds
@@ -110,7 +113,8 @@ def _validate_selection(record, config, resolved):
                      "All-candidates-failed record contains a selected model")
         return
     _require(record["all_candidates_failed"] is False and eligible, "No successful candidate winner")
-    winner = min(eligible, key=lambda c: c["validation_mse"])
+    winner = validation_winner(eligible)
+    validate_selected_score(record, winner)
     winner_budget = _validate_selected_budget(record, winner, config)
     _require(record["best_params"] == winner["params"], "Selected candidate is not the validation winner")
     _require(record["selected_iteration"] == winner["selected_iteration"]
@@ -203,17 +207,8 @@ def validate_record(record, path, *, setting, seed_id, random_seed, previous):
 
 
 def _paper_provenance(reference_path):
-    path = Path(reference_path).with_name("provenance.json")
-    _require(path.is_file(), "Missing paper reference provenance")
-    provenance = json.loads(path.read_text())
-    checked = []
-    for source in provenance["sources"]:
-        pdf = REPO_ROOT / source["pdf"]
-        _require(pdf.is_file() and hashlib.sha256(pdf.read_bytes()).hexdigest() == source["sha256"],
-                 f"Paper PDF hash differs: {source['pdf']}")
-        checked.append(dict(pdf=source["pdf"], sha256=source["sha256"]))
-    _require(len(checked) == 3, "Incomplete paper reference provenance")
-    return checked
+    """Verify the reference bundle and any source PDFs available locally."""
+    return verify_reference(reference_path, manuscript_root=REPO_ROOT)
 
 
 def _counts(values):
@@ -324,7 +319,9 @@ def summarize(result_root, reference_path=DEFAULT_REFERENCE, *, seed_ids=(0, 1, 
         training_rows=200, additional_validation_rows=100, refit_on_all_data=False,
         training_fingerprints_verified_against_previous=len(records), previous_root=str(Path(previous_root).resolve()),
         result_root=str(Path(result_root).resolve()), paper_reference=str(Path(reference_path).resolve()),
-        paper_pdf_hashes_verified=provenance, paper_repetitions=100,
+        paper_pdf_hashes_verified=[dict(pdf=source["pdf"],sha256=source["sha256"])
+            for source in provenance["source_pdfs"] if source["verification"] == "verified"],
+        paper_reference_verification=provenance, paper_repetitions=100,
         missing_cells=[dict(setting=suffix,seed_id=seed) for suffix in settings for seed in seed_ids
                        if (suffix,seed) not in records],
         comparison_has_equal_tuning_data=False,
@@ -360,7 +357,7 @@ def write_outputs(rows, paper, metadata, output_dir):
     for r in rows:
         report.append(f"| {r['sigma0']:g} | {r['chosen_initializer']} | {_fmt(r['selected_iteration_mean'],1)} ({r['selected_iteration_min']}--{r['selected_iteration_max']}) | {r['optimization_converged']} / {r['max_iterations']} | {r['selected_converged']} | {r['candidate_failed']}/{r['candidate_total']} | {_fmt(r['support_u_mean'],1)} / {_fmt(r['support_v_mean'],1)} |")
     report += ["", "Noisy-source empirical mode, when configured below, bypasses the sufficient source-accuracy gate. Numerical success is not theorem certification. Full complement budgets allow all 475/225 noisy-source coordinates (25/25 for exact sources); penalties determine which entries remain nonzero.", "",
-        "The CSV includes selected parameter frequencies, support ranges, iteration ranges, termination counts, candidate failures, timings, initializer errors and every paper reference method. validation_audit.json records the common implementation/configuration and verified source-PDF hashes. Original runners, results and summaries were preserved.", "",
+        "The CSV includes selected parameter frequencies, support ranges, iteration ranges, termination counts, candidate failures, timings, initializer errors and every paper reference method. validation_audit.json records the common implementation/configuration, paper-reference CSV checksum and provenance, and per-source PDF verification status. Source PDFs are checked when available; absent PDFs do not prevent use of the verified reference bundle and are not claimed as verified. Original runners, results and summaries were preserved.", "",
         "The inherited validation_fraction and split_seed fields below are inactive. Explicit validation data overrides internal splitting: every candidate fits 200 rows and is scored on the separate 100 rows.", "",
         "```json", json.dumps(metadata["runner_config"], indent=2, sort_keys=True), "```", ""]
     (output_dir / "comparison.md").write_text("\n".join(report))

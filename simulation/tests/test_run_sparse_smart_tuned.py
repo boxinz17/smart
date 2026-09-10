@@ -245,7 +245,9 @@ def test_resume_verifies_configuration_observations_truth_and_code(tmp_path, mon
         return data
     with pytest.raises(ValueError, match="Evaluation truth differs.*--force"):
         run(tmp_path, api=api, generator=changed_truth)
-    monkeypatch.setattr(runner, "_implementation_fingerprint", lambda api, generator: "changed")
+    original_provenance = runner._implementation_provenance
+    monkeypatch.setattr(runner, "_implementation_provenance", lambda *args: dict(
+        original_provenance(*args), implementation_fingerprint="changed"))
     with pytest.raises(ValueError, match="Implementation differs.*--force"):
         run(tmp_path, api=api)
     outcome, result = run(tmp_path, api=api, force=True)

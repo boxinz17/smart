@@ -18,6 +18,10 @@ from pathlib import Path
 
 import numpy as np
 
+from sparse_smart_selection import (selection_value, selection_values, selection_keys, validation_winner,
+                                    validate_selected_score, history_winner, pairwise_selection,
+                                    prediction_selection_score, pairwise_loss_difference, factor_prediction)
+
 import external_validation_data
 import run_sparse_smart_external as runner
 from run_restricted_rrr import DEFAULT_SEED_FILE, experiment_settings, load_experiment_seeds
@@ -60,9 +64,11 @@ def _validate_iteration_semantics(record, budget):
         if history:
             _require([row["iteration"] for row in history] == list(range(candidate["n_iter"] + 1)),
                      "Incomplete candidate validation trajectory")
-            losses = [_finite(row["loss"], "candidate validation loss") for row in history]
+            for row in history:
+                _finite(row["loss"], "candidate validation loss")
+            best = history_winner(history)
             if candidate["selected_iteration"] is not None:
-                _require(candidate["selected_iteration"] == min(range(len(losses)), key=losses.__getitem__),
+                _require(candidate["selected_iteration"] == best["iteration"],
                          "Partial or successful candidate did not retain earliest validation minimum")
         if not candidate["success"]:
             _require(candidate["validation_mse"] is None, "Failed partial candidate was made eligible")
@@ -90,7 +96,7 @@ def _validate_iteration_semantics(record, budget):
             _require(candidate["status"] == "completed" and candidate["termination_reason"] == "max_iterations"
                      and candidate["n_iter"] == budget, "Completed candidate did not reach its budget")
     if record["success"]:
-        winner = min((c for c in record["selection_history"] if c["success"]),key=lambda c:c["validation_mse"])
+        winner = validation_winner(c for c in record["selection_history"] if c["success"])
         _require(record["termination_reason"] == winner["termination_reason"],
                  "Selected model termination differs from the winning candidate")
         for key in ("optimization_converged","selected_converged","refinement_solver",
@@ -128,7 +134,7 @@ def _candidate_prefix(base, extended, base_budget):
         eligibility_lost=base["success"] and not extended["success"])
 
 
-def validate_pair(base, extended, *, base_budget=500, extended_budget=2000):
+def validate_pair(base, extended, *, base_budget=500, extended_budget=2000, validation_data=None):
     """Audit a pair after each constituent passes the external-grid validator."""
     for key in ("model", "experiment", "setting", "rd_seed_id", "random_seed", "generator_arguments",
                 "training_observed_input_fingerprint", "validation_observed_input_fingerprint",
@@ -144,15 +150,45 @@ def validate_pair(base, extended, *, base_budget=500, extended_budget=2000):
     new = {row["candidate_id"]:row for row in extended["selection_history"]}
     prefixes = [_candidate_prefix(old[i], new[i], base_budget) for i in sorted(old.keys() & new.keys())]
     lost = [row["candidate_id"] for row in prefixes if row["eligibility_lost"]]
+    stable_selection = "selection_score" in base
+    _require(stable_selection == ("selection_score" in extended),
+             "Paired validation selection schemes differ")
+    both = base["success"] and extended["success"]
+    if stable_selection and both:
+        first_reference, second_reference = (np.asarray(record.get("validation_reference_prediction"), dtype=float)
+                                             for record in (base, extended))
+        _require(first_reference.ndim == 2 and first_reference.size > 0
+                 and np.isfinite(first_reference).all() and np.isfinite(second_reference).all()
+                 and np.array_equal(first_reference, second_reference),
+                 "Paired validation selection references differ")
+    pairwise = pairwise_selection([base, extended])
+    pair_difference = None
+    if pairwise and both:
+        _require(validation_data is not None, "Pairwise iteration comparison requires validation observations")
+        Xv, Yv = validation_data
+        pair_difference = pairwise_loss_difference(factor_prediction(extended["selected_factors"], Xv), Yv,
+                                                  factor_prediction(base["selected_factors"], Xv))
+    pair_keys = selection_keys((base, extended), "validation_loss") if both and not pairwise else None
     winner_retained, winner_id = None, None
     if base["success"]:
-        winner = min((c for c in old.values() if c["success"]), key=lambda c:c["validation_mse"])
+        winner = validation_winner(c for c in old.values() if c["success"])
         winner_id = winner["candidate_id"]
         winner_retained = winner_id in new and new[winner_id]["success"]
         if winner_retained:
-            _require(extended["success"] and extended["validation_loss"] <= base["validation_loss"] + 1e-12,
+            improved = (pair_difference <= 0. if pair_difference is not None else
+                        pair_keys[1] <= pair_keys[0] if stable_selection and pair_keys is not None else
+                        extended["success"] and extended["validation_loss"] <= base["validation_loss"] + 1e-12)
+            _require(extended["success"] and improved,
                      "Validation worsened despite retaining the shorter-run winner and its prefix")
-    both = base["success"] and extended["success"]
+    validation_change = None
+    if pairwise and both:
+        validation_change = pair_difference
+    elif both:
+        validation_change = pair_keys[1][0] - pair_keys[0][0]
+        if validation_change == 0.:
+            # Match the absolute-loss tiebreak when relative differences round
+            # to the same float on small clean losses.
+            validation_change = pair_keys[1][1] - pair_keys[0][1]
     coefficient_change = None
     if both:
         a, b = np.asarray(base["C_hat"]), np.asarray(extended["C_hat"])
@@ -171,7 +207,9 @@ def validate_pair(base, extended, *, base_budget=500, extended_budget=2000):
         base_error=base["avg_err"], extended_error=extended["avg_err"],
         base_validation=base["validation_loss"], extended_validation=extended["validation_loss"],
         error_change=extended["avg_err"]-base["avg_err"] if both else None,
-        validation_change=extended["validation_loss"]-base["validation_loss"] if both else None,
+        validation_change=validation_change,
+        validation_change_basis=("pairwise_validation_loss_difference" if pairwise else
+                                 "common_reference_with_absolute_mse_tiebreak" if stable_selection else "absolute_mse"),
         coefficient_change=coefficient_change,
         base_n_iter=base["n_iter"], extended_n_iter=extended["n_iter"],
         base_terminal_residual=base["diagnostics"].get("last_projected_gradient_norm") if base["success"] else None,
@@ -291,7 +329,14 @@ def summarize(base_root=DEFAULT_BASE_ROOT, extended_root=DEFAULT_EXTENDED_ROOT, 
             new = records.get(("extended",model_id,exp_id,setting.suffix,seed_id))
             if old is not None and new is not None:
                 try:
-                    group_pairs.append(validate_pair(old,new,base_budget=base_budget,extended_budget=extended_budget))
+                    validation_data = None
+                    if pairwise_selection([old, new]) and old["success"] and new["success"]:
+                        config = old["configuration"]["runner"]
+                        key = (setting.n,setting.p,setting.q,setting.sigma0,int(seeds[seed_id]),
+                               config["n_validation"],config["validation_seed_tag"])
+                        validation_data = prediction_cache[key][:2]
+                    group_pairs.append(validate_pair(old,new,base_budget=base_budget,extended_budget=extended_budget,
+                                                     validation_data=validation_data))
                 except (KeyError,TypeError,ValueError) as error:
                     raise ValueError(f"Invalid pair model{model_id+1} exp{exp_id+1} {setting.suffix} seed{seed_id}: {error}") from error
         pairs.extend(group_pairs)

@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from run_restricted_rrr import experiment_settings
+from paper_reference import read_reference
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_REFERENCE = HERE / "paper_reference" / "v1_simulation_curves.csv"
@@ -50,8 +51,8 @@ def summarize(result_root, reference_path, *, model_id=0, seed_ids=(0, 1, 2, 3, 
         records[key] = record
     if len(configs) > 1 or len(implementations) > 1:
         raise ValueError("Cannot pool runs with different tuning or implementations")
-    with Path(reference_path).open() as stream:
-        paper = [row for row in csv.DictReader(stream) if int(row["model_id"]) == model_id]
+    reference_rows, _ = read_reference(reference_path)
+    paper = [row for row in reference_rows if int(row["model_id"]) == model_id]
     rows = []
     for exp_id in experiments:
         experiment = f"exp{exp_id+1}"

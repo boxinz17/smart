@@ -176,7 +176,9 @@ def test_resume_checks_training_validation_truth_configuration_and_code(tmp_path
         monkeypatch.setattr(runner.external_validation_data,"generate_external_validation",altered)
         with pytest.raises(ValueError,match=match):run(tmp_path,fit_api=fit_api)
     monkeypatch.setattr(runner.external_validation_data,"generate_external_validation",original)
-    monkeypatch.setattr(runner,"_implementation_fingerprint",lambda api,generator:"newhash")
+    original_provenance = runner._implementation_provenance
+    monkeypatch.setattr(runner, "_implementation_provenance", lambda *args: dict(
+        original_provenance(*args), implementation_fingerprint="newhash"))
     with pytest.raises(ValueError,match="Implementation differs"):run(tmp_path,fit_api=fit_api)
     outcome,result=run(tmp_path,fit_api=fit_api,force=True)
     assert outcome == "written" and result["implementation_fingerprint"] == "newhash"

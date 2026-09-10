@@ -22,6 +22,7 @@ from run_restricted_rrr import (DEFAULT_SEED_FILE, EXPERIMENT_NAMES, MODEL_NAMES
     experiment_settings, load_experiment_seeds)
 from run_sparse_smart import _atomic_json_dump
 from run_sparse_smart_external import RunnerConfig, result_path, run_setting
+from batch_manifest import BatchManifest
 
 HERE = Path(__file__).resolve().parent
 
@@ -125,28 +126,28 @@ def main(argv=None):
     if args.dry_run:
         return 0
     manifest_path = args.output_root / "expanded_pilot_manifest.json"
-    _atomic_json_dump(manifest, manifest_path)
     started = time.perf_counter()
-    with ProcessPoolExecutor(max_workers=args.workers,
-                             mp_context=multiprocessing.get_context("spawn")) as pool:
-        futures = {pool.submit(fit_cell, task): task for task in tasks}
-        for future in as_completed(futures):
-            try:
-                cell = future.result()
-                manifest["cells"].append(cell)
-                print(json.dumps(dict(done=len(manifest["cells"]), total=len(tasks), **cell)), flush=True)
-            except Exception as error:
-                model, exp, setting, seed, *_ = futures[future]
-                failure = dict(model=MODEL_NAMES[model], experiment=EXPERIMENT_NAMES[exp],
-                    setting=setting.suffix, seed_id=seed, exception=type(error).__name__, message=str(error))
-                manifest["errors"].append(failure)
-                print(json.dumps(failure), flush=True)
-            manifest["status_counts"] = dict(Counter(c["status"] for c in manifest["cells"]))
-            _atomic_json_dump(manifest, manifest_path)
-    manifest.update(finished=datetime.now(timezone.utc).isoformat(),
-                    wall_seconds=time.perf_counter() - started,
-                    outcome_counts=dict(Counter(c["outcome"] for c in manifest["cells"])))
-    _atomic_json_dump(manifest, manifest_path)
+    with BatchManifest(manifest_path, manifest) as attempt:
+        with ProcessPoolExecutor(max_workers=args.workers,
+                                 mp_context=multiprocessing.get_context("spawn")) as pool:
+            futures = {pool.submit(fit_cell, task): task for task in tasks}
+            for future in as_completed(futures):
+                try:
+                    cell = future.result()
+                    manifest["cells"].append(cell)
+                    print(json.dumps(dict(done=len(manifest["cells"]), total=len(tasks), **cell)), flush=True)
+                except Exception as error:
+                    model, exp, setting, seed, *_ = futures[future]
+                    failure = dict(model=MODEL_NAMES[model], experiment=EXPERIMENT_NAMES[exp],
+                        setting=setting.suffix, seed_id=seed, exception=type(error).__name__, message=str(error))
+                    manifest["errors"].append(failure)
+                    print(json.dumps(failure), flush=True)
+                manifest["status_counts"] = dict(Counter(c["status"] for c in manifest["cells"]))
+                attempt.update()
+        manifest.update(finished=datetime.now(timezone.utc).isoformat(),
+                        wall_seconds=time.perf_counter() - started,
+                        outcome_counts=dict(Counter(c["outcome"] for c in manifest["cells"])))
+        attempt.finish(not manifest["errors"] and len(manifest["cells"]) == len(tasks))
     print(json.dumps({k: manifest[k] for k in ("wall_seconds", "status_counts", "outcome_counts", "errors")}), flush=True)
     # Recorded numerical failures are experimental outcomes. Exceptions or
     # missing records indicate an incomplete batch and produce a nonzero exit.

@@ -21,6 +21,8 @@ def trajectories(monkeypatch):
         def fit(self, X, Y, *, source, validation_data):
             self.training = (X.copy(), Y.copy())
             self.validation = tuple(v.copy() for v in validation_data)
+            self.validation_reference = self._fit_cache.validation_reference
+            self.validation_context = self._fit_cache.validation_context.copy()
             self.source = source
             self.outcome = self.outcomes.get(self.options['calibration'].penalty[0], {})
             self.success_ = self.outcome.get('success', True)
@@ -44,23 +46,35 @@ def trajectories(monkeypatch):
             points = [t for t in self.checkpoint_iterations_ if t <= endpoint]
             values = self.outcome.get('values', {})
             scores = {t: values.get(t, 10.-t)**2/2 for t in points}
-            selected = min(points, key=lambda t: scores[t])
+            selection_scores = {}
+            for t in points:
+                candidate = self.coefficient_.copy()
+                candidate[0, 0] = values.get(t, 10.-t)
+                selection_scores[t] = self.validation_reference.score(
+                    self.validation[0] @ candidate, self.validation[1], metadata=self.validation_context)
+            selected = min(points, key=lambda t: (selection_scores[t], scores[t]))
             coefficient = self.coefficient_.copy()
             coefficient[0, 0] = values.get(selected, 10.-selected)
             stationary = self.termination_reason_ == 'stationarity' and endpoint == self.n_iter_
             return SimpleNamespace(success_=True, status_='converged' if stationary else 'completed',
                 message_='completed prefix', termination_reason_='stationarity' if stationary else 'max_iterations',
                 coefficient_=coefficient, n_iter_=endpoint, selected_iteration_=selected,
-                validation_history_=[{'iteration': t, 'loss': scores[t]} for t in points],
+                best_selection_score_=selection_scores[selected],
+                validation_history_=[{'iteration': t, 'loss': scores[t],
+                                      'selection_score': selection_scores[t]} for t in points],
                 diagnostics_={'terminal': endpoint}, predict=lambda X, **kwargs: X @ coefficient)
 
         def _checkpoint_summary(self, endpoint):
             view = self._checkpoint_view(endpoint)
             return dict(success=view.success_, status=view.status_, message=view.message_,
                 validation_mse=min(row['loss'] for row in view.validation_history_),
+                selection_score=view.best_selection_score_,
                 selected_iteration=view.selected_iteration_, n_iter=view.n_iter_,
                 termination_reason=view.termination_reason_, validation_history=view.validation_history_,
                 diagnostics=view.diagnostics_)
+
+        def _checkpoint_prediction(self, endpoint, X):
+            return self._checkpoint_view(endpoint).predict(X)
 
         def checkpoint_model(self, endpoint):
             self.checkpoint_calls.append((self.options['calibration'].penalty[0], endpoint))

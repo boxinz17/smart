@@ -1,5 +1,15 @@
 # SparseSMART 0.3 uniform five-seed pilot
 
+**Archival report.** This document records the completed September 9, 2026
+pilot using its frozen SparseSMART 0.3 implementation. The numerical results,
+algorithm descriptions, audit findings, environment, and commands below refer
+to that historical run; they do not verify the current checkout. The saved
+records and numerical results have not been regenerated for later fixes.
+For current setup and behavior, see the [environment guide](../environment/README.md),
+[package README](../sparse-smart/README.md),
+[algorithm documentation](../sparse-smart/docs/algorithm.md), and
+[budget-study guide](SPARSE_SMART_V05_BUDGET_STUDY.md).
+
 This pilot evaluates SparseSMART 0.3 across all three saved simulation models
 and all four paper experiment grids. The main run uses the same implementation,
 penalty grid, and 500-update limit throughout. A separate 2000-update run checks
@@ -92,7 +102,7 @@ MSE is `2.22e-16`; recomputed coefficient errors agree exactly. All 72 main
 summary means and standard errors agree exactly. All 405 longer-candidate
 validation prefixes match their 500-update counterparts exactly.
 
-The audit also verifies the current implementation fingerprints, the seed
+The audit also verifies the pilot's recorded implementation fingerprints, the seed
 file, 15 repeated-default groups, unchanged result-file hashes, and original
 paper PDF hashes. Its 360 successful coefficient checks comprise 315 main
 fits and 45 longer fits; the other 45 records are structurally inapplicable.
@@ -155,7 +165,11 @@ deviation .5. The inherited `validation_fraction` and `split_seed` fields are
 inactive because explicit tuning observations are supplied; they do not
 reduce the training sample.
 
-Use the existing `smart-boxinj` environment from `code/simulation/`:
+The historical run used the `smart-boxinj` environment from `code/simulation/`.
+The commands below preserve that invocation and require the matching 0.3
+package, runners, and environment to reproduce its optimization paths. The
+current checkout is a later implementation. Use a fresh output root for any
+new run; the saved result roots below are archival provenance.
 
 ```bash
 export PYTHONDONTWRITEBYTECODE=1
@@ -200,7 +214,7 @@ preserves the same experiment.
 
 Each output root contains `expanded_pilot_manifest.json`, including process
 identifiers, the batch-driver hash, configurations, and per-cell outcomes.
-Existing repair records may be reused only when the current runner verifies
+Existing repair records could be reused only when the pilot runner verified
 exact data, configuration, and implementation fingerprints. Historical outputs
 remain in their original directories; older successful fits are not mixed
 into this uniform implementation's results.
@@ -247,7 +261,7 @@ which selects its own ranks.
 The independent audit regenerates the training, tuning, and truth arrays;
 checks equality to historical shared inputs; recomputes successful validation
 prediction MSEs and coefficient errors; and compares the recorded code
-fingerprint with the current frozen implementation. Inapplicable records have
+fingerprint with the pilot's frozen implementation. Inapplicable records have
 their own expected fingerprint because their runner does not load the
 estimator API. Repeated default settings across the four experiments are
 checked for matching outcomes. Each longer candidate's shared validation
@@ -255,8 +269,9 @@ history is compared with its 500-update counterpart before interpreting an
 iteration-budget difference.
 
 The exact [independent audit script](result/sparse_smart_v03_pilot_500/audit_sparse_smart_v03_pilot.py)
-is preserved beside the records. From `code/simulation/`, rerun it without
-fitting any estimator:
+is preserved beside the records. The historical audit invocation from
+`code/simulation/` is shown below. It requires the matching frozen source for
+its implementation-fingerprint checks and fits no estimator:
 
 ```bash
 python result/sparse_smart_v03_pilot_500/audit_sparse_smart_v03_pilot.py \

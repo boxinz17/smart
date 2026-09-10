@@ -178,7 +178,10 @@ def extract_svd_subspaces(C0: np.ndarray, r_u: int, r_v: int):
 
 def fit_baseline(X, Y, model_type="ols", alphas=None):
     """
-    Fit a baseline model (OLS, Ridge, or Lasso) column-wise.
+    Fit independent OLS, Ridge, or Lasso regressions for the response columns.
+
+    OLS and Ridge share the design decomposition across responses. Ridge still
+    selects its regularization parameter independently for each response.
 
     Args:
         X: Feature matrix (n x p)
@@ -195,22 +198,25 @@ def fit_baseline(X, Y, model_type="ols", alphas=None):
     C_hat = np.zeros((p, q))
     best_alphas = []
 
+    if q == 0:
+        return C_hat, best_alphas
+    if model_type == "ols":
+        model = LinearRegression().fit(X, Y)
+        return np.asarray(model.coef_, dtype=float).reshape(q, p).T, [None] * q
+    if model_type == "ridge":
+        model = RidgeCV(alphas=alphas, alpha_per_target=True).fit(X, Y)
+        return (np.asarray(model.coef_, dtype=float).reshape(q, p).T,
+                list(np.atleast_1d(model.alpha_)))
+
     for j in range(q):
         y_j = Y[:, j]
-        if model_type == "ols":
-            model = LinearRegression()
-        elif model_type == "ridge":
-            model = RidgeCV(alphas=alphas)
-        elif model_type == "lasso":
+        if model_type == "lasso":
             model = LassoCV(alphas=alphas, cv=5, max_iter=10000, precompute=False)
         else:
             raise ValueError(f"Unknown model_type: {model_type}")
 
         model.fit(X, y_j)
         C_hat[:, j] = model.coef_
-        if model_type in ["ridge", "lasso"]:
-            best_alphas.append(model.alpha_)
-        else:
-            best_alphas.append(None)
+        best_alphas.append(model.alpha_)
 
     return C_hat, best_alphas

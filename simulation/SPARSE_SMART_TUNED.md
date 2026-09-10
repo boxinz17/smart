@@ -2,12 +2,16 @@
 
 This runner fits only the new SparseSMART package using the existing V1 seeds
 and generator. Paper comparison curves remain in `paper_reference/`; it never
-runs another estimator. The tuned workflow requires sparse-smart 0.2 or newer.
+runs another estimator. Use the current editable SparseSMART source for the
+selection behavior described below; saved wheels retain their historical rules.
 
-Install from the `code/` software repository root:
+Create the [shared environment](../environment/README.md), then install from
+the `code/` software repository root:
 
 ```sh
-python -m pip install -e ./smart -e ./sparse-smart
+source .venv/bin/activate
+python -m pip install --no-build-isolation -c python-constraints.txt \
+  -e ./smart -e ./sparse-smart
 ```
 
 From `code/simulation/`, run one existing seed at high source noise:
@@ -23,8 +27,13 @@ grid. `--dry-run` displays the resolved configuration without fitting.
 Defaults use a deterministic 80/20 target training/validation split, initializer
 penalty 0.03, and independent left/right penalty grids `(0.0025,0.01,0.04)`:
 nine candidates per cell. The initializer and up to 500 accepted refinement
-updates are scored on validation data. The earliest minimum-loss iterate of
-the winning successful candidate is retained, including iteration zero.
+updates are scored on validation data. Current source compares each candidate
+or iterate directly with its incumbent using
+`mean((P-P_incumbent)*((P-Y)+(P_incumbent-Y)))`. A negative difference replaces
+the incumbent; an exactly zero computed difference retains it. Iteration zero
+is eligible. Absolute MSE and the relative `selection_score` are reporting
+quantities, not tie-breakers. The latter uses one fixed initializer prediction
+shared across the entire fit, avoiding subtraction of large complete losses.
 Candidates train on the training subset only; the retained model is not
 automatically refitted on all rows. Validation scores are selection scores.
 The true coefficient is accessed after selection solely for evaluation.
@@ -65,18 +74,30 @@ Results are atomic JSON files under `result/sparse_smart_tuned/model*/exp*/`.
 They include grids, split indices and sizes, implementation/data/configuration
 fingerprints, every candidate's outcome, failed partial scores, selected
 penalties/supports/iterate, validation loss, training history, and termination.
+Current records identify `selection_rule="pairwise-validation-loss-v1"` and
+save iterate/candidate incumbent comparisons for replay. The selected ambient
+factors and `validation_reference_prediction` preserve the selected prediction
+and relative-score evidence. Historical records without this marker remain
+readable under their original relative-score/absolute-MSE or absolute-MSE rule;
+they are not relabeled as results from current selection.
 Failed candidates cannot win; an all-failed cell has no coefficient error.
 Resumption requires identical data, configuration, and implementation. Use a
 new output root for changed experiments, or `--force` for intentional replacement.
+Current source uses the portable `sparse-smart-source-content-v1` scheme and
+rejects legacy/missing schemes for resume; historical summaries remain readable.
+See the [shared result-reuse policy](README.md#sparsesmart-workflows-and-result-reuse)
+for content hashes, saved source paths, and batch-attempt handling.
 
-The completed Model I pilot uses seeds 0-4 and Experiments 1 and 4, with the
+The historical completed Model I pilot uses seeds 0-4 and Experiments 1 and 4, with the
 default nine-candidate grid. All 55 cells and their 495 candidate records are
 successful; no cells are missing. The shared n=200/source-noise=0.01 cell is
 repeated across the two experiments, so there are 50 distinct datasets. All
 winning optimization runs reach the 500-update budget without meeting the
 stationarity tolerance. Selection can retain an earlier iterate.
 
-Reproduce or resume the pilot and regenerate its comparison from saved paper
+The original pilot commands below require its matching historical source and
+environment. Current reruns must use fresh output roots; the later source
+fingerprint and selection rule differ. The comparison also uses saved paper
 curves and the earlier fixed-parameter pilot:
 
 ```sh

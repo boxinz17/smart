@@ -34,7 +34,8 @@ def test_failed_continuations_retain_completed_checkpoint_and_exclude_better_par
         candidate_id=2, iteration_budget=3, success=False, status="numerical_stagnation",
         termination_reason="numerical_stagnation")]
     assert tuned.diagnostics_["budget_statuses"][-1] == dict(iteration_budget=3, success=False,
-        successful_candidates=0, failed_candidates=2, best_candidate_id=None, best_validation_mse=None)
+        successful_candidates=0, failed_candidates=2, best_candidate_id=None, best_validation_mse=None,
+        best_selection_score=None)
     assert tuned.diagnostics_["successful_candidate_fits"] == 2
     assert tuned.diagnostics_["failed_candidate_fits"] == 2
 

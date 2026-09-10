@@ -207,6 +207,8 @@ def main():
             "Figure aggregates do not permit paired tests against newly run seed-level results.",
         ],
         "row_count": len(rows), "sources": sources,
+        "csv": {"file": "v1_simulation_curves.csv",
+                "sha256": hashlib.sha256((args.output_dir / "v1_simulation_curves.csv").read_bytes()).hexdigest()},
     }
     (args.output_dir / "provenance.json").write_text(json.dumps(metadata, indent=2) + "\n")
     print(f"Extracted {len(rows)} plotted points from three PDFs into {args.output_dir}")
