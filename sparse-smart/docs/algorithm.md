@@ -19,8 +19,10 @@ the manuscript or asserting that its fixed-iteration theorem covers them.
 
 ## Initialization and fixed coordinates
 
-Independent response-wise Lasso solves the entrywise penalty with `1/(2n)`
-normalization, no intercept, and no design rescaling. The returned coefficient
+Ordinary multi-output Lasso solves the independent response-wise entrywise
+penalties in one call with `1/(2n)` normalization, no intercept, and no design
+rescaling. Exactly zero responses bypass the numerical solve; warning and
+optimality diagnostics remain per-response where applicable. The returned coefficient
 is a numerical minimizer; it is not asserted to be the minimum-Frobenius-norm
 member of a nonunique minimizer set. Scikit-learn convergence warnings and an
 independent KKT residual are recorded. KKT tolerance is the maximum of
@@ -40,6 +42,9 @@ The same SVD tolerance applies to source preparation and initialization.
 Source completion projects coordinate vectors in index order and uses two
 orthogonalization passes. Residual norms below `tie_tol` are discarded.
 Exact source inputs are checked against `orthogonality_tol` and kept as supplied.
+Thin SVD null-space completion stops at its required column count; the result
+is the identical prefix of full coordinate-order completion. Noisy working
+frames still require full completion.
 
 Row-energy ordering uses exact computed energy ties, broken by original index.
 The screening eigenvalue threshold has `32*eps` absolute slack. The CPQR
@@ -62,6 +67,11 @@ Thresholding zeros therefore remain zeros in the weighted nonanchor factors.
 The gradient includes inactive coordinates, allowing supports to change.
 No polar projection follows a thresholded affine update. Source frames,
 anchors, reference rotations, penalties, and support limits remain fixed.
+Repeated current/trial evaluations reuse a two-entry chart cache keyed by exact
+state and geometry values. In-place input changes invalidate entries, public
+factor outputs are independent copies, and serialization drops cached work.
+Skew index arrays are shared and immutable. History anchor margins reuse the
+square-root eigenvalues rather than decomposing the anchor factors again.
 
 ## Original chart solver: acceptance and finite precision
 
@@ -72,6 +82,9 @@ quadratic support subproblem. The trial must pass the chart domain, displacement
 and `F(w) <= F(x) - L*||w-x||^2/4` checks. There is no permissive uphill
 acceptance tolerance. An additive constant outside the exact right source span
 is removed only during comparisons and restored in reported objectives.
+Both solvers evaluate the objective difference through the stable residual
+identity described below. This also prevents an irreducible response component
+inside the working span from rounding away an increase or required decrease.
 
 `max_backtracks` limits doublings; zero still allows the first trial.
 Finite-precision overflow produces a numerical failure or rejected trial.
@@ -80,8 +93,9 @@ A trial at floating-point resolution with an unresolved independently computed
 projected residual produces a numerical or active-constraint stall. This is a
 numerical safeguard, not a proof of stationarity. With no stationarity stopping
 requested, zero steps whose mapping is resolved can count toward T. No
-convergence-to-global-optimum claim is made. Version 0.4 leaves this solver's
-update and acceptance rules unchanged, including their use in prescribed mode.
+convergence-to-global-optimum claim is made. The update direction, inverse-step
+reset, and mathematical acceptance inequality remain the prescribed rules;
+the shared stable difference calculation repairs their floating-point evaluation.
 
 ## Practical projection and validation extensions (0.2)
 
@@ -153,6 +167,17 @@ from the original Z-coordinate diagnostics. Full caps are required because
 adding a hard cardinality cap makes the proximal subproblem nonconvex; auto
 mode retains the chart solver for that case. Rank admissibility is unchanged.
 
+Support reporting distinguishes effective numerical support from literal
+nonzeros. In the approximate anchor solver, each Z block uses reporting
+threshold `max(1e-10*scale,64*eps*scale)`, with
+`scale=max(1,max(abs(Z)))`. `supports_` and history `support_u`/`support_v`
+use that threshold; `raw_supports_` and `raw_support_u`/`raw_support_v`
+retain literal counts. The thresholds are exposed in `support_tolerances_`
+and the corresponding history fields. The original chart solver uses threshold
+zero. Reporting never modifies a state, objective, or feasibility test;
+`support_cap_reached` remains literal, with `effective_support_cap_reached`
+available separately. These counts do not certify statistical support recovery.
+
 ## Budget checkpoints and numerical stability (0.4)
 
 ### Successful checkpoints remain eligible
@@ -162,8 +187,12 @@ T, preserving the original single-budget behavior, including T=0. An explicit
 schedule must consist of positive strictly increasing integers whose last
 value is T. For example, `(500,2000)` runs each candidate once with budget 500
 and independently again with budget 2000. The training and validation arrays
-are split or validated once and reused unchanged. Initializers are recomputed;
-there is no state resume or warm start between candidates or budgets.
+are split or validated once and reused unchanged. Source preparation and data
+projections are cached within this call, and identical Lasso/anchor results
+are cached per initialization configuration. Support thresholding and all
+refinement state remain candidate-specific. Cached preparations are not reused
+by a later `fit`, and public fitted arrays are copied independently. There is
+no optimization-state resume or warm start between candidates or budgets.
 Calling `fit` again clears all checkpoints from the previous call.
 
 Budgets are traversed in increasing order, with the existing parameter-grid
@@ -193,7 +222,7 @@ is no implicit refit on training plus validation data, and coefficient truth
 does not select a budget. Validation scores used repeatedly for this selection
 are not independent test-error estimates.
 
-### Stable objective differences in the practical anchor solver
+### Stable objective differences in both solvers
 
 For a proposed fixed-chart update, let R be the current working prediction
 residual and Delta be the prediction change. The smooth-loss difference is
@@ -203,24 +232,23 @@ changes in `abs(Z_u)` and `abs(Z_v)`. This avoids subtracting two complete
 objective values that can round to the same number near stationarity.
 
 The acceptance condition remains
-`objective_change <= -L*||y_trial-y||^2/4` in H coordinates, together with the
-original chart feasibility and displacement checks. No uphill tolerance is
+`objective_change <= -L*||y_trial-y||^2/4` in H coordinates for the anchor solver,
+or the same inequality in Z chart coordinates for the original solver, together
+with the original feasibility and displacement checks. No uphill tolerance is
 introduced. The recorded objective is still the original objective, including
 any constant loss outside the exact-source right span; that constant cancels
 from the difference. Identically rounded recorded objectives alone therefore
 do not imply that the stable difference was zero.
 
-The first trial starts at the configured inverse step size `initial_L`.
-Subsequent iterations start at `max(initial_L,last_accepted_L/2)`, then double
-L for rejected trials. This carries forward useful line-search information
-while allowing larger trial steps again. It is confined to the practical
-anchor solver and does not warm-start another candidate. The diagnostic
-reference remains `L_ref=clip(initial_L,1,1000)`, fixed throughout the fit;
-backtracking cannot manufacture a small stationarity residual by increasing L.
+Every iteration in both solvers starts its line search at the calibrated
+inverse step size `initial_L`, then doubles L for rejected trials. The
+feasibility, displacement, and sufficient-decrease checks remain unchanged.
+The diagnostic reference remains `L_ref=clip(initial_L,1,1000)`, fixed throughout
+the fit; backtracking cannot manufacture a small stationarity residual by
+increasing L.
 `line_search_start_inverse` records the initial trial inverse step at each
-iteration. The estimator reports
-`line_search_strategy="previous_accepted_half_inverse"` for this solver and
-`"reset_initial_inverse"` for the original chart solver.
+iteration. The estimator reports `line_search_strategy="reset_initial_inverse"`
+for both solvers.
 
 ### Inner accuracy and the constrained stationarity diagnostic
 
@@ -266,8 +294,9 @@ optimality or the manuscript's statistical assumptions.
 
 `checkpoint_execution="continuous"` in the tuner performs one initialization
 and one uninterrupted refinement call per hyperparameter grid point. The
-internal H state, gradient, and successful line-search inverse remain in the
-solver across all checkpoints. No H/Z round trip is used to restart an update.
+internal H state and gradient remain in the solver across all checkpoints;
+each iteration uses the ordinary reset to the calibrated inverse step size.
+No H/Z round trip is used to restart an update.
 The default independent-budget mode is unchanged.
 
 The capture schedule is the union of iteration zero, multiples of
@@ -286,6 +315,12 @@ truncated histories, and selected/terminal diagnostics without fitting. Views
 are independent of the ongoing or failed parent estimator's mutable arrays.
 Nonfinite objective/gradient callback records do not become successful
 checkpoints. Capturing state is not a disk-resume protocol.
+
+Continuous tuning compares stored validation minima and lightweight prefix
+metadata first, then constructs models only for retained budget winners. The
+global winner reuses its budget's fitted view. Checkpoint copies omit derived
+dense coefficient/factor arrays before reconstructing them for the requested
+prefix; mutable public outputs remain independent of the parent and other views.
 
 For each requested cap, the continuous tuner evaluates the latest successful
 checkpoint at or below that cap for each grid point. A certified stationary

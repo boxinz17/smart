@@ -136,3 +136,49 @@ def test_chart_rejects_malformed_arrays_and_metadata():
         chart.reconstruct(x.astype(complex))
     with pytest.raises(ValueError, match="response"):
         chart.value_gradient(x, np.zeros((2, 7)), np.zeros((3, 6)))
+
+
+def test_repeated_state_evaluation_reuses_geometry_without_aliasing(monkeypatch):
+    chart, state = make_chart()
+    calls = []
+    original = chart._side
+
+    def counted(*args, **kwargs):
+        calls.append(None)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(chart, "_side", counted)
+    design, response = np.eye(chart.n_u), np.zeros((chart.n_u, chart.n_v))
+    expected = chart.reconstruct(state)
+    value, gradient = chart.value_gradient(state, design, response)
+    assert chart.loss(state, design, response) == value
+    assert chart.domain_reason(state, d_lower=.1, d_upper=5., gap=.1, anchor_min=.01) is None
+    assert len(calls) == 2
+    assert np.isfinite(gradient).all()
+    exposed = chart.reconstruct(state)
+    for array in exposed:
+        assert array.flags.writeable
+        array[:] = -999
+    for actual, wanted in zip(chart.reconstruct(state), expected):
+        np.testing.assert_array_equal(actual, wanted)
+    # Mutation of an existing state object must not be mistaken for a cache hit.
+    state[chart.d_slice] += .1
+    altered = chart.reconstruct(state)
+    assert len(calls) == 4
+    assert not np.array_equal(altered[1], expected[1])
+
+
+def test_chart_copy_recomputes_after_geometry_mutation():
+    from copy import deepcopy
+    chart, state = make_chart()
+    original = chart.reconstruct(state)
+    copied = deepcopy(chart)
+    copied.reconstruct(state)
+    copied.center_u.setflags(write=True)
+    copied.center_u *= -1
+    left, singular, right = copied.reconstruct(state)
+    np.testing.assert_array_equal(left[copied.anchors_u], -original[0][copied.anchors_u])
+    np.testing.assert_array_equal(left[copied.complement_u], original[0][copied.complement_u])
+    np.testing.assert_array_equal(singular, original[1])
+    np.testing.assert_array_equal(right, original[2])
+    np.testing.assert_array_equal(chart.reconstruct(state)[0], original[0])

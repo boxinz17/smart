@@ -9,6 +9,7 @@ solve, including when the square root has repeated eigenvalues.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from numbers import Integral
 
 import numpy as np
@@ -24,6 +25,15 @@ def _real_array(value, name: str) -> np.ndarray:
     return result
 
 
+@lru_cache(maxsize=32)
+def _skew_indices(rank):
+    """Immutable indices shared by the many small skew-coordinate operations."""
+    upper = np.triu_indices(rank, 1)
+    for indices in upper:
+        indices.setflags(write=False)
+    return upper
+
+
 def skew_matrix(coordinates, rank: int) -> np.ndarray:
     """Expand upper-triangular coordinates in a Frobenius-orthonormal basis.
 
@@ -36,7 +46,7 @@ def skew_matrix(coordinates, rank: int) -> np.ndarray:
     coordinates = _real_array(coordinates, "skew coordinates")
     if coordinates.shape != (rank * (rank - 1) // 2,):
         raise ValueError("skew coordinates have the wrong shape")
-    upper = np.triu_indices(rank, 1)
+    upper = _skew_indices(int(rank))
     matrix = np.zeros((rank, rank), dtype=np.float64)
     matrix[upper] = coordinates / np.sqrt(2.0)
     matrix[(upper[1], upper[0])] = -matrix[upper]
@@ -50,7 +60,7 @@ def skew_coordinates(matrix) -> np.ndarray:
         raise ValueError("skew matrix must be square")
     if not np.allclose(matrix, -matrix.T, rtol=0.0, atol=1e-12):
         raise ValueError("matrix must be skew-symmetric")
-    upper = np.triu_indices(matrix.shape[0], 1)
+    upper = _skew_indices(matrix.shape[0])
     return (matrix[upper] - matrix[(upper[1], upper[0])]) / np.sqrt(2.0)
 
 
@@ -82,7 +92,10 @@ class AnchorChart:
         self.center_u = self._center(center_u, "center_u")
         self.center_v = self._center(center_v, "center_v")
         self._skew_size = self.rank * (self.rank - 1) // 2
-        self._upper = np.triu_indices(self.rank, 1)
+        self._upper = _skew_indices(self.rank)
+        self._identity = np.eye(self.rank)
+        self._identity.setflags(write=False)
+        self._parts_cache = {}
         self.omega_u_slice = slice(0, self._skew_size)
         self.omega_v_slice = slice(self._skew_size, 2 * self._skew_size)
         self.d_slice = slice(2 * self._skew_size, self.rank**2)
@@ -96,6 +109,11 @@ class AnchorChart:
             self.complement_v, self.center_u, self.center_v,
         ):
             array.flags.writeable = False
+
+    def __getstate__(self):
+        # Reconstructed factors are disposable work, not fitted state. Avoid
+        # retaining or copying them when serializing/copying checkpoint views.
+        return {**self.__dict__, "_parts_cache": {}}
 
     @staticmethod
     def _anchors(value, dimension, name):
@@ -168,7 +186,7 @@ class AnchorChart:
 
     def _side(self, omega, d, z, center, anchors, complement, dimension):
         omega_matrix = skew_matrix(omega, self.rank)
-        identity = np.eye(self.rank)
+        identity = self._identity
         inverse = np.linalg.solve(identity - omega_matrix, identity)
         rotation = center @ (2.0 * inverse - identity)
         with np.errstate(over="raise", divide="raise", invalid="raise"):
@@ -192,13 +210,32 @@ class AnchorChart:
         omega_u, omega_v, d, z_u, z_v = self.unpack(x)
         if np.any(d <= 0.0):
             raise ValueError("singular values must be positive")
+        # A line search repeatedly checks the same current and trial states.
+        # Key by values, not array identity: callers may mutate states in place.
+        # Include fixed geometry so even an explicitly modified chart/copy
+        # cannot reuse stale factors. Two entries bound the extra storage.
+        key = (np.asarray(x, dtype=np.float64).tobytes(), *(array.tobytes() for array in
+               (self.center_u, self.center_v, self.anchors_u, self.anchors_v,
+                self.complement_u, self.complement_v)))
+        if key in self._parts_cache:
+            parts = self._parts_cache.pop(key)
+            self._parts_cache[key] = parts
+            return parts
         P, u_parts = self._side(
             omega_u, d, z_u, self.center_u, self.anchors_u, self.complement_u, self.n_u,
         )
         Q, v_parts = self._side(
             omega_v, d, z_v, self.center_v, self.anchors_v, self.complement_v, self.n_v,
         )
-        return P, d, Q, u_parts, v_parts
+        # Never cache a view of a caller's mutable singular-value block.
+        d = d.copy()
+        parts = P, d, Q, u_parts, v_parts
+        for array in (P, d, Q, *u_parts, *v_parts):
+            array.setflags(write=False)
+        if len(self._parts_cache) == 2:
+            self._parts_cache.pop(next(iter(self._parts_cache)))
+        self._parts_cache[key] = parts
+        return parts
 
     def reconstruct(self, x) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Return orthonormal factors P, positive singular values d and Q.
@@ -207,7 +244,8 @@ class AnchorChart:
         are never clipped to manufacture a feasible trial.
         """
         P, d, Q, _, _ = self._parts(x)
-        return P, d.copy(), Q
+        # Public results remain independent, writable arrays.
+        return P.copy(), d.copy(), Q.copy()
 
     def domain_reason(self, x, *, d_lower, d_upper, gap, anchor_min) -> str | None:
         """Return None in the manuscript domain, otherwise the failed check."""
@@ -243,7 +281,7 @@ class AnchorChart:
     def loss(self, x, design, response) -> float:
         """Smooth projected loss ||response - design P D Q.T||_F^2 / (2n)."""
         design, response = self._data(design, response)
-        P, d, Q = self.reconstruct(x)
+        P, d, Q, _, _ = self._parts(x)
         residual = ((design @ P) * d) @ Q.T - response
         value = float(np.sum(residual * residual) / (2.0 * design.shape[0]))
         if not np.isfinite(value):

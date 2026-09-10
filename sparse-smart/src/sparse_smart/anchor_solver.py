@@ -28,6 +28,7 @@ from .calibration import Margins, ResolvedCalibration
 from .chart import AnchorChart, skew_coordinates, skew_matrix
 from .solver import _integer, _penalty, _record, _result, RefinementResult
 from .spectral import project_singular_values
+from .objective import loss_context as _loss_context, objective_change as _objective_change
 
 
 @dataclass(frozen=True)
@@ -277,39 +278,6 @@ def _mapping(chart, state, gradient, reference_L, penalties, margins, tolerance,
         return float("inf"), raw, reference_L, str(error), None, None, 0, False
 
 
-def _loss_context(chart, state, design, response):
-    P, d, Q = chart.reconstruct(state)
-    projected = design @ P
-    residual = (projected * d) @ Q.T - response
-    return P, d, Q, projected, residual
-
-
-def _objective_change(chart, state, trial, design, response, penalties, *, context=None):
-    """Original objective difference without subtracting two large losses.
-
-    Factor differences telescope the prediction change. The quadratic identity
-    and per-entry L1 changes retain small decreases even when the separately
-    recorded objective values round to the same float. No acceptance slack is
-    added, and the unchanged sufficient-decrease threshold still applies.
-    """
-    P, d, Q, projected, residual = (_loss_context(chart, state, design, response)
-                                   if context is None else context)
-    next_P, next_d, next_Q = chart.reconstruct(trial)
-    delta_prediction = (((design @ (next_P - P)) * next_d) @ next_Q.T
-                        + (projected * (next_d - d)) @ next_Q.T
-                        + (projected * d) @ (next_Q - Q).T)
-    # Extended accumulation reduces cancellation in inner products without
-    # requiring a different linear-algebra backend or changing coordinates.
-    delta = (np.sum(residual * delta_prediction, dtype=np.longdouble)
-             + np.sum(delta_prediction * delta_prediction, dtype=np.longdouble) / 2) / len(design)
-    for sl, penalty in zip((chart.z_u_slice, chart.z_v_slice), penalties):
-        delta += penalty * np.sum(np.abs(trial[sl]) - np.abs(state[sl]), dtype=np.longdouble)
-    value = float(delta)
-    if not np.isfinite(value):
-        raise FloatingPointError("nonfinite objective change")
-    return value
-
-
 def refine_anchor_projected(
     chart: AnchorChart, initial_state, design, response, *,
     calibration: ResolvedCalibration, margins: Margins,
@@ -382,19 +350,20 @@ def refine_anchor_projected(
         return _result(x, "numerical_failure", str(error), 0, [])
     diagnostic = _mapping(chart, state, gradient, reference_L, penalties, margins, tolerance,
                           stationarity_tol)
-    history = [_record(chart, x, 0, smooth, penalty_value, initial_L, 0., [], loss_offset, diagnostic)]
+    history = [_record(chart, x, 0, smooth, penalty_value, initial_L, 0., [], loss_offset,
+                       diagnostic, effective_support=True)]
     if iterate_callback is not None:
         iterate_callback(0, x.copy(), history[-1])
-    last_accepted_L = initial_L
     for iteration in range(iterations):
         if stationarity_tol is not None and diagnostic[3] is None and diagnostic[0] <= stationarity_tol:
             return _result(x, "converged", "The complete fixed-chart constrained residual meets tolerance.",
                            iteration, history, termination_reason="stationarity")
-        start_L = max(initial_L, last_accepted_L / 2.)
+        # A large inverse step needed near an active constraint can be
+        # transient. Search afresh so it cannot suppress later valid movement.
+        start_L = initial_L
         L, rejects, accepted = start_L, [], False
         loss_context = _loss_context(chart, x, design, response)
         relative_scale = max(1., float(np.linalg.norm(state)))
-        reset_attempted = False
         backtrack = 0
         while backtrack <= max_backtracks:
             try:
@@ -408,13 +377,6 @@ def refine_anchor_projected(
                     or diagnostic[0] > reference_L * resolution
                     or (stationarity_tol is not None and diagnostic[0] > stationarity_tol))
                 if step_norm <= resolution and mapping_unresolved:
-                    if backtrack == 0 and L > initial_L and not reset_attempted:
-                        # An inherited small step need not mean this iterate
-                        # is stuck. Retry the original search once before
-                        # concluding that numerical resolution blocks progress.
-                        rejects.append("warm-start step at numerical resolution; reset inverse step")
-                        L, reset_attempted = initial_L, True
-                        continue
                     return _result(x, "numerical_stagnation",
                         "The feasible trial is at numerical resolution while its constrained residual is unresolved.",
                         iteration, history, rejects[-1] if rejects else None, "numerical_stagnation")
@@ -437,7 +399,6 @@ def refine_anchor_projected(
                 reason = str(error)
             if accepted:
                 state, x = trial, original_trial
-                last_accepted_L = L
                 smooth, penalty_value = trial_smooth, trial_penalty
                 try:
                     _, gradient = _value_gradient_h(chart, state, design, response)
@@ -451,7 +412,7 @@ def refine_anchor_projected(
                                             step_norm, rejects, loss_offset, diagnostic,
                                             objective_change=objective_change,
                                             relative_step_norm=step_norm / relative_scale,
-                                            line_search_start_inverse=start_L))
+                                            line_search_start_inverse=start_L, effective_support=True))
                     if iterate_callback is not None:
                         iterate_callback(iteration + 1, x.copy(), history[-1])
                     return _result(x, "numerical_failure", str(error), iteration + 1, history)
@@ -459,7 +420,7 @@ def refine_anchor_projected(
                                         step_norm, rejects, loss_offset, diagnostic,
                                         objective_change=objective_change,
                                         relative_step_norm=step_norm / relative_scale,
-                                        line_search_start_inverse=start_L))
+                                        line_search_start_inverse=start_L, effective_support=True))
                 if iterate_callback is not None:
                     iterate_callback(iteration + 1, x.copy(), history[-1])
                 break

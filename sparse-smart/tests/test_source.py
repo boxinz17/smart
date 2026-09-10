@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+import sparse_smart.source as source_module
 from sparse_smart.source import ExactSource, NoisySource, complete_basis, deterministic_svd, prepare_source
 
 
@@ -37,6 +38,50 @@ def test_basis_completion_uses_coordinate_order():
     np.testing.assert_allclose(complete, np.array([[1 / np.sqrt(2), 1 / np.sqrt(2), 0],
                                                 [1 / np.sqrt(2), -1 / np.sqrt(2), 0],
                                                 [0, 0, 1]]), atol=1e-14)
+
+
+@pytest.mark.parametrize("input_columns", [0, 3])
+def test_partial_basis_completion_preserves_full_canonical_prefix(input_columns):
+    rng = np.random.default_rng(83)
+    frame = np.linalg.qr(rng.normal(size=(20, input_columns)))[0]
+    full = complete_basis(frame)
+    for count in (input_columns, 7, 20):
+        partial = complete_basis(frame, n_columns=count)
+        assert partial.shape == (20, count)
+        np.testing.assert_array_equal(partial, full[:, :count])
+        assert not np.shares_memory(partial, frame)
+
+
+@pytest.mark.parametrize("count", [True, 1.5, -1, 1, 6])
+def test_partial_basis_completion_rejects_invalid_column_counts(count):
+    with pytest.raises(ValueError, match="n_columns"):
+        complete_basis(np.eye(5)[:, :2], n_columns=count)
+
+
+def test_rank_deficient_thin_svd_only_completes_needed_null_vectors(monkeypatch):
+    rng = np.random.default_rng(84)
+    matrix = rng.normal(size=(100, 2)) @ rng.normal(size=(2, 4))
+    complete = source_module.complete_basis
+    calls = []
+
+    def record_completion(frame, *, tol=1e-12, n_columns=None):
+        result = complete(frame, tol=tol, n_columns=n_columns)
+        calls.append((frame.shape, n_columns, result.shape))
+        return result
+
+    monkeypatch.setattr(source_module, "complete_basis", record_completion)
+    thin_result = deterministic_svd(matrix)
+    assert calls == [((100, 2), 4, (100, 4)), ((4, 2), 4, (4, 4))]
+
+    def full_completion_reference(frame, *, tol=1e-12, n_columns=None):
+        return complete(frame, tol=tol)[:, :n_columns]
+
+    monkeypatch.setattr(source_module, "complete_basis", full_completion_reference)
+    full_result = deterministic_svd(matrix)
+    for actual, expected in zip(thin_result, full_result):
+        np.testing.assert_array_equal(actual, expected)
+    U, d, Vt = thin_result
+    np.testing.assert_allclose((U * d) @ Vt, matrix, atol=1e-12)
 
 
 def test_svd_ties_and_nullspaces_use_canonical_coordinates():

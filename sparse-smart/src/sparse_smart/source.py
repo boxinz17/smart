@@ -82,15 +82,27 @@ def _canonical_subspace(frame, tol):
     raise ValueError("Could not determine a numerical coordinate-order basis; reduce tie_tol")
 
 
-def complete_basis(frame, *, tol=1e-12):
-    """Append coordinate-order orthonormal complements, preserving input columns."""
+def complete_basis(frame, *, tol=1e-12, n_columns=None):
+    """Append canonical complements up to ``n_columns`` (all rows by default).
+
+    A partial completion is exactly the corresponding prefix of a full
+    completion, including the supplied input columns and their orientation.
+    """
     frame = _real_matrix(frame, "frame")
     tol = _positive_real(tol, "tol")
     rows, columns = frame.shape
     if columns > rows or not np.isfinite(tol) or tol <= 0:
         raise ValueError("frame dimensions or tol are invalid")
+    if n_columns is None:
+        n_columns = rows
+    if (isinstance(n_columns, (bool, np.bool_))
+            or not isinstance(n_columns, (int, np.integer))
+            or not columns <= n_columns <= rows):
+        raise ValueError("n_columns must be an integer between the input column and row counts")
     if not np.allclose(frame.T @ frame, np.eye(columns), atol=max(1e-10, 10 * tol), rtol=0):
         raise ValueError("frame must have orthonormal columns")
+    if n_columns == columns:
+        return frame
     basis = [frame[:, j].copy() for j in range(columns)]
     for index in range(rows):
         vector = np.zeros(rows)
@@ -101,9 +113,9 @@ def complete_basis(frame, *, tol=1e-12):
         norm = np.linalg.norm(vector)
         if norm > tol:
             basis.append(vector / norm)
-        if len(basis) == rows:
+        if len(basis) == n_columns:
             break
-    if len(basis) != rows:
+    if len(basis) != n_columns:
         raise ValueError("Could not complete source basis; reduce tie_tol")
     return np.column_stack(basis) if rows else np.empty((0, 0))
 
@@ -135,8 +147,8 @@ def deterministic_svd(matrix, *, tie_tol=1e-12):
             V[:, start:stop] = V[:, start:stop] @ rotation
         start = stop
     if positive < len(values):
-        U[:, positive:] = complete_basis(U[:, :positive], tol=tie_tol)[:, positive:len(values)]
-        V[:, positive:] = complete_basis(V[:, :positive], tol=tie_tol)[:, positive:len(values)]
+        U[:, positive:] = complete_basis(U[:, :positive], tol=tie_tol, n_columns=len(values))[:, positive:]
+        V[:, positive:] = complete_basis(V[:, :positive], tol=tie_tol, n_columns=len(values))[:, positive:]
     for column in range(len(values)):
         nonzero = np.flatnonzero(np.abs(U[:, column]) > tie_tol)
         if nonzero.size and U[nonzero[0], column] < 0:

@@ -1,5 +1,9 @@
+import warnings
+
 import numpy as np
 import pytest
+from sklearn.exceptions import ConvergenceWarning
+from sklearn.linear_model import Lasso
 
 import sparse_smart.initialization as initialization
 from sparse_smart.initialization import reduced_lasso
@@ -81,6 +85,49 @@ def test_lasso_nonconvergence_is_reported():
     result = reduced_lasso(design, response, 2, 0.001, max_iter=1, tol=1e-12)
     assert not result.converged
     assert np.all(result.n_iter == 1)
+
+
+@pytest.mark.parametrize("nonzero_count,max_iter", [(1, 20000), (3, 20000), (3, 1)])
+def test_batched_lasso_matches_independent_response_solves(nonzero_count, max_iter, monkeypatch):
+    rng = np.random.default_rng(85)
+    design = rng.normal(size=(30, 12))
+    response = np.zeros((30, 6))
+    nonzero_columns = np.array([1, 3, 5])[:nonzero_count]
+    response[:, nonzero_columns] = rng.normal(size=(30, nonzero_count))
+    coefficients = np.zeros((12, 6))
+    dual_gaps = np.zeros(6)
+    n_iter = np.zeros(6, dtype=int)
+    warned = False
+    for column in nonzero_columns:
+        solver = Lasso(alpha=.03, fit_intercept=False, tol=1e-9,
+                       max_iter=max_iter, selection="cyclic")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ConvergenceWarning)
+            solver.fit(design, response[:, column])
+        warned |= any(issubclass(item.category, ConvergenceWarning) for item in caught)
+        coefficients[:, column] = solver.coef_
+        dual_gaps[column] = solver.dual_gap_
+        n_iter[column] = solver.n_iter_
+
+    fits = []
+
+    class RecordingLasso(Lasso):
+        def fit(self, X, y, **kwargs):
+            fits.append(y.shape)
+            return super().fit(X, y, **kwargs)
+
+    monkeypatch.setattr(initialization, "Lasso", RecordingLasso)
+    result = reduced_lasso(design, response, 2, .03, max_iter=max_iter)
+    assert fits == [(30, nonzero_count)]
+    np.testing.assert_allclose(result.coefficient, coefficients, rtol=1e-12, atol=1e-13)
+    np.testing.assert_allclose(result.dual_gaps, dual_gaps, rtol=1e-12, atol=1e-13)
+    np.testing.assert_array_equal(result.n_iter, n_iter)
+    assert result.converged == (not warned)
+    gradient = design.T @ (design @ coefficients - response) / len(design)
+    residual = np.maximum(np.abs(gradient) - .03, 0.)
+    active = coefficients != 0
+    residual[active] = np.abs(gradient[active] + .03 * np.sign(coefficients[active]))
+    np.testing.assert_allclose(result.kkt_residual, residual.max(), rtol=1e-12, atol=1e-13)
 
 
 @pytest.mark.parametrize("kwargs", [{"rank": 0, "penalty": 0.1},

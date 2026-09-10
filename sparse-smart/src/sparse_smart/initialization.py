@@ -51,28 +51,26 @@ def reduced_lasso(design, response, rank, penalty, *, tol=1e-9, max_iter=20000, 
         raise ValueError("rank exceeds the reduced coefficient dimensions")
     if not np.isfinite(penalty) or penalty <= 0 or not np.isfinite(tol) or tol <= 0:
         raise ValueError("penalty and tol must be positive")
-    coefficient = np.empty((design.shape[1], response.shape[1]))
-    dual_gaps = np.empty(response.shape[1])
-    n_iter = np.empty(response.shape[1], dtype=int)
+    coefficient = np.zeros((design.shape[1], response.shape[1]))
+    dual_gaps = np.zeros(response.shape[1])
+    n_iter = np.zeros(response.shape[1], dtype=int)
     warned = False
-    for column in range(response.shape[1]):
-        if not np.any(response[:, column]):
-            # With positive penalty, zero is the unique minimizer for y=0.
-            # Some sklearn versions warn after exhausting max_iter because
-            # their response-scaled dual-gap tolerance is also exactly zero.
-            # Use exact equality: tiny nonzero responses still need a solve.
-            coefficient[:, column] = 0.
-            dual_gaps[column] = 0.
-            n_iter[column] = 0
-            continue
+    # With positive penalty, zero is the unique minimizer for y=0. Exclude
+    # these columns before sklearn's response-scaled stopping rule, whose
+    # tolerance would also be zero. Tiny nonzero responses still need a solve.
+    nonzero_columns = np.any(response, axis=0)
+    if np.any(nonzero_columns):
+        # Ordinary multi-output Lasso solves the same independent entrywise
+        # penalties while sharing design validation and Fortran-order copying.
         solver = Lasso(alpha=penalty, fit_intercept=False, tol=tol, max_iter=max_iter, selection="cyclic")
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", ConvergenceWarning)
-            solver.fit(design, response[:, column])
-        warned |= any(issubclass(item.category, ConvergenceWarning) for item in caught)
-        coefficient[:, column] = solver.coef_
-        dual_gaps[column] = float(solver.dual_gap_)
-        n_iter[column] = int(solver.n_iter_)
+            solver.fit(design, response[:, nonzero_columns])
+        warned = any(issubclass(item.category, ConvergenceWarning) for item in caught)
+        # sklearn squeezes its outputs when exactly one response is fitted.
+        coefficient[:, nonzero_columns] = np.atleast_2d(solver.coef_).T
+        dual_gaps[nonzero_columns] = np.atleast_1d(solver.dual_gap_)
+        n_iter[nonzero_columns] = np.atleast_1d(solver.n_iter_)
     if not np.isfinite(coefficient).all() or not np.isfinite(dual_gaps).all():
         raise InitializationFailure("Lasso returned nonfinite coefficients or dual gaps")
     gradient = design.T @ (design @ coefficient - response) / design.shape[0]

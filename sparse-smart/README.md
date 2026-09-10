@@ -169,16 +169,19 @@ constraints. Gradients and step norms for this solver use the H-coordinate
 metric, identified in `diagnostics_["diagnostic_coordinates"]`.
 
 The practical anchor solver compares objective differences directly to reduce
-cancellation near a stationary point. After the first update, its next trial
-starts at `max(initial_L, last_accepted_L / 2)`; rejected trials still double
-the inverse step size. The stationarity mapping keeps a fixed reference
-inverse step size, independent of this trial adaptation. Its reported residual
+cancellation near a stationary point. Each iteration starts its line search
+at the calibrated inverse step size `initial_L`; rejected trials double it.
+Feasibility, trial-radius, and sufficient-decrease checks are unchanged.
+The stationarity mapping keeps a fixed reference inverse step size,
+independent of backtracking. Its reported residual
 separates mapping displacement from an allowance for the inner proximal solve;
 when that allowance prevents a possible stationarity decision, the diagnostic
 solve is tightened. Roundoff allowances remain active even when a stricter
-inner tolerance is requested. Unresolved numerical stalls remain failures. The original
-chart solver, including the prescribed update rule, is unchanged by these
-0.4 changes. See [the numerical policy](docs/algorithm.md) for details.
+inner tolerance is requested. Unresolved numerical stalls remain failures. Both
+solvers now use the stable objective-difference calculation for acceptance;
+the chart solver retains its prescribed update direction and resets its trial
+inverse step size each iteration. See [the numerical policy](docs/algorithm.md)
+for details.
 
 Prescribed fits, smaller hard support caps, and `spectral_step="reject"` use
 the original `"chart"` solver under `auto`. An explicit `"anchor_projected"`
@@ -226,6 +229,11 @@ independently, using the same training and validation rows; it does not resume
 the shorter fit or warm-start from another candidate. Thus `(500, 2000)` costs
 both sets of fits. There is no implicit refit on the combined training and
 validation rows.
+
+Within one tuner call, source preparation and data projections are shared,
+and identical Lasso initializers and anchors are reused across candidates and
+budgets. Support thresholding and refinement remain candidate-specific. A new
+`fit` starts a fresh preparation cache; fitted public arrays remain independent.
 
 `checkpoints_` maps each budget with successful candidates to that budget's
 best fitted estimator. Selection minimizes validation MSE across these
@@ -290,6 +298,17 @@ Successful fits expose `coefficient_`, `singular_values_`, `left_factors_`,
 flattened indices into each weighted nonanchor block; use the chart's
 `complement_u`/`complement_v` to map them back to rows.
 
+For `anchor_projected`, `supports_` and history `support_u`/`support_v` report
+effective numerical support: entries exceeding `1e-10 * max(1, max(abs(Z)))`
+in each side's weighted block. This avoids counting tiny residual entries from
+the approximate constrained proximal solve as signal. `raw_supports_`, history
+`raw_support_u`/`raw_support_v`, and `raw_fitted_support_counts` in diagnostics
+retain literal nonzeros. `support_tolerances_` and history
+`support_tolerance_u`/`support_tolerance_v` record the thresholds. The `chart`
+solver uses zero reporting tolerance. Coefficients are never thresholded for
+reporting, and hard-cap checks and `support_cap_reached` use literal support.
+Effective support is a numerical convention, not a statistical support guarantee.
+
 The history contains the initial state and every accepted update's objective,
 smooth loss, penalty, support counts, anchor margins, inverse step size,
 step norm, and rejected-trial reasons. Reported loss includes the constant
@@ -300,8 +319,8 @@ For the practical anchor solver, inspect `mapping_displacement`,
 `mapping_precision_limited` in `diagnostics_`; `last_` versions describe the
 terminal state. The selected state also reports `objective_change` and
 `relative_step_norm`. History records `line_search_start_inverse`, and
-`line_search_strategy` distinguishes the practical adaptive trial start from
-the original solver's reset. These are floating-point diagnostics, not
+`line_search_strategy="reset_initial_inverse"` identifies the per-iteration
+reset in both solvers. These are floating-point diagnostics, not
 rigorous interval certificates. The terminal `precision_limited` flag marks
 numerical stagnation or a precision-limited mapping; it does not imply
 `optimization_converged` or make a failed partial fit eligible.
@@ -358,10 +377,11 @@ tuner.fit(X_train, Y_train, source=source,
 
 Each grid point has one initializer and one solver trajectory. Validation is
 evaluated at iteration zero, every 250 updates, all comparison budgets, and
-an earlier stationary endpoint if needed. The optimization state and the warm
-line-search state continue unchanged between checkpoints. The validation
-sample never enters the updates. Both earlier successful prefixes and their
-best validation states remain available after a later numerical failure.
+an earlier stationary endpoint if needed. The optimization state continues
+between checkpoints, with the usual inverse-step reset at each iteration.
+The validation sample never enters the updates. Both earlier successful
+prefixes and their best validation states remain available after a later
+numerical failure.
 The original independent-budget mode remains the default.
 
 `trajectory_models_` and `trajectory_history_` contain one entry per grid
@@ -371,6 +391,9 @@ view without optimization. That view's `coefficient_` is the selected state;
 `last_coefficient_` is the checkpoint endpoint. At the lower level, pass
 `checkpoint_iterations` and `validation_interval` directly to `SparseSMART`.
 Checkpoint capture is in memory; it is not process-restart support.
+The tuner compares stored checkpoint scores and diagnostics before constructing
+independent fitted models for retained budget winners. This avoids building
+dense coefficient matrices for every grid-by-budget checkpoint.
 
 Continuous tuner `selection_history_` records remain in budget-major order.
 `success` describes a retained, completed prefix; `budget_reached` separately
@@ -409,6 +432,11 @@ identical data across budgets, and reproduction of shorter validation prefixes.
 Dense arrays are used. The initializer stores an `r0` by `r0`
 coefficient. Noisy full frames cost `O(p^2+q^2)` storage and their deterministic
 completion can be expensive. Fitting uses low-rank prediction products and
-does not form a `p*q` Jacobian; the physical coefficient is formed once on
-return. The implementation is numerical research software, not a
+does not form a `p*q` Jacobian; selected and terminal physical coefficients are
+materialized on return. Ordinary multi-output Lasso shares design processing
+across responses. Thin SVD null-space completion stops at the required number
+of columns, preserving the canonical basis prefix. A bounded two-state chart
+cache reuses factor reconstruction and square-root decompositions during
+backtracking, while public reconstructed arrays remain independent.
+The implementation is numerical research software, not a
 finite-precision statistical guarantee or a global optimizer.

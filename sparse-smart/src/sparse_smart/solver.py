@@ -9,6 +9,8 @@ from .calibration import Margins, ResolvedCalibration
 from .chart import AnchorChart
 from .thresholding import threshold_step
 from .spectral import project_singular_values
+from .objective import loss_context, objective_change
+from .support import coordinate_support
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,10 @@ class IterationRecord:
     objective_change: float | None = None
     relative_step_norm: float | None = None
     line_search_start_inverse: float | None = None
+    raw_support_u: int | None = None
+    raw_support_v: int | None = None
+    support_tolerance_u: float = 0.
+    support_tolerance_v: float = 0.
 
 
 @dataclass
@@ -70,17 +76,22 @@ def _penalty(chart, x, penalty):
 
 
 def _record(chart, x, t, smooth, penalty_value, L, step_norm, rejects, offset, diagnostic,
-            *, objective_change=None, relative_step_norm=None, line_search_start_inverse=None):
-    P, _, Q = chart.reconstruct(x)
+            *, objective_change=None, relative_step_norm=None, line_search_start_inverse=None,
+            effective_support=False):
+    _, _, _, u_parts, v_parts = chart._parts(x)
+    support_u, tolerance_u = coordinate_support(x[chart.z_u_slice], effective=effective_support)
+    support_v, tolerance_v = coordinate_support(x[chart.z_v_slice], effective=effective_support)
     return IterationRecord(
         t, float(smooth + penalty_value + offset), float(smooth + offset),
         float(penalty_value), float(L), float(step_norm), len(rejects),
-        int(np.count_nonzero(x[chart.z_u_slice])), int(np.count_nonzero(x[chart.z_v_slice])),
-        float(np.linalg.svd(P[chart.anchors_u], compute_uv=False)[-1]),
-        float(np.linalg.svd(Q[chart.anchors_v], compute_uv=False)[-1]), tuple(rejects),
+        len(support_u), len(support_v),
+        float(np.min(u_parts[-1])), float(np.min(v_parts[-1])), tuple(rejects),
         *diagnostic,
         objective_change=objective_change, relative_step_norm=relative_step_norm,
         line_search_start_inverse=line_search_start_inverse,
+        raw_support_u=int(np.count_nonzero(x[chart.z_u_slice])),
+        raw_support_v=int(np.count_nonzero(x[chart.z_v_slice])),
+        support_tolerance_u=tolerance_u, support_tolerance_v=tolerance_v,
     )
 
 
@@ -228,6 +239,7 @@ def refine(
             return _result(x, "converged", "The spectral/support projected gradient mapping meets tolerance.",
                            t, history, termination_reason="stationarity")
         L = initial_L  # The manuscript resets L at every accepted iterate.
+        context = loss_context(chart, x, design, response)
         rejects = []
         accepted = False
         for trial in range(max_backtracks + 1):
@@ -256,10 +268,11 @@ def refine(
                         trial_smooth = chart.loss(w, design, response)
                         trial_pen = _penalty(chart, w, penalty)
                         trial_obj = trial_smooth + trial_pen
+                        change = objective_change(chart, x, w, design, response, penalty, context=context)
                         required = .25 * L * step_norm**2
                         if not np.isfinite(trial_obj) or not np.isfinite(required):
                             reason = "nonfinite trial objective or decrease"
-                        elif trial_obj <= smooth + pen - required:
+                        elif change <= -required:
                             accepted = True
                         else:
                             reason = "insufficient objective decrease"
@@ -274,11 +287,13 @@ def refine(
                     diagnostic = _mapping(chart, x, grad, reference_L, penalty, limits, margins, domain_args)
                 except (ValueError, np.linalg.LinAlgError, FloatingPointError) as error:
                     diagnostic = (float("inf"), float("inf"), reference_L, str(error))
-                    history.append(_record(chart, x, t + 1, smooth, pen, L, step_norm, rejects, loss_offset, diagnostic))
+                    history.append(_record(chart, x, t + 1, smooth, pen, L, step_norm, rejects, loss_offset,
+                                           diagnostic, objective_change=change))
                     if iterate_callback is not None:
                         iterate_callback(t + 1, x.copy(), history[-1])
                     return _result(x, "numerical_failure", str(error), t + 1, history)
-                history.append(_record(chart, x, t + 1, smooth, pen, L, step_norm, rejects, loss_offset, diagnostic))
+                history.append(_record(chart, x, t + 1, smooth, pen, L, step_norm, rejects, loss_offset,
+                                       diagnostic, objective_change=change))
                 if iterate_callback is not None:
                     iterate_callback(t + 1, x.copy(), history[-1])
                 break

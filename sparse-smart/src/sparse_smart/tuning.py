@@ -14,7 +14,7 @@ import time
 import numpy as np
 
 from .calibration import Margins, PracticalCalibration
-from .estimator import FitFailure, SparseSMART, _data
+from .estimator import FitFailure, SparseSMART, _FitPreparationCache, _data
 from .source import ExactSource, NoisySource
 
 
@@ -178,7 +178,7 @@ class SparseSMARTTuner:
             raise ValueError("candidate validation loss is nonfinite")
         return score
 
-    def _continuous_search(self, grid, Xtr, Ytr, Xv, Yv, source):
+    def _continuous_search(self, grid, Xtr, Ytr, Xv, Yv, source, preparation):
         """Fit each grid point once; compare certified prefixes at each cap.
 
         A prefix completed at a scheduled checkpoint is a successful finite
@@ -211,6 +211,7 @@ class SparseSMARTTuner:
                     initialization_spectrum=self.initialization_spectrum,
                     refinement_solver=self.refinement_solver,
                     checkpoint_iterations=schedule, validation_interval=self.checkpoint_interval_)
+                model._fit_cache = preparation
                 model.fit(Xtr, Ytr, source=source, validation_data=(Xv, Yv))
             except (ValueError, np.linalg.LinAlgError, FloatingPointError, ArithmeticError, FitFailure) as error:
                 exception = error
@@ -228,6 +229,7 @@ class SparseSMARTTuner:
 
         budget_scores, winner_ids = {}, {}
         for budget in self.iteration_budgets_:
+            budget_records = []
             for grid_id, (full_model, trajectory) in enumerate(zip(self.trajectory_models_, self.trajectory_history_)):
                 candidate_id = len(self.selection_history_)
                 record = dict(candidate_id=candidate_id, grid_candidate_id=grid_id,
@@ -250,29 +252,46 @@ class SparseSMARTTuner:
                 if available:
                     endpoint = max(available)
                     try:
-                        checkpoint = full_model.checkpoint_model(endpoint)
-                        if not checkpoint.success_:
-                            raise FitFailure(checkpoint.status_, "Checkpoint is not a successful prefix")
-                        score = self._validation_mse(checkpoint, Xv, Yv)
-                        record.update(success=True, status=checkpoint.status_, message=checkpoint.message_,
-                            validation_mse=score, has_partial_coefficient=False,
-                            selected_iteration=checkpoint.selected_iteration_, n_iter=checkpoint.n_iter_,
-                            termination_reason=checkpoint.termination_reason_,
-                            validation_history=checkpoint.validation_history_,
-                            diagnostics=checkpoint.diagnostics_.copy(),
+                        summary = full_model._checkpoint_summary(endpoint)
+                        score = summary["validation_mse"]
+                        if not summary["success"]:
+                            raise FitFailure(summary["status"], "Checkpoint is not a successful prefix")
+                        if score is None or not np.isfinite(score):
+                            raise ValueError("checkpoint validation loss is nonfinite")
+                        record.update(summary, has_partial_coefficient=False,
                             trajectory_checkpoint_iteration=endpoint,
                             budget_reached=(endpoint == budget or terminal_stationary))
-                        if budget not in budget_scores or score < budget_scores[budget]:
-                            self.checkpoints_[budget] = checkpoint
-                            budget_scores[budget], winner_ids[budget] = score, candidate_id
-                        if self.best_score_ is None or score < self.best_score_:
-                            self.best_score_, self.best_params_ = score, record["params"].copy()
-                            self.model_ = self.estimator_ = checkpoint
-                            self.selected_budget_, self.selected_candidate_id_ = budget, candidate_id
                     except (ValueError, np.linalg.LinAlgError, FloatingPointError, ArithmeticError, FitFailure) as error:
                         record.update(success=False, status=type(error).__name__, message=str(error),
                                       validation_mse=None, budget_reached=False)
                 self.selection_history_.append(record)
+                budget_records.append(record)
+            # The snapshots already contain the validation minima observed
+            # during fitting. Construct an independent dense model only for
+            # the final winner, trying the next candidate if reconstruction
+            # or prediction validation fails.
+            for record in sorted((r for r in budget_records if r["success"]),
+                                 key=lambda r: r["validation_mse"]):
+                try:
+                    checkpoint = self.trajectory_models_[record["grid_candidate_id"]].checkpoint_model(
+                        record["trajectory_checkpoint_iteration"])
+                    if not checkpoint.success_:
+                        raise FitFailure(checkpoint.status_, "Checkpoint is not a successful prefix")
+                    checked_score = self._validation_mse(checkpoint, Xv, Yv)
+                    score = record["validation_mse"]
+                    if not np.isclose(checked_score, score, rtol=1e-10, atol=1e-12):
+                        raise ValueError("checkpoint predictions disagree with its recorded validation loss")
+                except (ValueError, np.linalg.LinAlgError, FloatingPointError, ArithmeticError, FitFailure) as error:
+                    record.update(success=False, status=type(error).__name__, message=str(error),
+                                  validation_mse=None, budget_reached=False)
+                    continue
+                self.checkpoints_[budget] = checkpoint
+                budget_scores[budget], winner_ids[budget] = score, record["candidate_id"]
+                if self.best_score_ is None or score < self.best_score_:
+                    self.best_score_, self.best_params_ = score, record["params"].copy()
+                    self.model_ = self.estimator_ = checkpoint
+                    self.selected_budget_, self.selected_candidate_id_ = budget, record["candidate_id"]
+                break
         self.diagnostics_.update(trajectory_fits=len(grid),
             successful_trajectories=sum(t["success"] for t in self.trajectory_history_),
             failed_trajectories=sum(not t["success"] for t in self.trajectory_history_))
@@ -344,8 +363,9 @@ class SparseSMARTTuner:
             "checkpoint_execution": "independent_fits",
         }
         grid = tuple(product(init_grid, grid_u, grid_v, support_grid))
+        preparation = _FitPreparationCache()
         if self.checkpoint_execution == "continuous":
-            budget_scores, budget_winner_ids = self._continuous_search(grid, Xtr, Ytr, Xv, Yv, source)
+            budget_scores, budget_winner_ids = self._continuous_search(grid, Xtr, Ytr, Xv, Yv, source, preparation)
         else:
             for candidate_id, (budget, (grid_id, values)) in enumerate(product(self.iteration_budgets_, enumerate(grid))):
                 init, pu, pv, limits = values
@@ -374,6 +394,7 @@ class SparseSMARTTuner:
                         initialization_spectrum=self.initialization_spectrum,
                         refinement_solver=self.refinement_solver,
                     )
+                    model._fit_cache = preparation
                     model.fit(Xtr, Ytr, source=source, validation_data=(Xv, Yv))
                     record.update(success=bool(model.success_), status=model.status_,
                                   message=model.message_, n_iter=int(model.n_iter_),

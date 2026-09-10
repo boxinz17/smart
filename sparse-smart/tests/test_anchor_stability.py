@@ -79,56 +79,55 @@ def test_solver_accepts_certified_decrease_when_recorded_objectives_round_equal(
         assert row.objective_change <= -.25*row.step_size_inverse*row.step_norm**2
 
 
-def test_warm_start_preserves_quadratic_steps_with_fewer_rejections_and_fixed_mapping_metric():
+def test_reset_search_matches_repeated_one_step_solves_with_fixed_mapping_metric():
     chart, state, design, response, margins = scalar_problem(curvature=1000.)
     options = dict(calibration=calibration(chart), margins=margins, max_backtracks=20)
-    warm = solver.refine_anchor_projected(chart, state, design, response, iterations=6, **options)
-    assert warm.success and warm.n_iter == 6
+    result = solver.refine_anchor_projected(chart, state, design, response, iterations=6, **options)
+    assert result.success and result.n_iter == 6
     reset_state, reset_rejections = state.copy(), 0
-    for row, previous in zip(warm.history[1:], warm.history):
+    for row in result.history[1:]:
         reset = solver.refine_anchor_projected(chart, reset_state, design, response, iterations=1, **options)
         assert reset.success
         reset_state = reset.state
         reset_rejections += reset.history[-1].backtracks
-        assert row.line_search_start_inverse == max(1., previous.step_size_inverse/2.)
+        assert row.line_search_start_inverse == 1.
+        assert row.step_size_inverse == reset.history[-1].step_size_inverse
+        assert row.backtracks == reset.history[-1].backtracks
         assert row.mapping_step_size_inverse == 1.
         assert row.objective_change <= -.25*row.step_size_inverse*row.step_norm**2
-    np.testing.assert_array_equal(warm.state, reset_state)
-    assert sum(row.backtracks for row in warm.history[1:]) < reset_rejections/2
-    assert warm.history[1].step_size_inverse > 100.
+    np.testing.assert_array_equal(result.state, reset_state)
+    assert sum(row.backtracks for row in result.history[1:]) == reset_rejections
+    assert result.history[1].step_size_inverse > 100.
 
 
-def test_inherited_unresolved_zero_step_retries_original_inverse(monkeypatch):
-    chart, state, design, response, margins = scalar_problem(curvature=20.)
-    real_trial, real_mapping = solver._block_trial, solver._mapping
-    huge_inverse = float(2**48)
-    flags = {'mapping': False, 'injected_zero': False}
-    def mapping(*args, **kwargs):
-        flags['mapping'] = True
-        try:
-            return real_mapping(*args, **kwargs)
-        finally:
-            flags['mapping'] = False
-    def trial(chart, current, gradient, inverse, *args, **kwargs):
-        if not flags['mapping']:
-            if np.array_equal(current, state) and inverse < huge_inverse:
-                # A transient inner-solver issue forced a huge first inverse.
-                raise ArithmeticError('transient initial proximal failure')
-            if not np.array_equal(current, state) and inverse == huge_inverse/2 and not flags['injected_zero']:
-                flags['injected_zero'] = True
-                return current.copy(), 0.
-        return real_trial(chart, current, gradient, inverse, *args, **kwargs)
-    monkeypatch.setattr(solver, '_mapping', mapping)
-    monkeypatch.setattr(solver, '_block_trial', trial)
+def test_reset_recovers_large_descent_step_after_transient_anchor_curvature():
+    chart = AnchorChart(2, 1, [0], [0], np.eye(1), np.eye(1))
+    h = np.sqrt(1.-.01**2)
+    state = chart.pack([], [], [1.], [[h]], np.empty((0, 1)))
+    design = np.sqrt(2.)*np.eye(2)
+    response = design[:, :1]
+    margins = Margins(.05, 5., .01, anchor_min=.001, trial_radius=10.)
+    states = []
+    # C=(d*sqrt(1-H**2), d*H). Near the initial small anchor, the
+    # square-root curvature forces a tiny step. The first accepted move
+    # leaves that region, making a much larger second step valid. Neither
+    # the objective nor the proximal/line-search operations are mocked.
     result = solver.refine_anchor_projected(chart, state, design, response,
-        calibration=calibration(chart), margins=margins, iterations=2, max_backtracks=60)
-    assert result.success and result.n_iter == 2 and flags['injected_zero']
-    assert result.history[1].step_size_inverse == huge_inverse
-    final = result.history[2]
-    assert final.line_search_start_inverse == huge_inverse/2
-    assert any('reset inverse step' in reason for reason in final.rejections)
-    assert final.step_size_inverse < 100. and final.mapping_step_size_inverse == 1.
-    assert final.objective_change <= -.25*final.step_size_inverse*final.step_norm**2
+        calibration=calibration(chart), margins=margins, iterations=2, max_backtracks=30,
+        iterate_callback=lambda iteration, current, record: states.append(current.copy()))
+    assert result.success and result.n_iter == 2
+    first, second = result.history[1:]
+    assert first.step_size_inverse > 10_000.
+    assert second.objective < first.objective-.1
+    assert chart.loss(result.state, design, response) < .8
+    assert second.step_norm > 8.*first.step_norm
+    assert second.step_size_inverse < first.step_size_inverse/32.
+    for row in (first, second):
+        assert row.objective_change <= -.25*row.step_size_inverse*row.step_norm**2
+        assert row.mapping_step_size_inverse == 1.
+    for current in states:
+        assert chart.domain_reason(current, d_lower=margins.d_lower, d_upper=margins.d_upper,
+            gap=margins.gap, anchor_min=margins.anchor_min) is None
 
 
 def mapping_with_stub(monkeypatch, outcomes, tolerance=1., inverse=10.):

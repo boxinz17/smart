@@ -162,7 +162,7 @@ rsync -a --prune-empty-dirs \
     --include='*/' --include='*.py' --include='*.R' --include='*.r' \
     --include='*.sh' --include='*.sbatch' --include='*.toml' --include='*.md' \
     --include='*.txt' --include='*.csv' --include='*.json' --include='*.yaml' \
-    --include='*.yml' --include='py.typed' --include='LICENSE' --exclude='*' \
+    --include='*.yml' --include='.python-version' --include='py.typed' --include='LICENSE' --exclude='*' \
     "$repo/" "$run_dir/source/"
 printf '%s\0' "$runner" "$model" "$experiment" ${extra[@]+"${extra[@]}"} > "$run_dir/invocation.args"
 {

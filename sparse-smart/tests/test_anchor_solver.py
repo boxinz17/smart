@@ -87,6 +87,37 @@ def test_weighted_l1_ball_prox_matches_constructed_kkt_solution():
     assert once_objective > actual + 1e-5
 
 
+def test_active_anchor_iteration_reports_effective_and_literal_support_without_thresholding():
+    chart = AnchorChart(5, 2, [0, 1], [0, 1], np.eye(2), np.eye(2))
+    d, L, penalty = np.array([2., 1.]), 20., 4.
+    margins = Margins(.05, 5., .01, trial_radius=5.)
+    radius = np.sqrt((1. - margins.anchor_min) * (1. + margins.anchor_min))
+    solution = np.array([[.5, 0.], [.4, .5], [0., .2]])
+    solution *= radius / np.linalg.norm(solution, 2)
+    left, _, right = np.linalg.svd(solution, full_matrices=False)
+    # Independent KKT construction makes the first H proximal minimizer known.
+    # Its exact two zeros acquire tiny projection residuals in the inner solve.
+    incoming = (solution + (penalty * d / L) * np.sign(solution)
+                + .6 * np.outer(left[:, 0], right[0]))
+    state = chart.pack([0.], [0.], d, np.zeros((3, 2)), np.empty((0, 2)))
+    design = np.sqrt(5.) * np.eye(5)
+    response = design @ np.vstack([np.diag(d), L * incoming / d])
+    result = refine_anchor_projected(chart, state, design, response,
+        calibration=calibration(chart, L=L, penalties=(penalty, 0.)),
+        margins=margins, iterations=1)
+    assert result.success and result.n_iter == 1
+    record = result.history[-1]
+    assert record.backtracks == 0
+    assert record.support_u == 4 and record.raw_support_u == 6
+    assert record.support_v == record.raw_support_v == 0
+    h = result.state[chart.z_u_slice].reshape(3, 2) / d
+    np.testing.assert_allclose(h, solution, rtol=0., atol=2e-10)
+    assert np.all(h[solution == 0.] != 0.)  # Reporting never mutates coefficients.
+    assert np.max(np.abs(result.state[chart.z_u_slice].reshape(3, 2)[solution == 0.])) < record.support_tolerance_u
+    assert chart.domain_reason(result.state, d_lower=margins.d_lower,
+        d_upper=margins.d_upper, gap=margins.gap, anchor_min=margins.anchor_min) is None
+
+
 def test_prox_reports_unfinished_inner_solve_and_handles_empty_blocks():
     value = np.array([[1.4, -.5], [.7, 1.2], [-.3, .8]])
     solved = _weighted_l1_ball_prox(value, [.13, .37], .8, max_iterations=1)

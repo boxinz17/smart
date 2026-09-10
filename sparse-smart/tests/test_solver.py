@@ -71,6 +71,32 @@ def test_offset_does_not_change_acceptance():
     assert shifted.history[0].smooth_loss >= 1e30
 
 
+def test_public_chart_fit_preserves_steps_with_large_irreducible_response():
+    from sparse_smart import ExactSource, PracticalCalibration, SparseSMART
+
+    # The second observation adds a constant inside the source response span.
+    # Subtracting separately rounded losses would accept uphill d=1 -> d=5.
+    design = np.array([[1.], [0.]])
+    source = ExactSource(np.eye(1), np.eye(1))
+    options = dict(rank=1, source_rank=1, sparsity=(1, 1), iterations=5,
+                   margins=Margins(.05, 5., .01, trial_radius=10.),
+                   calibration=PracticalCalibration(.5, 0., .01, (0, 0)),
+                   refinement_solver="chart")
+    clean = SparseSMART(**options).fit(design, np.array([[2.], [0.]]), source=source)
+    shifted = SparseSMART(**options).fit(design, np.array([[2.], [1e12]]), source=source)
+    assert clean.success_ and shifted.success_
+    np.testing.assert_array_equal(shifted.initial_state_, [1.])
+    np.testing.assert_array_equal(shifted.state_, clean.state_)
+    np.testing.assert_allclose(shifted.coefficient_, [[2.]], atol=1e-3)
+    assert all(record.objective == shifted.history_[0].objective for record in shifted.history_)
+    for clean_record, shifted_record in zip(clean.history_[1:], shifted.history_[1:]):
+        assert shifted_record.backtracks > 0
+        assert shifted_record.objective_change == clean_record.objective_change
+        assert shifted_record.objective_change <= -.25 * shifted_record.step_size_inverse * shifted_record.step_norm**2
+        assert shifted_record.raw_support_u == shifted_record.support_u
+        assert shifted_record.support_tolerance_u == 0.
+
+
 def test_numerical_overflow_is_reported_and_malformed_supports_rejected():
     chart, state, _, response = scalar_problem()
     result = refine(chart, state, np.full((4, 1), 1e200), response,

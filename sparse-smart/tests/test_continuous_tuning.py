@@ -12,7 +12,7 @@ from .test_tuning import _tuner, data
 @pytest.fixture
 def trajectories(monkeypatch):
     class FakeTrajectory:
-        instances, outcomes = [], {}
+        instances, outcomes, checkpoint_calls = [], {}, []
 
         def __init__(self, **options):
             self.options = options
@@ -39,7 +39,7 @@ def trajectories(monkeypatch):
                 raise FloatingPointError('validation failed after a completed checkpoint')
             return self
 
-        def checkpoint_model(self, endpoint):
+        def _checkpoint_view(self, endpoint):
             assert endpoint in self.checkpoint_iterations_
             points = [t for t in self.checkpoint_iterations_ if t <= endpoint]
             values = self.outcome.get('values', {})
@@ -53,6 +53,20 @@ def trajectories(monkeypatch):
                 coefficient_=coefficient, n_iter_=endpoint, selected_iteration_=selected,
                 validation_history_=[{'iteration': t, 'loss': scores[t]} for t in points],
                 diagnostics_={'terminal': endpoint}, predict=lambda X, **kwargs: X @ coefficient)
+
+        def _checkpoint_summary(self, endpoint):
+            view = self._checkpoint_view(endpoint)
+            return dict(success=view.success_, status=view.status_, message=view.message_,
+                validation_mse=min(row['loss'] for row in view.validation_history_),
+                selected_iteration=view.selected_iteration_, n_iter=view.n_iter_,
+                termination_reason=view.termination_reason_, validation_history=view.validation_history_,
+                diagnostics=view.diagnostics_)
+
+        def checkpoint_model(self, endpoint):
+            self.checkpoint_calls.append((self.options['calibration'].penalty[0], endpoint))
+            if self.outcome.get('materialization_error'):
+                raise FloatingPointError('checkpoint reconstruction failed')
+            return self._checkpoint_view(endpoint)
 
     monkeypatch.setattr(tuning, 'SparseSMART', FakeTrajectory)
     return FakeTrajectory
@@ -141,6 +155,26 @@ def test_best_prefix_can_be_an_interior_dense_checkpoint_with_earliest_ties(data
     assert fitted.selected_budget_ == 8 and fitted.selected_iteration_ == 6
     assert fitted.selected_candidate_id_ == 2 and fitted.best_params_['penalty_u'] == .01
     assert fitted.checkpoints_[4].selected_iteration_ == 2
+
+
+def test_only_final_budget_winners_materialize_models(data, trajectories):
+    X, Y, source = data
+    trajectories.outcomes = {.01: dict(values={0: 5., 4: 3., 8: 3.}),
+                             .02: dict(values={0: 5., 4: 1., 8: .5})}
+    fitted = continuous().fit(X, Y, source=source)
+    assert fitted.success_ and fitted.selected_candidate_id_ == 3
+    assert trajectories.checkpoint_calls == [(.02, 4), (.02, 8)]
+    assert len(fitted.selection_history_) == 4
+
+
+def test_checkpoint_materialization_failure_tries_next_candidate(data, trajectories):
+    X, Y, source = data
+    trajectories.outcomes = {.01: dict(values={0: 5., 4: .1, 8: .1}, materialization_error=True),
+                             .02: dict(values={0: 5., 4: 1., 8: .5})}
+    fitted = continuous().fit(X, Y, source=source)
+    assert fitted.success_ and fitted.best_params_['penalty_u'] == .02
+    assert all(not fitted.selection_history_[i]['success'] for i in (0, 2))
+    assert trajectories.checkpoint_calls == [(.01, 4), (.02, 4), (.01, 8), (.02, 8)]
 
 
 def test_refitting_clears_old_trajectory_models_and_checkpoints(data, trajectories):

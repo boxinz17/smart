@@ -14,6 +14,7 @@ from .initialization import InitializationFailure, reduced_lasso
 from .solver import refine, _result
 from .source import ExactSource, NoisySource, _positive_real, prepare_source
 from .spectral import project_singular_values
+from .support import coordinate_support
 from .thresholding import hard_threshold
 
 
@@ -22,6 +23,25 @@ class FitFailure(RuntimeError):
     def __init__(self, status: str, message: str):
         self.status = status
         super().__init__(f"{status}: {message}")
+
+
+class _FitPreparationCache:
+    """Private cache owned by one tuner fit, never retained by its models."""
+
+    def __init__(self):
+        self.context = None
+        self.entries = {}
+
+    def bind(self, context):
+        if self.context is None:
+            self.context = context
+        elif self.context != context:
+            raise ValueError("fit preparation cache cannot be reused with different observations or source")
+
+    def get(self, key, compute):
+        if key not in self.entries:
+            self.entries[key] = compute()
+        return self.entries[key]
 
 
 def _data(value, name):
@@ -120,6 +140,7 @@ class SparseSMART:
         data select the best accepted iterate, including the initializer; they
         never enter initialization, gradients, or line-search acceptance.
         """
+        cache = self.__dict__.pop("_fit_cache", None)
         for name in list(vars(self)):
             if name.endswith("_"):
                 delattr(self, name)
@@ -141,6 +162,16 @@ class SparseSMART:
                 validation_data, ("X_validation", "Y_validation")))
             if XV.shape[0] != YV.shape[0] or XV.shape[1] != X.shape[1] or YV.shape[1] != Y.shape[1]:
                 raise ValueError("validation_data must have matching rows, predictors, and responses")
+        if cache is not None:
+            cache.bind((id(X), id(Y), id(source),
+                        id(XV) if validation_data is not None else None,
+                        id(YV) if validation_data is not None else None))
+
+        def prepared(key, compute, *, public=False):
+            value = compute() if cache is None else cache.get(key, compute)
+            # Public fitted attributes stay independently mutable. Solvers only
+            # read the cached design/response projections.
+            return deepcopy(value) if cache is not None and public else value
         for name, value, minimum in (
             ("iterations", self.iterations, 0), ("max_backtracks", self.max_backtracks, 0),
             ("lasso_max_iter", self.lasso_max_iter, 1), ("qr_max_exchanges", self.qr_max_exchanges, 1),
@@ -192,8 +223,10 @@ class SparseSMART:
                                  or self.stationarity_tol is not None
                                  or self.initialization_spectrum_ == "projected"))
         try:
-            self.source_ = prepare_source(source, self.source_rank, X.shape[1], Y.shape[1],
-                                          orthogonality_tol=self.orthogonality_tol, tie_tol=self.tie_tol)
+            source_key = ("source", self.source_rank, self.orthogonality_tol, self.tie_tol)
+            self.source_ = prepared(source_key, lambda: prepare_source(
+                source, self.source_rank, X.shape[1], Y.shape[1],
+                orthogonality_tol=self.orthogonality_tol, tie_tol=self.tie_tol), public=True)
         except np.linalg.LinAlgError as error:
             return self._failure("numerical_failure", error)
         maximum_support = tuple((dimension - self.rank) * self.rank for dimension in
@@ -216,9 +249,13 @@ class SparseSMART:
                 else "spectral_and_support_mapping_with_domain_check")
         try:
             with np.errstate(over="raise", invalid="raise", divide="raise"):
-                ZI, WI = X @ self.source_.leading_left, Y @ self.source_.leading_right
-                initial = reduced_lasso(ZI, WI, self.rank, self.calibration_.init_penalty,
-                                        tol=self.lasso_tol, max_iter=self.lasso_max_iter, tie_tol=self.tie_tol)
+                ZI, WI = prepared(("leading_data", source_key), lambda:
+                    (X @ self.source_.leading_left, Y @ self.source_.leading_right))
+                initial_key = ("initial", source_key, self.rank, self.calibration_.init_penalty,
+                               self.lasso_tol, self.lasso_max_iter)
+                initial = prepared(initial_key, lambda: reduced_lasso(
+                    ZI, WI, self.rank, self.calibration_.init_penalty,
+                    tol=self.lasso_tol, max_iter=self.lasso_max_iter, tie_tol=self.tie_tol), public=True)
         except InitializationFailure as error:
             return self._failure("initialization_failed", error)
         except (np.linalg.LinAlgError, FloatingPointError) as error:
@@ -255,10 +292,11 @@ class SparseSMART:
                 initialization_spectrum_repaired=not np.array_equal(d, initial.d),
             )
         try:
-            au = select_anchor(initial.P, anchor_min=self.margins.anchor_min,
-                               qr_threshold=self.margins.qr_threshold, max_exchanges=self.qr_max_exchanges)
-            av = select_anchor(initial.Q, anchor_min=self.margins.anchor_min,
-                               qr_threshold=self.margins.qr_threshold, max_exchanges=self.qr_max_exchanges)
+            anchor_key = ("anchors", initial_key, self.margins.anchor_min,
+                          self.margins.qr_threshold, self.qr_max_exchanges)
+            au, av = prepared(anchor_key, lambda: tuple(select_anchor(
+                factor, anchor_min=self.margins.anchor_min, qr_threshold=self.margins.qr_threshold,
+                max_exchanges=self.qr_max_exchanges) for factor in (initial.P, initial.Q)), public=True)
         except AnchorFailure as error:
             return self._failure("anchor_selection_failed", error)
         self.anchors_ = {"u": au, "v": av}
@@ -278,19 +316,24 @@ class SparseSMART:
                   d_upper=self.margins.d_upper, gap=self.margins.gap, anchor_min=self.margins.anchor_min)
         if domain:
             return self._failure("handoff_failed", domain)
-        Z, W = X @ self.source_.left, Y @ self.source_.right
-        # Stable constant response loss omitted by the thin exact-source basis.
-        if self.source_.right.shape[1] == Y.shape[1]:
-            loss_offset = 0.
-        else:
-            outside = Y - W @ self.source_.right.T
-            loss_offset = float(np.sum(outside * outside) / (2 * X.shape[0]))
+        def training_projection():
+            Z, W = ((ZI, WI) if isinstance(source, ExactSource) else
+                    (X @ self.source_.left, Y @ self.source_.right))
+            # Stable constant response loss omitted by the thin exact-source basis.
+            if self.source_.right.shape[1] == Y.shape[1]:
+                offset = 0.
+            else:
+                outside = Y - W @ self.source_.right.T
+                offset = float(np.sum(outside * outside) / (2 * X.shape[0]))
+            return Z, W, offset
+
+        Z, W, loss_offset = prepared(("training_data", source_key), training_projection)
         self.validation_history_ = []
         self.best_validation_loss_ = None
         selected_state = None
         selected_iteration = None
         if validation_data is not None:
-            validation_design = XV @ self.source_.left
+            validation_design = prepared(("validation_data", source_key), lambda: XV @ self.source_.left)
 
         def observe(iteration, state, record):
             nonlocal selected_state, selected_iteration
@@ -371,8 +414,6 @@ class SparseSMART:
         self.termination_reason_ = result.termination_reason
         self.optimization_converged_ = self.termination_reason_ == "stationarity"
         self.converged_ = self.optimization_converged_ and self.selected_iteration_ == self.n_iter_
-        selected_record = next((record for record in self.history_
-                                if record.iteration == self.selected_iteration_), None)
         P_last, d_last, Q_last = self.chart_.reconstruct(self.last_state_)
         self.last_coefficient_ = ((self.source_.left @ P_last) * d_last) @ (self.source_.right @ Q_last).T
         P, d, Q = self.chart_.reconstruct(self.state_)
@@ -380,10 +421,26 @@ class SparseSMART:
         self.left_factors_, self.right_factors_ = self.source_.left @ P, self.source_.right @ Q
         self.singular_values_ = d.copy()
         self.coefficient_ = (self.left_factors_ * d) @ self.right_factors_.T
-        self.supports_ = {"u": np.flatnonzero(self.state_[self.chart_.z_u_slice]),
-                          "v": np.flatnonzero(self.state_[self.chart_.z_v_slice])}
-        self.diagnostics_["last_rejection"] = result.last_rejection
-        self.diagnostics_.update(termination_reason=self.termination_reason_,
+        self.supports_, self.raw_supports_, self.support_tolerances_, metadata = self._refinement_metadata(
+            result, self.state_, self.selected_iteration_, self.best_validation_loss_)
+        self.diagnostics_.update(metadata)
+        if not result.success:
+            return self._failure(result.status, result.message)
+        self.status_, self.message_, self.success_ = result.status, result.message, True
+        return self
+
+    def _refinement_metadata(self, result, state, selected_iteration, best_validation_loss):
+        """Derive selected/terminal diagnostics without constructing coefficients."""
+        selected_record = next((record for record in result.history
+                                if record.iteration == selected_iteration), None)
+        effective = self.refinement_solver_ == "anchor_projected"
+        supports, raw_supports, tolerances = {}, {}, {}
+        for side, sl in (("u", self.chart_.z_u_slice), ("v", self.chart_.z_v_slice)):
+            supports[side], tolerances[side] = coordinate_support(state[sl], effective=effective)
+            raw_supports[side], _ = coordinate_support(state[sl])
+        optimization_converged = result.termination_reason == "stationarity"
+        metadata = dict(status=result.status, last_rejection=result.last_rejection,
+            termination_reason=result.termination_reason,
             projected_gradient_norm=(selected_record.projected_gradient_norm if selected_record else None),
             raw_gradient_norm=(selected_record.raw_gradient_norm if selected_record else None),
             last_projected_gradient_norm=result.projected_gradient_norm,
@@ -399,19 +456,43 @@ class SparseSMART:
             precision_limited=(result.status == "numerical_stagnation" or result.mapping_precision_limited),
             objective_change=(selected_record.objective_change if selected_record else None),
             relative_step_norm=(selected_record.relative_step_norm if selected_record else None),
-            line_search_strategy=("previous_accepted_half_inverse" if self.refinement_solver_ == "anchor_projected"
-                                  else "reset_initial_inverse"),
-            optimization_converged=self.optimization_converged_, selected_converged=self.converged_,
-            selected_iteration=self.selected_iteration_,
-            best_validation_loss=self.best_validation_loss_,
-            fitted_support_counts=(len(self.supports_["u"]), len(self.supports_["v"])),
-            support_cap_reached=tuple(len(self.supports_[side]) == limit
+            line_search_strategy="reset_initial_inverse",
+            optimization_converged=optimization_converged,
+            selected_converged=optimization_converged and selected_iteration == result.n_iter,
+            selected_iteration=selected_iteration, best_validation_loss=best_validation_loss,
+            fitted_support_counts=tuple(len(supports[side]) for side in ("u", "v")),
+            raw_fitted_support_counts=tuple(len(raw_supports[side]) for side in ("u", "v")),
+            support_tolerances=tolerances.copy(),
+            support_reporting="effective_numerical" if effective else "literal_nonzero",
+            support_cap_reached=tuple(len(raw_supports[side]) == limit
+                for side, limit in zip(("u", "v"), self.calibration_.support_limits)),
+            effective_support_cap_reached=tuple(len(supports[side]) == limit
                 for side, limit in zip(("u", "v"), self.calibration_.support_limits)))
-        if not result.success:
-            return self._failure(result.status, result.message)
-        self.status_, self.message_, self.success_ = result.status, result.message, True
-        self.diagnostics_["status"] = result.status
-        return self
+        return supports, raw_supports, tolerances, metadata
+
+    def _checkpoint_snapshot(self, iteration):
+        if (isinstance(iteration, (bool, np.bool_)) or not isinstance(iteration, numbers.Integral)
+                or iteration < 0):
+            raise ValueError("checkpoint iteration must be a nonnegative integer")
+        snapshot = getattr(self, "checkpoints_", {}).get(int(iteration))
+        if snapshot is None:
+            raise FitFailure("checkpoint_unavailable", f"No successful finite prefix is available at iteration {iteration}.")
+        return snapshot
+
+    def _checkpoint_summary(self, iteration):
+        """Lightweight selection record; public fitted views are created only for winners."""
+        snapshot = self._checkpoint_snapshot(iteration)
+        result = _result(snapshot.state, snapshot.status, snapshot.message, snapshot.iteration,
+                         self.history_[:snapshot.history_length], termination_reason=snapshot.termination_reason)
+        _, _, _, metadata = self._refinement_metadata(
+            result, snapshot.selected_state, snapshot.selected_iteration, snapshot.best_validation_loss)
+        diagnostics = deepcopy(self.diagnostics_)
+        diagnostics.update(metadata)
+        return dict(success=result.success, status=snapshot.status, message=snapshot.message,
+                    validation_mse=snapshot.best_validation_loss, selected_iteration=snapshot.selected_iteration,
+                    n_iter=snapshot.iteration, termination_reason=snapshot.termination_reason,
+                    validation_history=deepcopy(self.validation_history_[:snapshot.validation_history_length]),
+                    diagnostics=diagnostics)
 
     def checkpoint_model(self, iteration):
         """Reconstruct an independent fitted view of an available finite prefix.
@@ -420,14 +501,11 @@ class SparseSMART:
         and validation minimum are limited to observations eligible by this
         checkpoint; the endpoint is retained separately as ``last_state_``.
         """
-        if (isinstance(iteration, (bool, np.bool_)) or not isinstance(iteration, numbers.Integral)
-                or iteration < 0):
-            raise ValueError("checkpoint iteration must be a nonnegative integer")
-        snapshot = getattr(self, "checkpoints_", {}).get(int(iteration))
-        if snapshot is None:
-            raise FitFailure("checkpoint_unavailable", f"No successful finite prefix is available at iteration {iteration}.")
+        snapshot = self._checkpoint_snapshot(iteration)
         view = object.__new__(type(self))
-        excluded = {"checkpoints_", "history_", "validation_history_", "result_"}
+        excluded = {"checkpoints_", "history_", "validation_history_", "result_",
+                    "coefficient_", "last_coefficient_", "factors_", "left_factors_", "right_factors_",
+                    "singular_values_", "state_", "last_state_", "supports_", "raw_supports_"}
         view.__dict__ = deepcopy({key: value for key, value in vars(self).items() if key not in excluded})
         view.iterations = snapshot.iteration
         view.checkpoints_ = deepcopy({key: value for key, value in self.checkpoints_.items()

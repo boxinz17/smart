@@ -77,6 +77,8 @@ def test_real_continuous_prefix_equals_independent_short_fit_and_defaults(solver
     assert checkpoint.status_ == shorter.status_ and checkpoint.termination_reason_ == shorter.termination_reason_
     assert checkpoint.history_ == shorter.history_
     assert checkpoint.validation_history_ == shorter.validation_history_
+    assert trajectory.diagnostics_["line_search_strategy"] == "reset_initial_inverse"
+    assert checkpoint.diagnostics_["line_search_strategy"] == "reset_initial_inverse"
     assert checkpoint.best_validation_loss_ == shorter.best_validation_loss_
     assert checkpoint.selected_iteration_ == shorter.selected_iteration_
     for attr in ("state_", "last_state_", "coefficient_", "last_coefficient_"):
