@@ -77,8 +77,16 @@ def test_real_continuous_prefix_equals_independent_short_fit_and_defaults(solver
     assert checkpoint.status_ == shorter.status_ and checkpoint.termination_reason_ == shorter.termination_reason_
     assert checkpoint.history_ == shorter.history_
     assert checkpoint.validation_history_ == shorter.validation_history_
-    assert trajectory.diagnostics_["line_search_strategy"] == "reset_initial_inverse"
-    assert checkpoint.diagnostics_["line_search_strategy"] == "reset_initial_inverse"
+    expected_strategy = "failure_aware" if solver == "anchor_projected" else "reset_initial_inverse"
+    assert trajectory.diagnostics_["line_search_strategy"] == expected_strategy
+    assert checkpoint.diagnostics_["line_search_strategy"] == expected_strategy
+    if solver == "anchor_projected":
+        assert trajectory.numerical_work_["totals"]["u"]["calls"] > 0
+        assert trajectory.diagnostics_["numerical_work"] == trajectory.numerical_work_
+        # A prefix must not inherit the later endpoint's computational costs.
+        assert checkpoint.numerical_work_ is None
+        assert checkpoint.diagnostics_["numerical_work"] is None
+        assert trajectory._checkpoint_summary(3)["diagnostics"]["numerical_work"] is None
     assert checkpoint.best_validation_loss_ == shorter.best_validation_loss_
     assert checkpoint.selected_iteration_ == shorter.selected_iteration_
     for attr in ("state_", "last_state_", "coefficient_", "last_coefficient_"):

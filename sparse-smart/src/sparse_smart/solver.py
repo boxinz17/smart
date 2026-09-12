@@ -59,6 +59,7 @@ class RefinementResult:
     proximal_uncertainty: float | None = None
     mapping_refinements: int = 0
     mapping_precision_limited: bool = False
+    numerical_work: dict | None = None
 
     @property
     def success(self) -> bool:

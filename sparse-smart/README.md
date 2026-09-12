@@ -168,9 +168,22 @@ on Z. Its proximal mapping includes the anchor, rotation, and singular-value
 constraints. Gradients and step norms for this solver use the H-coordinate
 metric, identified in `diagnostics_["diagnostic_coordinates"]`.
 
+Weighted L1/spectral-ball subproblems use up to 64 Dykstra sweeps, checking
+their primal-dual gap periodically. Difficult subproblems then use accelerated
+projected gradient on the equivalent box-constrained dual, initialized from
+the current Dykstra dual. Both phases share the 2,000-sweep default budget.
+Closed-form projection and interior soft-thresholding cases remain direct.
+Acceptance requires the numerical gap certificate; the split residual is
+reported but is not an additional prerequisite. The reported inner error
+bound remains part of the outer stationarity check.
+
 The practical anchor solver compares objective differences directly to reduce
-cancellation near a stationary point. Each iteration starts its line search
-at the calibrated inverse step size `initial_L`; rejected trials double it.
+cancellation near a stationary point. Its line search normally starts at the
+calibrated inverse step size `initial_L`; rejected trials double it. Persistent
+inner-solver failures activate reuse of half the last accepted inverse step,
+with periodic attempts to recover larger steps. A recovered reference mapping
+immediately restores the ordinary start. Exact repeated reference trials,
+including exhausted proximal solves, are reused within the same update.
 Feasibility, trial-radius, and sufficient-decrease checks are unchanged.
 The stationarity mapping keeps a fixed reference inverse step size,
 independent of backtracking. Its reported residual
@@ -353,8 +366,14 @@ For the practical anchor solver, inspect `mapping_displacement`,
 `mapping_precision_limited` in `diagnostics_`; `last_` versions describe the
 terminal state. The selected state also reports `objective_change` and
 `relative_step_norm`. History records `line_search_start_inverse`, and
-`line_search_strategy="reset_initial_inverse"` identifies the per-iteration
-reset in both solvers. These are floating-point diagnostics, not
+`line_search_strategy="failure_aware"` identifies the practical anchor policy;
+the chart solver retains `"reset_initial_inverse"`. `numerical_work_` and
+`diagnostics_["numerical_work"]` report actual block calls, per-side inner
+iterations and failures, timing, cache hits, and search recovery counts.
+Per-side `dykstra_iterations`, `dual_iterations`, and `fallback_calls`
+separate the iterative methods; total iterations also include direct solves.
+Checkpoint views leave work totals unavailable rather than borrowing costs
+from the later endpoint. These are floating-point diagnostics, not
 rigorous interval certificates. The terminal `precision_limited` flag marks
 numerical stagnation or a precision-limited mapping; it does not imply
 `optimization_converged` or make a failed partial fit eligible.
@@ -412,7 +431,7 @@ tuner.fit(X_train, Y_train, source=source,
 Each grid point has one initializer and one solver trajectory. Validation is
 evaluated at iteration zero, every 250 updates, all comparison budgets, and
 an earlier stationary endpoint if needed. The optimization state continues
-between checkpoints, with the usual inverse-step reset at each iteration.
+between checkpoints, retaining the solver's step-search policy.
 The validation sample never enters the updates. Both earlier successful
 prefixes and their best validation states remain available after a later
 numerical failure.

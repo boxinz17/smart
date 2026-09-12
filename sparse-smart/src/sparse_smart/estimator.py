@@ -492,6 +492,7 @@ class SparseSMART:
         self.state_ = self.last_state_.copy() if selected_state is None else selected_state
         self.selected_iteration_ = result.n_iter if selected_iteration is None else selected_iteration
         self.history_, self.n_iter_ = result.history, result.n_iter
+        self.numerical_work_ = deepcopy(result.numerical_work)
         self.termination_reason_ = result.termination_reason
         self.optimization_converged_ = self.termination_reason_ == "stationarity"
         self.converged_ = self.optimization_converged_ and self.selected_iteration_ == self.n_iter_
@@ -521,6 +522,9 @@ class SparseSMART:
             supports[side], tolerances[side] = coordinate_support(state[sl], effective=effective)
             raw_supports[side], _ = coordinate_support(state[sl])
         optimization_converged = result.termination_reason == "stationarity"
+        numerical_work = result.numerical_work
+        line_search_strategy = (numerical_work or {}).get(
+            "line_search_strategy", self.diagnostics_.get("line_search_strategy", "reset_initial_inverse"))
         metadata = dict(status=result.status, last_rejection=result.last_rejection,
             termination_reason=result.termination_reason,
             projected_gradient_norm=(selected_record.projected_gradient_norm if selected_record else None),
@@ -538,7 +542,10 @@ class SparseSMART:
             precision_limited=(result.status == "numerical_stagnation" or result.mapping_precision_limited),
             objective_change=(selected_record.objective_change if selected_record else None),
             relative_step_norm=(selected_record.relative_step_norm if selected_record else None),
-            line_search_strategy="reset_initial_inverse",
+            line_search_strategy=line_search_strategy,
+            # A reconstructed checkpoint has no work ledger of its own. Explicitly
+            # clear this field rather than copying costs from a later endpoint.
+            numerical_work=deepcopy(numerical_work),
             optimization_converged=optimization_converged,
             selected_converged=optimization_converged and selected_iteration == result.n_iter,
             selected_iteration=selected_iteration, best_validation_loss=best_validation_loss,

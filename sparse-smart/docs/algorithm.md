@@ -151,7 +151,29 @@ The smooth-gradient transformation is `grad_H_a=grad_Z_a D` and
 `grad_d|H=grad_d|Z + colsum(grad_Z_u*H_u + grad_Z_v*H_v)` (separate column
 sums when the sides have different row counts). H proposals solve weighted
 L1 plus a spectral-ball constraint to a numerical tolerance. One shrinkage
-pass followed by singular-value clipping is not used as a combined prox.
+pass followed by singular-value clipping is not assumed to solve the combined
+prox; it is accepted only with a valid certificate.
+The iterative solve starts with at most 64 Dykstra sweeps. It checks the gap
+at the first sweep, every ten sweeps, at the phase endpoint, and whenever the
+legacy split-residual threshold is met. A valid gap can certify a solution
+before the split variables agree to that separate threshold.
+
+If the requested accuracy remains unresolved, accelerated projected gradient
+solves the equivalent dual over `|p| <= weights`. Its smooth objective is
+`phi(p) = sup_{||H||op<=radius} <A-p,H> - .5||H||F^2`, with gradient
+`-Proj_ball(A-p)` and Lipschitz constant one. The projected step clips
+`p + Proj_ball(A-p)` into the weighted box. FISTA extrapolation restarts when
+the dual objective increases. The current Dykstra dual initializes this phase;
+no dual state is shared across fits. Both phases share the original total
+inner-sweep budget, and the best certified candidate is retained.
+
+The dual phase checks a numerically feasible primal point and a feasible box
+dual using the Fenchel gap, including SVD reconstruction, orthogonality and
+roundoff allowances. A small inward correction establishes numerical primal
+feasibility without altering the dual iteration itself. Its returned
+`duality_gap` includes those allowances; `gap_roundoff=0` means there is no
+additional allowance to add a second time. `certificate_method` distinguishes
+this representation from the Dykstra gap plus separate roundoff term.
 The d proposal includes the linear penalty column sums before ordered
 spectral projection; Cayley proposals project onto their skew operator-norm
 balls. Sufficient decrease is checked on the original objective, using the
@@ -291,15 +313,26 @@ any constant loss outside the exact-source right span; that constant cancels
 from the difference. Identically rounded recorded objectives alone therefore
 do not imply that the stable difference was zero.
 
-Every iteration in both solvers starts its line search at the calibrated
-inverse step size `initial_L`, then doubles L for rejected trials. The
+The chart solver starts each search at the calibrated inverse step size
+`initial_L`, then doubles L for rejected trials. The practical anchor solver
+normally does the same. After two consecutive updates with at least four
+failed inner proximal trials and an unresolved reference mapping, it starts
+at `max(initial_L, previous_accepted_L/2)`. It retries the original start after
+25 adapted starts and immediately restores it when the reference mapping
+recovers. This prevents repeated expensive failures without retaining a large
+inverse step merely because one update had high curvature. The
 feasibility, displacement, and sufficient-decrease checks remain unchanged.
 The diagnostic reference remains `L_ref=clip(initial_L,1,1000)`, fixed throughout
 the fit; backtracking cannot manufacture a small stationarity residual by
 increasing L.
 `line_search_start_inverse` records the initial trial inverse step at each
-iteration. The estimator reports `line_search_strategy="reset_initial_inverse"`
-for both solvers.
+iteration. The estimator reports `line_search_strategy="failure_aware"`
+for anchor refinement and `"reset_initial_inverse"` for chart refinement.
+The low-level anchor solver accepts either policy explicitly. Identical
+reference trials are cached within an update, including deterministic
+exhausted proximal solves; the cache key covers the state, gradient, inverse
+step, penalties, margins, and tolerance. Cached failures do not satisfy a
+stationarity test.
 
 ### Inner accuracy and the constrained stationarity diagnostic
 
@@ -308,8 +341,9 @@ The anchor solver records the mapping displacement
 `u=L_ref*sqrt(e_u^2+e_v^2)` separately. Each block allowance is
 `e_a=sqrt(2*(G_a+c_a))+d_a`, where G is the numerical primal-dual gap,
 c guards cancellation in its evaluation, and d is a linear arithmetic
-roundoff allowance for both Dykstra and direct proximal formulas. Active
-Dykstra solves also retain the cancellation allowance; the arithmetic floor
+roundoff allowance for Dykstra and direct proximal formulas. The dual method
+instead returns an upward-rounded bound from its total gap. Active
+iterative solves retain their numerical allowances; the arithmetic floor
 remains even when the ball-gap term is zero. Their sum
 `m+u` is the reported constrained residual. The uncertainty accounts for
 inexact proximal solutions; it is not statistical uncertainty.
@@ -319,7 +353,7 @@ certificates accounting for every rounding error.
 If the numerical residual interval straddles the stopping threshold,
 `max(0,m-u) <= stationarity_tol < m+u`, the diagnostic tries tighter absolute
 gap targets, with at most two refinements. A target
-uncertainty eta corresponds to a per-block Dykstra target
+uncertainty eta corresponds to a per-block proximal target
 `G_a+c_a <= eta^2/(4*L_ref^2)`. Thus tightening is based on the squared desired
 mapping accuracy, not only a relative inner-iteration tolerance. The smallest
 available upper residual `m+u` and its corresponding components are retained if floating-point
@@ -355,7 +389,7 @@ optimality or the manuscript's statistical assumptions.
 `checkpoint_execution="continuous"` in the tuner performs one initialization
 and one uninterrupted refinement call per hyperparameter grid point. The
 internal H state and gradient remain in the solver across all checkpoints;
-each iteration uses the ordinary reset to the calibrated inverse step size.
+the solver's step-search state continues across checkpoints as well.
 No H/Z round trip is used to restart an update.
 The default independent-budget mode is unchanged.
 

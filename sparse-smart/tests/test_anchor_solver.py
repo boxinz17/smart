@@ -119,9 +119,16 @@ def test_active_anchor_iteration_reports_effective_and_literal_support_without_t
 
 
 def test_prox_reports_unfinished_inner_solve_and_handles_empty_blocks():
-    value = np.array([[1.4, -.5], [.7, 1.2], [-.3, .8]])
-    solved = _weighted_l1_ball_prox(value, [.13, .37], .8, max_iterations=1)
+    weights, radius = np.array([.13, .37]), .8
+    solution = np.array([[.5, 0.], [.4, .5], [0., .2]])
+    solution *= radius / np.linalg.norm(solution, 2)
+    left, _, right = np.linalg.svd(solution, full_matrices=False)
+    value = solution + weights * np.sign(solution) + .6 * np.outer(left[:, 0], right[0])
+    solved = _weighted_l1_ball_prox(value, weights, radius, max_iterations=1)
     assert not solved.converged
+    # Unlike the former sign-preserving fixture, composing the two proxes
+    # once does not satisfy this independently constructed joint KKT solution.
+    assert np.linalg.norm(solved.value - solution) > 1e-4
     assert _weighted_l1_ball_prox(np.empty((0, 2)), [1., 2.], .8).converged
     np.testing.assert_array_equal(_weighted_l1_ball_prox(value, [0., 0.], 0.).value, 0.)
     with pytest.raises(FloatingPointError, match="norm"):

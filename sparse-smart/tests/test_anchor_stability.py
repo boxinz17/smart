@@ -194,10 +194,21 @@ def test_active_kkt_solution_retains_uncertainty_when_absolute_target_is_unresol
     prox = solver._weighted_l1_ball_prox(value, weights, radius, tolerance=1e-12, absolute_gap_tol=1e-30)
     assert prox.converged
     np.testing.assert_allclose(prox.value, solution, atol=2e-11)
-    assert prox.gap_roundoff > 0. and prox.duality_gap+prox.gap_roundoff > 1e-30
+    total_gap = prox.duality_gap + prox.gap_roundoff
+    assert total_gap > 1e-30
+    assert prox.termination_reason == "absolute_target_unresolved"
     assert prox.error_bound > np.sqrt(2e-30)
     assert np.linalg.norm(prox.value-solution) <= prox.error_bound
-    assert prox.error_bound == pytest.approx(np.sqrt(2*(prox.duality_gap+prox.gap_roundoff))+prox.direct_error)
+    assert prox.error_bound >= np.sqrt(2 * total_gap)
+    if prox.certificate_method == "dykstra":
+        assert prox.gap_roundoff > 0.
+        assert prox.error_bound == pytest.approx(np.sqrt(2 * total_gap) + prox.direct_error)
+    else:
+        assert prox.certificate_method == "dual_fista"
+        # The dual solver's gap already includes its roundoff allowance. Its
+        # upward-rounded error bound is preserved without adding it twice.
+        assert prox.gap_roundoff == prox.direct_error == 0.
+        assert prox.certified_error_bound == prox.error_bound > 0.
 
 
 def test_exact_stationary_point_with_unresolved_roundoff_floor_cannot_accept_zero_steps():
