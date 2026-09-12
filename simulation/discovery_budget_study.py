@@ -70,7 +70,9 @@ def inside(path, root):
     return path
 
 
-def configuration(*, iteration_budgets=(500, 1000, 2000, 4000, 8000), checkpoint_interval=250,
+def configuration(*, iteration_budgets=(500, 1000, 2000), checkpoint_interval=250,
+                  validation_interval=50, validation_patience=300, validation_min_iterations=500,
+                  validation_min_relative_improvement=.001, n_validation=200,
                   validation_iterations=(1, 2, 5, 10, 15, 20, 25, 50, 100, 150, 200),
                   init_penalties=(.01, .03, .1, .3), penalties_u=(.0025, .01, .04, .16, .32),
                   penalties_v=(.0025, .01, .04, .16, .32), stationarity_tol=1e-6):
@@ -80,6 +82,16 @@ def configuration(*, iteration_budgets=(500, 1000, 2000, 4000, 8000), checkpoint
             "Iteration budgets must be positive, unique, and increasing")
     require(type(checkpoint_interval) is int and checkpoint_interval > 0,
             "Checkpoint interval must be a positive integer")
+    require(type(validation_interval) is int and validation_interval > 0,
+            "Validation interval must be a positive integer")
+    require(validation_patience is None or (type(validation_patience) is int and validation_patience > 0),
+            "Validation patience must be a positive integer or None")
+    require(type(validation_min_iterations) is int and validation_min_iterations >= 0,
+            "Validation minimum iterations must be a nonnegative integer")
+    require(type(validation_min_relative_improvement) in (int, float)
+            and math.isfinite(validation_min_relative_improvement) and 0 <= validation_min_relative_improvement < 1,
+            "Validation minimum relative improvement must be finite in [0, 1)")
+    require(type(n_validation) is int and n_validation > 0, "Validation sample size must be a positive integer")
     validations = list(validation_iterations)
     require(all(type(x) is int and x > 0 for x in validations)
             and all(a < b for a, b in zip(validations, validations[1:])),
@@ -93,8 +105,11 @@ def configuration(*, iteration_budgets=(500, 1000, 2000, 4000, 8000), checkpoint
     require(type(stationarity_tol) in (int, float) and math.isfinite(stationarity_tol)
             and stationarity_tol > 0, "Stationarity tolerance must be finite and positive")
     return dict(iteration_budgets=budgets, checkpoint_interval=checkpoint_interval,
+                validation_interval=validation_interval, validation_patience=validation_patience,
+                validation_min_iterations=validation_min_iterations,
+                validation_min_relative_improvement=validation_min_relative_improvement,
                 validation_iterations=validations, **grids,
-                inverse_step=20., stationarity_tol=stationarity_tol, n_validation=100,
+                inverse_step=20., stationarity_tol=stationarity_tol, n_validation=n_validation,
                 validation_seed_tag=1397970481, checkpoint_execution="continuous",
                 initialization_spectrum="projected", refinement_solver="anchor_projected",
                 spectral_step="projected", strict_source_check=False)
@@ -141,7 +156,7 @@ def resolved_configuration(setting, config):
         rank=rank, source_rank=source, sparsity=[sparsity, sparsity], support_limits=[counts],
         actual_complement_counts=counts, candidate_grid=grid, trajectory_count=len(grid),
         candidate_count=len(grid)*len(config["iteration_budgets"]), checkpoint_execution="continuous",
-        validation_interval=config["checkpoint_interval"], n_train=setting["n"],
+        validation_interval=config.get("validation_interval", config["checkpoint_interval"]), n_train=setting["n"],
         n_validation=config["n_validation"], fit_sample="all_supplied_training_rows",
         validation_mode="independent_external", refit_on_all_data=False, tuning_uses_truth=False,
         selection_metric="mean((Y_validation-X_validation@C_hat)**2)",
@@ -153,6 +168,8 @@ def resolved_configuration(setting, config):
         maximum = config["iteration_budgets"][-1]
         schedule = sorted({0, maximum, *config["iteration_budgets"],
             *range(config["checkpoint_interval"], maximum + 1, config["checkpoint_interval"]),
+            *range(config.get("validation_interval", config["checkpoint_interval"]), maximum + 1,
+                   config.get("validation_interval", config["checkpoint_interval"])),
             *(value for value in config["validation_iterations"] if value <= maximum)})
         result.update(validation_iterations=config["validation_iterations"],
                       validation_schedule=schedule,
@@ -311,10 +328,18 @@ def validate_plan(plan):
                 and len(set(values)) == len(values), f"Invalid planned {name}")
     config = plan["configuration"]
     expected = configuration(validation_iterations=config.get("validation_iterations", ()),
+        n_validation=config["n_validation"],
+        validation_interval=config.get("validation_interval", config["checkpoint_interval"]),
+        validation_patience=config.get("validation_patience"),
+        validation_min_iterations=config.get("validation_min_iterations", 500),
+        validation_min_relative_improvement=config.get("validation_min_relative_improvement", .001),
         **{key: config[key] for key in ("iteration_budgets", "checkpoint_interval",
                             "init_penalties", "penalties_u", "penalties_v", "stationarity_tol")})
     if "validation_iterations" not in config:
         expected.pop("validation_iterations")
+    for key in ("validation_interval", "validation_patience", "validation_min_iterations", "validation_min_relative_improvement"):
+        if key not in config:
+            expected.pop(key)
     require(config == expected, "Unsupported study configuration")
     seeds = [None]*100
     for cell in plan["cells"]:
@@ -360,9 +385,9 @@ def validate_record_identity(record, cell, plan):
     require(type(record.get("applicable")) is bool and record["applicable"] == applicable,
             "Record applicability mismatch")
     require(type(record.get("success")) is bool, "Missing record success status")
-    valid = ("complete", "partial", "all_candidates_failed") if applicable else ("inapplicable",)
+    valid = ("complete", "policy_complete", "partial", "all_candidates_failed") if applicable else ("inapplicable",)
     require(record.get("status") in valid, "Invalid record status")
-    require(record["success"] == (record["status"] in ("complete", "partial")), "Record success/status mismatch")
+    require(record["success"] == (record["status"] in ("complete", "policy_complete", "partial")), "Record success/status mismatch")
     if not applicable:
         require(record.get("failure_reason") == cell["inapplicability_reason"], "Wrong inapplicability reason")
     return record["status"]
@@ -488,8 +513,11 @@ def aggregate(run_root, output_root=None, *, merge_shards=False):
                         continue
                     from merge_sparse_smart_budget_shards import merge_records
                     from run_sparse_smart_budget_study import RunnerConfig
+                    options = dict(plan["configuration"])
+                    options.setdefault("validation_interval", options["checkpoint_interval"])
+                    options.setdefault("validation_patience", None)
                     record = merge_records([item[0] for item in collected],
-                        config=RunnerConfig(**plan["configuration"]), source_artifacts=[item[2] for item in collected])
+                        config=RunnerConfig(**options), source_artifacts=[item[2] for item in collected])
                     record["tuning_shard_merge"]["plan_fingerprint"] = plan["plan_fingerprint"]
                     raw = (json.dumps(record, sort_keys=True, indent=2, allow_nan=False)+"\n").encode()
                     evidence = dict(tuning_tasks=[item[2] for item in collected])
@@ -509,12 +537,14 @@ def aggregate(run_root, output_root=None, *, merge_shards=False):
                 errors.append(dict(task_id=task_id, error="invalid_cell_artifact", message=str(error)))
                 missing.append(task_id)
         execution_complete = not errors and not missing and len(copied) == plan["expected_cells"]
-        coverage_complete = execution_complete and not any(counts[key] for key in ("partial", "all_candidates_failed"))
+        coverage_complete = execution_complete and not any(counts[key] for key in ("policy_complete", "partial", "all_candidates_failed"))
+        policy_complete = execution_complete and not any(counts[key] for key in ("partial", "all_candidates_failed"))
         report = dict(schema_version=1, plan_fingerprint=plan["plan_fingerprint"], no_fits_performed=True,
             expected_cells=plan["expected_cells"], expected_applicable=plan["expected_applicable"],
             expected_inapplicable=plan["expected_inapplicable"], recorded_cells=len(copied), missing_cells=missing,
             errors=errors, status_counts=dict(counts), execution_complete=execution_complete,
-            budget_coverage_complete=coverage_complete, scientific_validation="pending_existing_summarizer",
+            budget_coverage_complete=coverage_complete, policy_complete=policy_complete,
+            scientific_validation="pending_existing_summarizer",
             cells=copied, finished=datetime.now(timezone.utc).isoformat())
         if "work_items" in plan:
             report.update(expected_tasks=len(tasks), recorded_tasks=len(artifacts), missing_tasks=missing_tasks,
@@ -525,7 +555,7 @@ def aggregate(run_root, output_root=None, *, merge_shards=False):
         manifest.update(plan_fingerprint=plan["plan_fingerprint"], output_root=str(output), cells=copied,
             errors=errors, missing_cells=missing, status_counts=dict(counts),
             attempt_status="completed" if execution_complete else "incomplete", finished=report["finished"],
-            execution_complete=execution_complete, budget_coverage_complete=coverage_complete,
+            execution_complete=execution_complete, budget_coverage_complete=coverage_complete, policy_complete=policy_complete,
             scientific_validation="pending_existing_summarizer", no_fits_performed=True)
         if "work_items" in plan:
             manifest.update(expected_tasks=len(tasks), recorded_tasks=len(artifacts), missing_tasks=missing_tasks,
@@ -583,6 +613,12 @@ def main(argv=None):
     p.add_argument("--setting-index", type=int)
     p.add_argument("--iteration-budgets", type=int, nargs="+", default=defaults["iteration_budgets"])
     p.add_argument("--checkpoint-interval", type=int, default=defaults["checkpoint_interval"])
+    p.add_argument("--validation-interval", type=int, default=defaults["validation_interval"])
+    p.add_argument("--validation-patience", type=int, default=defaults["validation_patience"])
+    p.add_argument("--validation-min-iterations", type=int, default=defaults["validation_min_iterations"])
+    p.add_argument("--validation-min-relative-improvement", type=float, default=defaults["validation_min_relative_improvement"])
+    p.add_argument("--n-validation", type=int, default=defaults["n_validation"])
+    p.add_argument("--no-validation-stop", action="store_true")
     p.add_argument("--validation-iterations", nargs="+", default=[",".join(map(str, defaults["validation_iterations"]))],
                    help="Additional validation iterations (comma/space list), or none")
     p.add_argument("--init-penalties", type=float_grid, default=defaults["init_penalties"])
@@ -603,8 +639,12 @@ def main(argv=None):
             values.pop("command")
             output = values.pop("output_root")
             values["validation_iterations"] = validation_grid(values["validation_iterations"])
+            if values.pop("no_validation_stop"):
+                values["validation_patience"] = None
             config = configuration(**{key: values.pop(key) for key in ("iteration_budgets", "checkpoint_interval",
-                "validation_iterations", "init_penalties", "penalties_u", "penalties_v", "stationarity_tol")})
+                "validation_interval", "validation_patience", "validation_min_iterations",
+                "validation_min_relative_improvement", "n_validation", "validation_iterations",
+                "init_penalties", "penalties_u", "penalties_v", "stationarity_tol")})
             plan = write_plan(make_plan(config=config, **values), output)
             print(json.dumps(dict({key: plan[key] for key in ("plan_fingerprint", "expected_cells", "expected_applicable", "expected_inapplicable")},
                                   expected_tasks=len(planned_tasks(plan)))))

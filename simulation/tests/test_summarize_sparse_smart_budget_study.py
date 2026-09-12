@@ -24,7 +24,7 @@ def generator(*,n,p,q,**kwargs):
 @lru_cache(None)
 def generated(seed):
     s=experiment_settings(0,2)[2]
-    c=runner.RunnerConfig(iteration_budgets=(2,4,8),checkpoint_interval=2,validation_iterations=(),
+    c=runner.RunnerConfig(iteration_budgets=(2,4,8),checkpoint_interval=2,validation_interval=2,validation_patience=None,n_validation=100,validation_iterations=(),
         init_penalties=(.03,),penalties_u=(.0025,.01),penalties_v=(.0025,))
     return summary._data(s,int(load_experiment_seeds(DEFAULT_SEED_FILE)[seed]),c,{},generator)
 
@@ -47,6 +47,7 @@ def refresh_caps(record):
         winner=min(eligible,key=lambda r:(r['validation_mse'],r['candidate_id'])) if eligible else None
         unresolved=[r['grid_candidate_id'] for r in current if not r['budget_reached']]
         out=dict(iteration_budget=budget,coverage_complete=not unresolved,budget_reached_count=len(current)-len(unresolved),
+            policy_complete=not unresolved,validation_stopped_count=0,
             unresolved_grid_candidate_ids=unresolved,status='unresolved' if unresolved else 'resolved',
             success=bool(eligible),eligible_candidate_count=len(eligible),eligible_grid_count=len({r['grid_candidate_id'] for r in eligible}),
             winner_candidate_id=None,winner_grid_candidate_id=None,winner_origin_budget=None,winner_checkpoint_iteration=None,
@@ -71,7 +72,7 @@ def fixture(seed=0, *, stops=None, tied=False):
     setting=experiment_settings(0,2)[2]
     # This synthetic record contains only periodic states, independent of the
     # production early-validation defaults. Dense schedules have separate fixtures.
-    config=runner.RunnerConfig(iteration_budgets=(2,4,8),checkpoint_interval=2,validation_iterations=(),
+    config=runner.RunnerConfig(iteration_budgets=(2,4,8),checkpoint_interval=2,validation_interval=2,validation_patience=None,n_validation=100,validation_iterations=(),
         init_penalties=(.03,),penalties_u=(.0025,.01),penalties_v=(.0025,))
     resolved=_json_value(runner.resolved_configuration(setting,config))
     random_seed=int(load_experiment_seeds(DEFAULT_SEED_FILE)[seed])
@@ -198,7 +199,7 @@ def test_cache_eviction_preserves_complete_audit_report_byte_for_byte(tmp_path,m
         write(tmp_path,base)
         changed=deepcopy(base)
         setting=experiment_settings(0,2)[3]
-        config=runner.RunnerConfig(iteration_budgets=(2,4,8),checkpoint_interval=2,validation_iterations=(),
+        config=runner.RunnerConfig(iteration_budgets=(2,4,8),checkpoint_interval=2,validation_interval=2,validation_patience=None,n_validation=100,validation_iterations=(),
             init_penalties=(.03,),penalties_u=(.0025,.01),penalties_v=(.0025,))
         changed['setting']=asdict(setting)
         changed['configuration']=_json_value(runner.resolved_configuration(setting,config))
@@ -461,7 +462,7 @@ def test_model_se_uses_seed_averages_not_settings_as_independent_replicates(tmp_
         for exp,suffix in summary.DIFFICULT_SETTINGS:
             value=fixture(seed)
             setting=next(s for s in experiment_settings(0,exp) if s.suffix==suffix)
-            config=runner.RunnerConfig(iteration_budgets=(2,4,8),checkpoint_interval=2,validation_iterations=(),init_penalties=(.03,),penalties_u=(.0025,.01),penalties_v=(.0025,))
+            config=runner.RunnerConfig(iteration_budgets=(2,4,8),checkpoint_interval=2,validation_interval=2,validation_patience=None,n_validation=100,validation_iterations=(),init_penalties=(.03,),penalties_u=(.0025,.01),penalties_v=(.0025,))
             value.update(experiment=f'exp{exp+1}',setting=asdict(setting),configuration=_json_value(runner.resolved_configuration(setting,config)))
             value['generator_arguments']['sigma0']=setting.sigma0
             identity={k:value[k] for k in ('schema_version','method','model','experiment','rd_seed_id','random_seed','setting','configuration','generator_arguments')}

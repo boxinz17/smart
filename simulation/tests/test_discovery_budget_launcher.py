@@ -12,6 +12,9 @@ import sys
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import discovery_budget_study as study
+
 
 REPO = Path(__file__).resolve().parents[2]
 HPC = REPO / "hpc" / "discovery"
@@ -89,7 +92,7 @@ def test_one_seed_dry_run_splits_full_grid_and_distributes_resources(checkout, t
     assert rows[0] == ["m0_e0_s0_k0_g0", "0", "0", "0", "0"]
     assert plan["expected_applicable"] == 63
     assert plan["expected_inapplicable"] == 9
-    assert plan["configuration"]["iteration_budgets"] == [500, 1000, 2000, 4000, 8000]
+    assert plan["configuration"]["iteration_budgets"] == [500, 1000, 2000]
     assert plan["configuration"]["init_penalties"] == [.01, .03, .1, .3]
     assert plan["configuration"]["penalties_u"] == plan["configuration"]["penalties_v"] == [.0025, .01, .04, .16, .32]
     assert plan["configuration"]["validation_iterations"] == [1, 2, 5, 10, 15, 20, 25, 50, 100, 150, 200]
@@ -98,6 +101,14 @@ def test_one_seed_dry_run_splits_full_grid_and_distributes_resources(checkout, t
                   if line.startswith("budget_args=("))
     budget_args = shlex.split(stored)
     assert budget_args[budget_args.index("--validation-iterations")+1] == "1,2,5,10,15,20,25,50,100,150,200"
+    for flag, key, expected in (("--validation-interval", "validation_interval", 50),
+                               ("--validation-patience", "validation_patience", 300),
+                               ("--validation-min-iterations", "validation_min_iterations", 500),
+                               ("--validation-min-relative-improvement", "validation_min_relative_improvement", .001),
+                               ("--n-validation", "n_validation", 200)):
+        assert plan["configuration"][key] == expected
+        assert float(budget_args[budget_args.index(flag) + 1]) == expected
+    assert "--no-validation-stop" not in budget_args
     assert "--tuning-task-size" not in budget_args
     command = shlex.split((run / "submission-command.txt").read_text())
     assert "--ntasks=32" in command and "--cpus-per-task=1" in command
@@ -105,15 +116,95 @@ def test_one_seed_dry_run_splits_full_grid_and_distributes_resources(checkout, t
     assert not any(arg.startswith(("--nodes", "--ntasks-per-node", "--array", "--exclusive")) for arg in command)
     assert (run / "source/.python-version").read_text() == "3.12\n"
     assert not (run / "source/results/must-not-copy.json").exists()
-    archived = archive_root / run.name
-    assert (archived / "study-plan.json").read_bytes() == (run / "study-plan.json").read_bytes()
-    assert (archived / "source/hpc/discovery/budget_worker.sh").exists()
-    assert (archived / "source/simulation/merge_sparse_smart_budget_shards.py").exists()
+    assert not archive_root.exists()
+    assert (run / "source/hpc/discovery/budget_worker.sh").exists()
+    assert (run / "source/simulation/merge_sparse_smart_budget_shards.py").exists()
+    assert (run / "archive-status.txt").read_text().strip() == "deferred"
+    assert (run / "postprocessing-status.txt").read_text().strip() == "deferred"
     configs = sorted((run / "task-configs").glob("*.sh"))
     assert len(configs) == 100
-    assert len(list((archived / "task-configs").glob("*.sh"))) == 100
-    for path in configs:
-        assert (archived / "task-configs" / path.name).read_bytes() == path.read_bytes()
+
+
+@pytest.mark.parametrize("n_validation", [100, 200])
+def test_dry_run_disabled_stopping_and_validation_overrides_reach_plan_and_runner(checkout, tmp_path,
+                                                                               n_validation):
+    arguments = ("--models", "0", "--experiments", "0", "--setting-index", "0", "--seeds", "0",
+                 "--workers", "1", "--init-penalties", ".03", "--penalties-u", ".01",
+                 "--penalties-v", ".01", "--no-validation-stop", "--n-validation", str(n_validation),
+                 "--validation-interval", "25", "--validation-patience", "150",
+                 "--validation-min-iterations", "250", "--validation-min-relative-improvement", ".002")
+    result, roots, _ = dry_run(checkout, tmp_path, arguments)
+    assert result.returncode == 0, result.stderr
+    assert len(roots) == 1
+    config = json.loads((roots[0] / "study-plan.json").read_text())["configuration"]
+    assert config["n_validation"] == n_validation and config["validation_patience"] is None
+    assert config["validation_interval"] == 25 and config["validation_min_iterations"] == 250
+    assert config["validation_min_relative_improvement"] == .002
+    stored = next(line.removeprefix("budget_args=(").removesuffix(")")
+                  for line in (roots[0] / "budget-job-config.sh").read_text().splitlines()
+                  if line.startswith("budget_args=("))
+    budget_args = shlex.split(stored)
+    assert "--no-validation-stop" in budget_args
+    for flag, expected in (("--n-validation", n_validation), ("--validation-interval", 25),
+                           ("--validation-patience", 150), ("--validation-min-iterations", 250),
+                           ("--validation-min-relative-improvement", .002)):
+        assert float(budget_args[budget_args.index(flag) + 1]) == expected
+
+
+@pytest.mark.parametrize("archive_kind", ["omitted", "environment", "symlink_loop", "file_parent"])
+def test_submission_never_requires_or_resolves_archive_storage(checkout, tmp_path, archive_kind):
+    bin_dir = tmp_path / "bin"
+    capture = tmp_path / "sbatch.json"
+    executable(bin_dir / "sbatch", """
+import json, os, sys
+from pathlib import Path
+Path(os.environ['SBATCH_CAPTURE']).write_text(json.dumps(sys.argv[1:]))
+print('12345')
+""", python=True)
+    run_root = tmp_path / "runs with $literal {1} % text"
+    archive = tmp_path / "archive $literal {1} % text"
+    extra = []
+    environment = dict(os.environ, SMART_PLAN_PYTHON=sys.executable,
+                       PATH=f"{bin_dir}:{os.environ['PATH']}", SBATCH_CAPTURE=str(capture))
+    environment.pop("SMART_ARCHIVE_ROOT", None)
+    if archive_kind == "symlink_loop":
+        archive.symlink_to(archive.name)
+        extra = ["--archive-root", str(archive)]
+    elif archive_kind == "file_parent":
+        archive.write_text("Unavailable archive storage must remain untouched.\n")
+        extra = ["--archive-root", str(archive / "unavailable")]
+    elif archive_kind == "environment":
+        environment["SMART_ARCHIVE_ROOT"] = str(archive)
+    result = subprocess.run(
+        ["bash", str(checkout / "hpc/discovery/submit_budget_study.sh"),
+         "--run-root", str(run_root), "--workers", "1", "--models", "0",
+         "--experiments", "3", "--setting-index", "5", "--seeds", "1",
+         "--tuning-task-size", "all", *extra],
+        env=environment, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    run, = run_root.iterdir()
+    submitted = json.loads(capture.read_text())
+    assert submitted[-1] == str(run)
+    assert "--ntasks=1" in submitted
+    assert (run / "study-plan.json").is_file()
+    assert (run / "source/simulation/run_sparse_smart_budget_study.py").is_file()
+    assert (run / "archive-status.txt").read_text().strip() == "deferred"
+    assert (run / "postprocessing-status.txt").read_text().strip() == "deferred"
+    expected_archive = extra[-1] if extra else environment.get("SMART_ARCHIVE_ROOT", "")
+    configuration = (run / "budget-job-config.sh").read_text()
+    assert len([line for line in configuration.splitlines() if line.startswith("requested_archive_root=")]) == 1
+    requested = subprocess.run(
+        ["bash", "-c", 'source "$1"; printf "%s" "$requested_archive_root"', "bash", str(run / "budget-job-config.sh")],
+        env=environment, capture_output=True, text=True, check=True)
+    assert requested.stdout == expected_archive
+    assert not any(line.startswith("archive_dir=") for line in configuration.splitlines())
+    assert "Archival: deferred" in (run / "manifest.txt").read_text()
+    if archive_kind == "file_parent":
+        assert archive.read_text() == "Unavailable archive storage must remain untouched.\n"
+    elif archive_kind == "symlink_loop":
+        assert archive.is_symlink() and os.readlink(archive) == archive.name
+    else:
+        assert not archive.exists()
 
 
 def test_all_mode_preserves_whole_cell_work_items_for_full_seed_scope(checkout, tmp_path):
@@ -216,7 +307,7 @@ def test_targeted_preset_restricts_source_rank_and_expands_budget(
         expected_penalties.insert(0, .001)
     assert config["penalties_u"] == config["penalties_v"] == expected_penalties
     assert config["init_penalties"] == [.01, .03, .1, .3]
-    assert config["iteration_budgets"] == [500, 1000, 2000, 4000, 8000, 16000]
+    assert config["iteration_budgets"] == [500, 1000, 2000]
     assert config["checkpoint_interval"] == 250 and config["stationarity_tol"] == 1e-6
     assert config["validation_iterations"] == [1, 2, 5, 10, 15, 20, 25, 50, 100, 150, 200]
     assert "--ntasks=150" in shlex.split((run / "submission-command.txt").read_text())
@@ -289,7 +380,9 @@ def worker_run(tmp_path):
         shutil.copyfile(HPC / name, hpc / name)
     (source / "simulation").mkdir()
     (run / "tasks").mkdir()
-    archive.mkdir()
+    # A stale legacy archive destination is deliberately unusable. None of the
+    # execution paths may resolve or touch it, even when they fail.
+    archive.symlink_to(archive.name)
     (hpc / "env.sh").write_text("export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1\n")
     config = (f"run_dir={shlex.quote(str(run))}\narchive_dir={shlex.quote(str(archive))}\n"
               f"pool_workers=1\nexport VENV={shlex.quote(str(tmp_path / 'venv'))}\n"
@@ -298,32 +391,53 @@ def worker_run(tmp_path):
               "--init-penalties .03 --penalties-u .0025 --penalties-v .01 --stationarity-tol 1e-6)\n")
     (run / "budget-job-config.sh").write_text(config)
     executable(bin_dir / "srun", """
-import json, os, subprocess, sys
+import json, os, signal, subprocess, sys
 from pathlib import Path
 args = sys.argv[1:]
 Path(os.environ['SRUN_CAPTURE']).write_text(json.dumps({'args': args, 'memory': os.environ.get('SLURM_MEM_PER_CPU')}))
 if os.environ.get('SRUN_FAIL'):
     print('deliberate launch failure', file=sys.stderr)
     raise SystemExit(int(os.environ['SRUN_FAIL']))
+if os.environ.get('SRUN_TERM'):
+    os.kill(os.getppid(), signal.SIGTERM)
+    raise SystemExit(0)
 raise SystemExit(subprocess.call(args[args.index('bash'):]))
 """, python=True)
     executable(bin_dir / "python", """
-import json, os, sys
+import json, os, signal, sys
 from pathlib import Path
 if sys.argv[1:] == ['--version']:
     print('Python fixture')
     raise SystemExit(0)
 Path(os.environ['PYTHON_CAPTURE']).write_text(json.dumps(sys.argv[1:]))
 print('fake runner called; no estimator imported')
+if os.environ.get('FAKE_RESULT_FIXTURE'):
+    fixture = json.loads(Path(os.environ['FAKE_RESULT_FIXTURE']).read_text())
+    root = Path(sys.argv[sys.argv.index('--output-root')+1])
+    for relative, value in fixture.items():
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(value))
+if os.environ.get('RUNNER_TERM'):
+    os.kill(os.getppid(), signal.SIGTERM)
+    raise SystemExit(0)
 raise SystemExit(int(os.environ.get('RUNNER_FAIL', '0')))
 """, python=True)
+    for name in ("rsync", "cp", "pip"):
+        executable(bin_dir / name, 'printf "%s\\n" "$0 $*" >> "$FORBIDDEN_CAPTURE"\nexit 91\n')
     environment = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}",
                        SLURM_JOB_ID="123", SLURM_NTASKS="1", SLURM_MEM_PER_CPU="8192",
-                       SRUN_CAPTURE=str(tmp_path / "srun.json"), PYTHON_CAPTURE=str(tmp_path / "python.json"))
+                       SRUN_CAPTURE=str(tmp_path / "srun.json"), PYTHON_CAPTURE=str(tmp_path / "python.json"),
+                       FORBIDDEN_CAPTURE=str(tmp_path / "forbidden-calls.txt"))
     return run, archive, bin_dir, environment
 
 
-def test_worker_launch_failure_is_preserved_and_archived(worker_run):
+def assert_archive_untouched(archive, environment):
+    assert archive.is_symlink() and os.readlink(archive) == archive.name
+    assert not Path(environment["FORBIDDEN_CAPTURE"]).exists()
+
+
+def test_worker_launch_failure_is_preserved_with_archive_deferred(worker_run):
     run, archive, _, environment = worker_run
     environment["SRUN_FAIL"] = "17"
     task = "m0_e3_s1_k5"
@@ -332,19 +446,22 @@ def test_worker_launch_failure_is_preserved_and_archived(worker_run):
                             env=environment, timeout=10)
     assert result.returncode == 17
     assert (run / "tasks" / task / "launcher-exit-code.txt").read_text().strip() == "17"
-    assert (archive / "tasks" / task / "launcher-exit-code.txt").read_text().strip() == "17"
+    assert (run / "tasks" / task / "archive-status.txt").read_text().strip() == "deferred"
+    assert not (run / "tasks" / task / "process-exit-code.txt").exists()
+    assert_archive_untouched(archive, environment)
     assert not Path(environment["PYTHON_CAPTURE"]).exists()
     assert "deliberate launch failure" in (run / "logs/steps" / f"{task}.err").read_text()
 
 
-def test_worker_runs_one_named_argument_cell_and_preserves_runner_failure(worker_run):
+@pytest.mark.parametrize("runner_status", [0, 23])
+def test_worker_runs_one_named_argument_cell_and_preserves_runner_outcome(worker_run, runner_status):
     run, archive, _, environment = worker_run
-    environment["RUNNER_FAIL"] = "23"
+    environment["RUNNER_FAIL"] = str(runner_status)
     task = "m0_e3_s1_k5"
     result = subprocess.run(["bash", str(run / "source/hpc/discovery/budget_worker.sh"),
                              "dispatch", str(run), task, "0", "3", "1", "5"],
                             env=environment, timeout=10)
-    assert result.returncode == 23
+    assert result.returncode == runner_status
     launch = json.loads(Path(environment["SRUN_CAPTURE"]).read_text())
     assert all(arg in launch["args"] for arg in ("--exclusive", "--exact", "--nodes=1", "--ntasks=1", "--cpus-per-task=1"))
     assert launch["memory"] == "8192"
@@ -355,8 +472,13 @@ def test_worker_runs_one_named_argument_cell_and_preserves_runner_failure(worker
                         ("--output-root", str(run / "tasks" / task / "results"))):
         assert invocation[invocation.index(flag)+1] == value
     for name in ("process-exit-code.txt", "exit-code.txt", "launcher-exit-code.txt"):
-        assert (run / "tasks" / task / name).read_text().strip() == "23"
-        assert (archive / "tasks" / task / name).read_text().strip() == "23"
+        assert (run / "tasks" / task / name).read_text().strip() == str(runner_status)
+    task_dir = run / "tasks" / task
+    assert (task_dir / "archive-status.txt").read_text().strip() == "deferred"
+    assert (task_dir / "environment.txt").is_file()
+    assert (task_dir / "started.lock").is_dir()
+    assert "fake runner called" in (task_dir / "slurm.out").read_text()
+    assert_archive_untouched(archive, environment)
 
 
 def test_worker_shard_appends_only_tuning_overrides_and_preserves_source(worker_run):
@@ -378,7 +500,43 @@ def test_worker_shard_appends_only_tuning_overrides_and_preserves_source(worker_
     assert invocation[invocation.index("--seed-file")+1] == str(
         run / "source/simulation/data/random_seeds/experiment_seeds.csv")
     assert invocation[invocation.index("--output-root")+1] == str(run / "tasks" / task / "results")
-    assert (archive / "tasks" / task / "launcher-exit-code.txt").read_text().strip() == "0"
+    assert (run / "tasks" / task / "launcher-exit-code.txt").read_text().strip() == "0"
+    assert (run / "tasks" / task / "archive-status.txt").read_text().strip() == "deferred"
+    assert_archive_untouched(archive, environment)
+
+
+def test_worker_runs_without_any_archive_configuration(worker_run):
+    run, archive, _, environment = worker_run
+    config = run / "budget-job-config.sh"
+    config.write_text("\n".join(line for line in config.read_text().splitlines()
+                               if not line.startswith("archive_dir=")) + "\n")
+    task = "m0_e3_s1_k5"
+    result = subprocess.run(["bash", str(run / "source/hpc/discovery/budget_worker.sh"),
+                             "dispatch", str(run), task, "0", "3", "1", "5"],
+                            env=environment, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert (run / "tasks" / task / "archive-status.txt").read_text().strip() == "deferred"
+    assert_archive_untouched(archive, environment)
+
+
+@pytest.mark.parametrize("interruption", ["RUNNER_TERM", "SRUN_TERM"])
+def test_worker_handled_term_preserves_signal_status_without_archival(worker_run, interruption):
+    run, archive, _, environment = worker_run
+    environment[interruption] = "1"
+    task = "m0_e3_s1_k5"
+    result = subprocess.run(["bash", str(run / "source/hpc/discovery/budget_worker.sh"),
+                             "dispatch", str(run), task, "0", "3", "1", "5"],
+                            env=environment, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 143, result.stderr
+    task_dir = run / "tasks" / task
+    assert (task_dir / "launcher-exit-code.txt").read_text().strip() == "143"
+    assert (task_dir / "archive-status.txt").read_text().strip() == "deferred"
+    if interruption == "RUNNER_TERM":
+        assert (task_dir / "process-exit-code.txt").read_text().strip() == "143"
+        assert (task_dir / "exit-code.txt").read_text().strip() == "143"
+    else:
+        assert not (task_dir / "process-exit-code.txt").exists()
+    assert_archive_untouched(archive, environment)
 
 
 @pytest.mark.parametrize("task", ["m0_e3_s1_k5_g-1", "m0_e3_s1_k5_g00", "m0_e3_s1_k5_gx",
@@ -428,36 +586,119 @@ def test_worker_rejects_missing_unsafe_or_wrong_tuning_configuration(worker_run,
         assert (run / "tasks" / task / "process-exit-code.txt").read_text().strip() == "2"
 
 
-@pytest.mark.parametrize("environment_status", [0, 9])
-def test_pool_collects_after_worker_failure_and_merges_only_with_valid_runtime(worker_run, tmp_path, environment_status):
+@pytest.mark.parametrize("worker_status, handled_term", [(0, False), (3, False), (0, True)])
+def test_pool_exits_after_fitting_without_controller_python_or_archival(
+    worker_run, tmp_path, worker_status, handled_term,
+):
     run, archive, bin_dir, environment = worker_run
+    config = run / "budget-job-config.sh"
+    config.write_text("\n".join(line for line in config.read_text().splitlines()
+                               if not line.startswith("archive_dir=")) + "\n")
     (run / "study-plan.json").write_text("{}\n")
     (run / "work-items.tsv").write_text("m0_e3_s1_k5\t0\t3\t1\t5\n")
-    # The fake dispatcher never launches children; its failure simulates a
-    # failed work item. The fake Python only records controller-stage calls.
-    executable(bin_dir / "parallel", 'if [[ "$*" == *--version* ]]; then echo fixture; exit 0; fi\nexit 3\n')
-    executable(bin_dir / "python", """
-import json, os, sys
-with open(os.environ['CONTROLLER_CAPTURE'], 'a') as stream:
-    stream.write(json.dumps(sys.argv[1:]) + '\\n')
-raise SystemExit(4 if 'aggregate' in sys.argv else 0)
+    # The fake dispatcher never launches children. It captures the exact queue
+    # contract and simulates its outcome, including a handled controller TERM.
+    executable(bin_dir / "parallel", """
+import json, os, signal, sys
+from pathlib import Path
+args = sys.argv[1:]
+if '--version' in args:
+    print('GNU Parallel fixture')
+    raise SystemExit(0)
+Path(os.environ['PARALLEL_CAPTURE']).write_text(json.dumps(args))
+joblog = Path(args[args.index('--joblog')+1])
+joblog.write_text('Seq\\tExitval\\n1\\t' + os.environ['WORKER_STATUS'] + '\\n')
+if os.environ.get('PARALLEL_TERM'):
+    os.kill(os.getppid(), signal.SIGTERM)
+raise SystemExit(int(os.environ['WORKER_STATUS']))
 """, python=True)
+    executable(bin_dir / "python", 'printf "controller Python was called\\n" >> "$FORBIDDEN_CAPTURE"\nexit 92\n')
     venv_bin = tmp_path / "venv/bin"
     venv_bin.mkdir(parents=True)
     (venv_bin / "python").symlink_to(bin_dir / "python")
     bash_env = tmp_path / "bash-env"
     bash_env.write_text("module() { return 0; }\n")
-    environment.update(BASH_ENV=str(bash_env), CONTROLLER_CAPTURE=str(tmp_path / "controller.jsonl"))
-    if environment_status:
-        (run / "source/hpc/discovery/env.sh").write_text(f"return {environment_status}\n")
+    environment.update(BASH_ENV=str(bash_env), PARALLEL_CAPTURE=str(tmp_path / "parallel.json"),
+                       WORKER_STATUS=str(worker_status))
+    if handled_term:
+        environment["PARALLEL_TERM"] = "1"
+    # Even a broken scientific environment must not be sourced by a fitting-only
+    # controller after its workers terminate.
+    (run / "source/hpc/discovery/env.sh").write_text(
+        'printf "controller sourced scientific environment\\n" >> "$FORBIDDEN_CAPTURE"\nreturn 9\n')
     result = subprocess.run(["bash", str(run / "source/hpc/discovery/budget_pool.sbatch"), str(run)],
                             env=environment, capture_output=True, text=True, timeout=10)
-    assert result.returncode == 3, result.stderr
-    calls = [json.loads(line) for line in Path(environment["CONTROLLER_CAPTURE"]).read_text().splitlines()]
-    aggregate_call = next(call for call in calls if "aggregate" in call)
-    assert ("--merge-shards" in aggregate_call) == (environment_status == 0)
-    assert any(call[0].endswith("summarize_sparse_smart_budget_study.py") for call in calls) == (environment_status == 0)
-    status = (run / "stage-status.tsv").read_text()
-    assert "workers\t3" in status and "aggregate\t4" in status
-    assert f"environment\t{environment_status}" in status and f"summary\t{environment_status}" in status
-    assert (archive / "pool-exit-code.txt").read_text().strip() == "3"
+    expected_status = 143 if handled_term else worker_status
+    assert result.returncode == expected_status, result.stderr
+    arguments = json.loads(Path(environment["PARALLEL_CAPTURE"]).read_text())
+    assert arguments[arguments.index("--jobs")+1] == "1"
+    assert arguments[arguments.index("--halt")+1] == "never"
+    assert "--plain" in arguments and "--quote" in arguments
+    assert arguments[arguments.index("--colsep")+1] == "\\t"
+    assert arguments[arguments.index("--joblog")+1] == str(run / "logs/parallel-joblog.tsv")
+    assert arguments[-1] == str(run / "work-items.tsv")
+    assert arguments[arguments.index("bash"):] == [
+        "bash", "./source/hpc/discovery/budget_worker.sh", "dispatch", ".",
+        "{1}", "{2}", "{3}", "{4}", "{5}", "::::", str(run / "work-items.tsv")]
+    status_rows = (run / "stage-status.tsv").read_text().splitlines()
+    assert status_rows[0] == "stage\texit_code"
+    if not handled_term:
+        assert status_rows[1:] == [f"workers\t{worker_status}"]
+    else:
+        assert all(row.startswith("workers\t") for row in status_rows[1:])
+    assert (run / "pool-exit-code.txt").read_text().strip() == str(expected_status)
+    assert (run / "pipeline-mode.txt").read_text().strip() == "fit-only"
+    assert (run / "fit-status.txt").read_text().strip() == ("finished" if not expected_status else "failed")
+    for name in ("archive-status.txt", "postprocessing-status.txt"):
+        assert (run / name).read_text().strip() == "deferred"
+    assert (run / "logs/parallel-joblog.tsv").is_file()
+    assert not (run / "results").exists()
+    assert not (run / "logs/aggregate.log").exists()
+    assert not (run / "logs/summary.log").exists()
+    assert_archive_untouched(archive, environment)
+
+
+def test_fitting_only_worker_preserves_collector_compatible_primary_artifacts(
+    checkout, worker_run, tmp_path,
+):
+    fixture_run, archive, _, environment = worker_run
+    prepared, roots, archive_root = dry_run(checkout, tmp_path / "prepare", (
+        "--workers", "1", "--models", "0", "--experiments", "2",
+        "--setting-index", "0", "--seeds", "1"))
+    assert prepared.returncode == 0, prepared.stderr
+    run, = roots
+    plan = study.read_json(run / "study-plan.json")
+    task, = study.planned_tasks(plan)
+    setting = task["simulation_setting"]
+    identity = dict(schema_version=1, method=study.METHOD, model="model1", experiment="exp3",
+        rd_seed_id=task["seed"], random_seed=task["random_seed"], setting=setting,
+        configuration=study.resolved_configuration(setting, plan["configuration"]),
+        generator_arguments=dict(n=setting["n"], p=setting["p"], q=setting["q"], sigma0=setting["sigma0"],
+                                 sigma=.5, r_star=5, r0_star=10, random_seed=task["random_seed"]))
+    provenance = plan["source"]["implementation"]["false"]
+    record = dict(identity, configuration_fingerprint=study.digest(identity),
+        implementation_fingerprint_scheme=study.SCHEME,
+        implementation_manifest=provenance["manifest"], implementation_fingerprint=provenance["fingerprint"],
+        applicable=False, status="inapplicable", success=False, failure_reason=task["inapplicability_reason"])
+    manifest = dict(schema_version=1, method=study.METHOD, models=[0], experiments=[2], seed_ids=[1],
+        profile=plan["profile"], setting_index=0, expected_cells=1, configuration=plan["configuration"],
+        seed_file_sha256=plan["seed_file_sha256"], attempt_status="completed", errors=[],
+        cells=[dict(model="model1", experiment="exp3", setting=setting["suffix"], seed_id=1)])
+    fixture = tmp_path / "fake-runner-output.json"
+    fixture.write_text(json.dumps({str(study.relative_result(task)): record, "budget_study_manifest.json": manifest}))
+    environment["FAKE_RESULT_FIXTURE"] = str(fixture)
+    shutil.copyfile(fixture_run / "source/hpc/discovery/env.sh", run / "source/hpc/discovery/env.sh")
+    result = subprocess.run(["bash", str(run / "source/hpc/discovery/budget_worker.sh"),
+                             "dispatch", str(run), task["task_id"], "0", "2", "1", "0"],
+                            env=environment, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    errors = []
+    collected, raw, artifact = study._read_task(run, task, plan, errors)
+    assert not errors
+    assert collected == json.loads(raw) == record
+    assert artifact["task_id"] == task["task_id"]
+    assert artifact["cell_manifest"]["attempt_status"] == "completed"
+    assert (run / "tasks" / task["task_id"] / "archive-status.txt").read_text().strip() == "deferred"
+    assert not (run / "results").exists(), "Fitting unexpectedly created an aggregate"
+    assert not archive_root.exists()
+    assert_archive_untouched(archive, environment)

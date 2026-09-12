@@ -130,7 +130,8 @@ def run(tmp_path, *, calls=None, config=CONFIG, api=None, generator=data):
 def test_early_validation_roundtrip_retains_historical_bests_and_audits_coverage(tmp_path):
     import summarize_sparse_smart_budget_study as summary
     calls = {}
-    config = replace(CONFIG, iteration_budgets=(4,8), checkpoint_interval=4, validation_iterations=(1,2,3))
+    config = replace(CONFIG, iteration_budgets=(4,8), checkpoint_interval=4,
+                     validation_interval=4, validation_patience=None, validation_iterations=(1,2,3))
     api = fake_api(calls, scales=(1., .4, .2, .8, .5, .5, .5, .5, .6))
     _, value = run(tmp_path, calls=calls, config=config, api=api)
     assert calls['options']['validation_iterations'] == (1,2,3)
@@ -162,7 +163,7 @@ def test_continuous_runner_fits_once_and_saves_independently_reconstructible_che
     assert calls['options']['checkpoint_execution'] == 'continuous' and calls['options']['checkpoint_interval'] == 1
     assert calls['options']['stationarity_tol'] == CONFIG.stationarity_tol
     assert calls['options']['support_limits'] is None and not calls['options']['enforce_source_accuracy']
-    assert calls['training'][0].shape == (6,4) and calls['validation'][0].shape == (100,4)
+    assert calls['training'][0].shape == (6,4) and calls['validation'][0].shape == (200,4)
     np.testing.assert_array_equal(calls['training'][0],data(n=6,p=4,q=3,random_seed=123)['X'])
     assert value['status'] == 'complete' and value['success']
     assert len(value['trajectories']) == 2 and len(value['selection_history']) == 4
@@ -229,7 +230,7 @@ def test_matching_checkpoint_skips_only_after_data_truth_and_code_verification(t
     with pytest.raises(ValueError,match='[Ii]mplementation differs'):
         run(tmp_path,api=api)
     assert (tmp_path/'record.json').read_bytes() == original
-    assert first['n_train'] == 6 and first['n_validation'] == 100
+    assert first['n_train'] == 6 and first['n_validation'] == 200
 
 
 @pytest.mark.parametrize('mutation',[
@@ -251,16 +252,43 @@ def test_default_dry_run_declares_45_cells_without_creating_artifacts(tmp_path,c
     manifest = json.loads(capsys.readouterr().out)
     assert manifest['expected_cells'] == manifest['expected_applicable'] == 45
     assert manifest['expected_inapplicable'] == 0 and manifest['seed_ids'] == list(range(5))
-    assert manifest['configuration']['iteration_budgets'] == [500,1000,2000,4000,8000]
+    assert manifest['configuration']['iteration_budgets'] == [500,1000,2000]
     assert manifest['configuration']['checkpoint_interval'] == 250
     assert manifest['configuration'] == runner._json_value(asdict(runner.RunnerConfig()))
     assert manifest['configuration']['validation_iterations'] == [1,2,5,10,15,20,25,50,100,150,200]
     resolved = runner.resolved_configuration(CELL, runner.RunnerConfig(**manifest['configuration']))
     assert resolved['trajectory_count'] == 100
-    assert resolved['candidate_count'] == 500
-    assert resolved['validation_schedule'] == [0,1,2,5,10,15,20,25,50,100,150,200,*range(250,8001,250)]
+    assert resolved['candidate_count'] == 300
+    assert resolved['validation_schedule'] == [0,1,2,5,10,15,20,25,*range(50,2001,50)]
     assert manifest['configuration']['stationarity_tol'] == 1e-6
+    assert manifest['configuration']['n_validation'] == 200
+    assert manifest['configuration']['validation_interval'] == 50
+    assert manifest['configuration']['validation_patience'] == 300
+    assert manifest['configuration']['validation_min_iterations'] == 500
+    assert manifest['configuration']['validation_min_relative_improvement'] == .001
     assert not (tmp_path/'new').exists()
+
+
+def test_validation_stop_and_sample_size_cli_are_explicit_and_change_identity(tmp_path, capsys):
+    configurations = []
+    options = [[], ['--no-validation-stop'], ['--no-validation-stop', '--n-validation', '100']]
+    for index, arguments in enumerate(options):
+        output = tmp_path / str(index)
+        assert runner.main(['--models', '0', '--experiments', '3', '--setting-index', '5',
+            '--seed-ids', '0', '--output-root', str(output), '--dry-run', *arguments]) == 0
+        manifest = json.loads(capsys.readouterr().out)
+        config = manifest['configuration']
+        assert config['n_validation'] == (100 if index == 2 else 200)
+        assert config['validation_patience'] == (300 if index == 0 else None)
+        assert config['validation_interval'] == 50
+        assert config['validation_min_iterations'] == 500
+        assert config['validation_min_relative_improvement'] == .001
+        resolved = runner.resolved_configuration(CELL, runner.RunnerConfig(**config))
+        assert resolved['n_train'] == CELL.n
+        assert resolved['n_validation'] == config['n_validation']
+        configurations.append(runner._digest_json(resolved))
+        assert not output.exists()
+    assert len(set(configurations)) == 3
 
 
 def test_one_cell_smoke_selection_uses_original_grid_index(tmp_path,capsys):
@@ -279,7 +307,7 @@ def test_full_grid_dry_run_declares_all_cases_and_early_stop_tolerance(tmp_path,
     manifest = json.loads(capsys.readouterr().out)
     assert manifest['expected_cells'] == 7200
     assert manifest['expected_applicable'] == 6300 and manifest['expected_inapplicable'] == 900
-    assert manifest['configuration']['iteration_budgets'][-1] == 8000
+    assert manifest['configuration']['iteration_budgets'][-1] == 2000
     assert manifest['configuration']['stationarity_tol'] == 2e-6
     assert manifest['configuration']['init_penalties'] == [.01, .03, .1, .3]
     assert manifest['configuration']['penalties_u'] == [.0025, .01, .04, .16, .32]
@@ -295,6 +323,9 @@ def test_full_grid_dry_run_declares_all_cases_and_early_stop_tolerance(tmp_path,
     ['--models','0','0'],['--experiments','0'],['--setting-index','3'],['--workers','0'],
     ['--stationarity-tol','0'],['--stationarity-tol','-1'],
     ['--stationarity-tol','nan'],['--stationarity-tol','inf'],
+    ['--validation-interval','0'],['--validation-patience','0'],
+    ['--validation-min-iterations','-1'],['--validation-min-relative-improvement','nan'],
+    ['--validation-min-relative-improvement','1'],['--n-validation','0'],
 ])
 def test_invalid_cli_fails_before_writing(tmp_path,args):
     with pytest.raises(SystemExit):

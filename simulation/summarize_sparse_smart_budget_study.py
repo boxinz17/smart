@@ -142,6 +142,14 @@ def _transitions(caps,absolute,relative):
 
 def _configuration(record, setting):
     options = dict(record["configuration"]["runner"])
+    # Saved campaigns predate validation-based stopping. Reconstruct their
+    # actual policy rather than inheriting the current runner defaults.
+    absent_stop_fields = {key for key in ("validation_interval", "validation_patience",
+        "validation_min_iterations", "validation_min_relative_improvement") if key not in options}
+    options.setdefault("validation_interval", options["checkpoint_interval"])
+    options.setdefault("validation_patience", None)
+    options.setdefault("validation_min_iterations", 500)
+    options.setdefault("validation_min_relative_improvement", .001)
     legacy_validation = "validation_iterations" not in options
     if legacy_validation:
         options["validation_iterations"] = ()
@@ -151,6 +159,8 @@ def _configuration(record, setting):
     config = runner.RunnerConfig(**options)
     config.validate()
     expected = _json_value(runner.resolved_configuration(setting, config))
+    for key in absent_stop_fields:
+        expected["runner"].pop(key)
     if legacy_validation:
         expected["runner"].pop("validation_iterations")
         for key in ("validation_iterations", "validation_schedule", "validation_state_policy"):
@@ -160,6 +170,71 @@ def _configuration(record, setting):
     _require(record["configuration"]["runner"]["checkpoint_execution"] == "continuous",
              "Budget study requires continuous candidate trajectories")
     return config
+
+
+def _validation_stopping_audit(trajectory, config):
+    """Independently replay the declared raw-MSE patience decisions.
+
+    This checks the saved scalar decision chain. Only retained factors can be
+    rescored independently; scalar-only checks retain their existing explicit
+    audit limitation.
+    """
+    history = trajectory["validation_history"]
+    enabled = config.validation_patience is not None
+    saved = trajectory.get("validation_stopping", trajectory.get("diagnostics", {}).get("validation_stopping"))
+    if not history:
+        _require(trajectory["termination_reason"] != "validation_stop", "Validation stop without validation history")
+        return None
+    best_loss = best_iteration = reference_loss = last_significant = None
+    stopped = False
+    stop_iteration = None
+    scheduled = set(runner.validation_schedule(config))
+    final_record = next((row for row in trajectory["history"]
+                         if row["iteration"] == trajectory["n_iter"]), {})
+    final_residual = final_record.get("projected_gradient_norm")
+    certified_endpoint = (final_residual is not None
+        and final_record.get("mapping_domain_reason") is None
+        and final_residual <= config.stationarity_tol)
+    for row in history:
+        t, loss = row["iteration"], _number(row["loss"], "validation stopping loss")
+        _require(not stopped, "Validation history continues after the patience stop")
+        if best_loss is None or loss < best_loss:
+            best_loss, best_iteration = loss, t
+        significant = (reference_loss is None or (best_loss < reference_loss and
+            reference_loss-best_loss >= config.validation_min_relative_improvement*reference_loss))
+        if significant:
+            reference_loss, last_significant = best_loss, t
+        since = t-last_significant
+        # A verified stationary endpoint takes precedence over coincident
+        # patience expiry; its scalar check still updates the observed best.
+        allow_stop = not (t == trajectory["n_iter"] and certified_endpoint)
+        if (enabled and allow_stop and t in scheduled and t >= config.validation_min_iterations
+                and since >= config.validation_patience):
+            stopped, stop_iteration = True, t
+        expected_row = dict(significant_improvement=significant, reference_loss=reference_loss,
+            last_significant_iteration=last_significant, iterations_since_improvement=since,
+            stop_requested=stopped)
+        if enabled:
+            _require(row.get("validation_stopping") == expected_row,
+                     "Validation stopping decision differs from scalar MSE replay")
+        else:
+            _require("validation_stopping" not in row, "Disabled validation policy contains stopping decisions")
+    expected = dict(enabled=enabled, patience=config.validation_patience,
+        min_iterations=config.validation_min_iterations,
+        min_relative_improvement=config.validation_min_relative_improvement,
+        patience_units="accepted_iterations", metric="raw_validation_mse", checks=len(history),
+        best_loss=best_loss, best_iteration=best_iteration, reference_loss=reference_loss,
+        last_significant_iteration=last_significant, last_check_iteration=history[-1]["iteration"],
+        stopped=stopped, stop_iteration=stop_iteration)
+    if enabled or saved is not None:
+        _require(saved == expected, "Validation stopping summary differs from scalar MSE replay")
+    _require((trajectory["termination_reason"] == "validation_stop") == stopped,
+             "Validation stop termination differs from the patience rule")
+    if stopped:
+        _require(trajectory["success"] and trajectory["status"] == "completed"
+                 and trajectory["n_iter"] == stop_iteration,
+                 "Invalid validation stop endpoint")
+    return expected
 
 
 _VALIDATION_AUDIT_COUNTS = ("evaluated_points", "factor_verified_points", "metadata_only_points",
@@ -231,6 +306,94 @@ def _interval(cp):
             "interval_objective_change_sum","interval_max_relative_step_norm")}
 
 
+def _unavailable_declarations(entries, grid_size):
+    """Validate explicit absent-input declarations, never infer them from errors."""
+    if entries is None:
+        return {}
+    _require(isinstance(entries, list), "Unavailable candidates must be a list")
+    declared = {}
+    for entry in entries:
+        _require(isinstance(entry, dict) and set(entry) == {"grid_candidate_id", "task_id", "reason"},
+                 "Malformed unavailable candidate declaration")
+        candidate = _integer(entry["grid_candidate_id"], "unavailable candidate ID")
+        _require(candidate < grid_size and candidate not in declared,
+                 "Duplicate or out-of-range unavailable candidate ID")
+        _require(all(isinstance(entry[name], str) and entry[name].strip() for name in ("task_id", "reason")),
+                 "Unavailable candidate requires task provenance and reason")
+        declared[candidate] = dict(entry)
+    _require(len(declared) < grid_size, "All candidates are unavailable; no scientific record can be merged")
+    return dict(sorted(declared.items()))
+
+
+def _unavailable_trajectory(entry, params):
+    return dict(grid_candidate_id=entry["grid_candidate_id"], params=_json_value(params),
+        status="unavailable", termination_reason="allowed_missing_shard", success=False, n_iter=None,
+        history=[], validation_history=[], checkpoints=[], checkpoint_iterations=[], factor_states={},
+        unavailable_origin=dict(entry))
+
+
+def _unavailable_row(entry, params, *, budget, candidate_id):
+    return dict(candidate_id=candidate_id, grid_candidate_id=entry["grid_candidate_id"],
+        iteration_budget=budget, params=_json_value(params), success=False, budget_reached=False,
+        trajectory_checkpoint_iteration=None, n_iter=None, selected_iteration=None,
+        validation_mse=None, selection_score=None, selection_rule=PAIRWISE_RULE,
+        status="unavailable", termination_reason="allowed_missing_shard",
+        trajectory_status="unavailable", trajectory_termination_reason="allowed_missing_shard",
+        unavailable_origin=dict(entry))
+
+
+def _unavailable_merge_metadata(record, grid):
+    """Bind unavailable placeholders to a disjoint, provenance-preserving merge."""
+    metadata = record.get("tuning_shard_merge", {})
+    fields = {"unavailable_candidates", "unavailable_grid_candidate_ids",
+              "planned_candidate_count", "available_candidate_count"}
+    _require(isinstance(metadata, dict), "Malformed tuning merge metadata")
+    if not fields.intersection(metadata):
+        _require(metadata.get("schema_version") != 2, "Unavailable merge omits declarations")
+        return {}
+    _require(type(metadata.get("schema_version")) is int and metadata["schema_version"] == 2
+             and fields <= set(metadata),
+             "Unavailable candidates require explicit version-two merge metadata")
+    declared = _unavailable_declarations(metadata["unavailable_candidates"], len(grid))
+    _require(declared and metadata["unavailable_candidates"] == list(declared.values())
+             and metadata["unavailable_grid_candidate_ids"] == list(declared),
+             "Unavailable merge declaration order or IDs mismatch")
+    for name, count in (("planned_candidate_count", len(grid)),
+                        ("available_candidate_count", len(grid)-len(declared))):
+        _require(type(metadata[name]) is int and metadata[name] == count,
+                 "Unavailable merge candidate count mismatch")
+    artifacts = metadata.get("source_artifacts")
+    _require(isinstance(artifacts, list) and artifacts
+             and type(metadata.get("source_count")) is int and metadata["source_count"] == len(artifacts)
+             and type(metadata.get("trajectory_count")) is int and metadata["trajectory_count"] == len(grid),
+             "Unavailable merge source count mismatch")
+    available, tasks = {}, {entry["task_id"] for entry in declared.values()}
+    for artifact in artifacts:
+        _require(isinstance(artifact, dict), "Malformed available source artifact")
+        task_id = artifact.get("task_id")
+        _require(task_id is None or isinstance(task_id, str), "Malformed available source task ID")
+        _require(task_id not in tasks, "Available source overlaps an unavailable task")
+        for name in ("record_digest", "configuration_fingerprint", "implementation_fingerprint"):
+            _fingerprint(artifact.get(name), f"available source {name}")
+        _require(artifact["implementation_fingerprint"] == record["implementation_fingerprint"],
+                 "Available source implementation fingerprint mismatch")
+        mapping, identifiers = artifact.get("local_to_global_grid_ids"), artifact.get("grid_candidate_ids")
+        _require(isinstance(mapping, dict) and mapping and set(mapping) == {str(j) for j in range(len(mapping))}
+                 and isinstance(identifiers, list), "Malformed available source candidate mapping")
+        for local, global_id in mapping.items():
+            _require(type(global_id) is int and 0 <= global_id < len(grid)
+                     and global_id not in declared and global_id not in available,
+                     "Available source overlaps unavailable or duplicate candidate coverage")
+            available[global_id] = dict(local_grid_candidate_id=int(local),
+                configuration_fingerprint=artifact["configuration_fingerprint"], record_digest=artifact["record_digest"])
+        _require(identifiers == sorted(mapping.values()), "Available source grid IDs mismatch")
+    _require(set(available) == set(range(len(grid)))-set(declared), "Available source coverage mismatch")
+    for candidate, origin in available.items():
+        _require(record["trajectories"][candidate].get("tuning_shard_origin") == origin,
+                 "Available trajectory source provenance mismatch")
+    return declared
+
+
 def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_seed,
                     data_cache, generate_data_fn):
     """Return audited per-cap summaries; regenerate data only, never fit a model."""
@@ -245,7 +408,7 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
     config = _configuration(record, setting)
     budgets = tuple(config.iteration_budgets)
     interval = config.checkpoint_interval
-    _require(record["n_train"] == setting.n and record["n_validation"] == config.n_validation == 100,
+    _require(record["n_train"] == setting.n and record["n_validation"] == config.n_validation,
              "Study training/validation counts mismatch")
     _require(record["all_training_rows_used"] is True and record["training_matches_legacy"] is True
              and record["refit_on_all_data"] is False and record["theorem_certified"] is False
@@ -289,6 +452,7 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
     grid = record["configuration"]["candidate_grid"]
     trajectories = record["trajectories"]
     _require(len(trajectories) == len(grid), "Missing candidate trajectory")
+    unavailable = _unavailable_merge_metadata(record, grid)
     stable_selection = "selection_score" in record
     pairwise = pairwise_selection([record])
     reference = record.get("validation_reference_prediction")
@@ -316,6 +480,16 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
     validation_audit = _validation_audit_totals()
     for j, trajectory in enumerate(trajectories):
         _require(trajectory["grid_candidate_id"] == j and trajectory["params"] == grid[j], "Trajectory grid mismatch")
+        if j in unavailable:
+            _require(_digest_json(trajectory) == _digest_json(_unavailable_trajectory(unavailable[j], grid[j])),
+                     "Unavailable trajectory contains invented observations or mismatched provenance")
+            _require(reference_mapping[str(j)] == dict(validation_reference_prediction=None, selection_reference=None),
+                     "Unavailable trajectory contains a validation reference")
+            continue
+        _require(trajectory.get("status") != "unavailable"
+                 and trajectory.get("termination_reason") != "allowed_missing_shard"
+                 and "unavailable_origin" not in trajectory,
+                 "Unavailable trajectory lacks an explicit merge declaration")
         last = _integer(trajectory["n_iter"], "trajectory iterations")
         _require(last <= budgets[-1] and type(trajectory["success"]) is bool, "Invalid terminal trajectory")
         history = trajectory["validation_history"]
@@ -368,12 +542,14 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
         _require(trajectory["checkpoint_iterations"] == checkpoint_indices, "Checkpoint index list mismatch")
         terminal_stationary = (trajectory["success"] and trajectory["status"] == "converged"
                                and trajectory["termination_reason"] == "stationarity")
+        stopping_audit = _validation_stopping_audit(trajectory, config)
+        terminal_validation_stop = bool(stopping_audit and stopping_audit["stopped"])
         scheduled = {0, *budgets, *range(interval, budgets[-1]+1, interval)}
         validation_scheduled = set(runner.validation_schedule(config))
         if trajectory["success"]:
-            _require(terminal_stationary or (last == budgets[-1] and trajectory["status"] == "completed"
+            _require(terminal_stationary or terminal_validation_stop or (last == budgets[-1] and trajectory["status"] == "completed"
                      and trajectory["termination_reason"] == "max_iterations"), "Inconsistent successful trajectory termination")
-            expected = {t for t in scheduled if t <= last} | ({last} if terminal_stationary else set())
+            expected = {t for t in scheduled if t <= last} | ({last} if terminal_stationary or terminal_validation_stop else set())
             expected_validation = {t for t in validation_scheduled if t <= last} | ({last} if terminal_stationary else set())
             _require(set(checkpoint_indices) == expected and set(indices) == expected_validation,
                      "Successful trajectory omits scheduled checkpoint or validation")
@@ -464,6 +640,10 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
                          "False checkpoint stationarity")
             else:
                 _require(cp["status"] == "completed", "Nonstationary checkpoint marked converged")
+                if cp["termination_reason"] == "validation_stop":
+                    _require(terminal_validation_stop and t == last, "Invalid validation stop checkpoint")
+                elif terminal_validation_stop and t == last:
+                    _require(False, "Validation stop endpoint loses termination reason")
             points[(j,t)] = cp
     rows = record["selection_history"]
     _require(len(rows) == len(budgets)*len(grid), "Missing analysis-cap candidate rows")
@@ -471,6 +651,11 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
         budget,j = budgets[i//len(grid)],i%len(grid)
         _require(row["candidate_id"] == i and row["grid_candidate_id"] == j
                  and row["iteration_budget"] == budget and row["params"] == grid[j], "Cap/grid candidate identity mismatch")
+        if j in unavailable:
+            _require(_digest_json(row) == _digest_json(_unavailable_row(unavailable[j], grid[j],
+                     budget=budget, candidate_id=i)),
+                     "Unavailable cap row contains invented observations or mismatched provenance")
+            continue
         _require(type(row["success"]) is bool and type(row["budget_reached"]) is bool, "Cap eligibility/coverage flag invalid")
         trajectory = trajectories[j]
         _require(row["trajectory_status"] == trajectory["status"]
@@ -483,6 +668,7 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
             t = row["trajectory_checkpoint_iteration"]
             _require(t == max(available), "Cap row does not use latest attained certified prefix")
             cp = points[(j,t)]
+            _require(row["termination_reason"] == cp["termination_reason"], "Cap/checkpoint termination reason mismatch")
             _require(t <= budget and cp["success"] and (t > 0 or cp["termination_reason"] == "stationarity"),
                      "Failed/uncertified partial prefix made eligible")
             _require(row["n_iter"] == t and row["selected_iteration"] == cp["selected_iteration"], "Retained prefix iteration mismatch")
@@ -511,6 +697,11 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
         current = [r for r in rows if r["iteration_budget"] == budget]
         eligible = [r for r in rows if r["iteration_budget"] <= budget and r["success"]]
         unresolved = [r["grid_candidate_id"] for r in current if not r["budget_reached"]]
+        stopped = [r for r in current if r["success"] and r["termination_reason"] == "validation_stop"]
+        policy_complete = all(r["budget_reached"] or r in stopped for r in current)
+        if "policy_complete" in cap or "validation_patience" in record["configuration"]["runner"]:
+            _require(type(cap.get("policy_complete")) is bool and cap["policy_complete"] == policy_complete
+                     and cap.get("validation_stopped_count") == len(stopped), "Cap validation policy completion mismatch")
         _require(cap["coverage_complete"] == (not unresolved) and cap["unresolved_grid_candidate_ids"] == unresolved
                  and cap["budget_reached_count"] == len(grid)-len(unresolved), "Cap coverage audit mismatch")
         _require(type(cap["coverage_complete"]) is bool and type(cap["success"]) is bool
@@ -520,6 +711,7 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
                  "Cap status or eligibility count mismatch")
         _require(cap["success"] == bool(eligible), "Cap success/eligibility mismatch")
         result = dict(iteration_budget=budget, success=bool(eligible), coverage_complete=not unresolved,
+            policy_complete=policy_complete, validation_stopped_count=len(stopped),
             reached_candidates=len(grid)-len(unresolved), unresolved_candidate_ids=unresolved,
             validation_mse=None, coefficient_error=None, selected_iteration=None, selected_checkpoint=None,
             selected_near_cap=None, selected_at_cap=None, optimizer_converged=None, selected_converged=None,
@@ -577,21 +769,29 @@ def validate_record(record, path, *, setting, model_id, exp_id, seed_id, random_
     if final["success"]:
         validate_selected_score(record, final)
     _require(type(record["success"]) is bool and record["success"] == final["success"]
-             and record["status"] == ("complete" if final["coverage_complete"] else
+             and record["status"] == ("complete" if final["coverage_complete"] else "policy_complete" if final.get("policy_complete") else
                                      "partial" if final["success"] else "all_candidates_failed"),
              "Overall status/coverage mismatch")
+    if final.get("policy_complete"):
+        _require(record.get("failure_reason") is None, "Completed validation policy has a failure reason")
     for key, other in (("selected_budget","winner_origin_budget"),("selected_candidate_id","winner_candidate_id"),
                        ("selected_iteration","selected_iteration"),("validation_loss","validation_mse"),("avg_err","coefficient_error")):
         _require(record[key] == final[other],f"Overall winner {key} mismatch")
-    return dict(model=record["model"],model_id=model_id,experiment=record["experiment"],setting=setting.suffix,
+    audit = dict(model=record["model"],model_id=model_id,experiment=record["experiment"],setting=setting.suffix,
         seed_id=seed_id,status=record["status"],applicable=True,inapplicability_reason=None,missing=False,caps=caps,
         trajectory_status_counts=dict(Counter(t["status"] for t in trajectories)),
         trajectory_final_diagnostics=[dict(grid_candidate_id=t["grid_candidate_id"],status=t["status"],
             success=t["success"],n_iter=t["n_iter"],termination_reason=t["termination_reason"],
             diagnostics=_diagnostics(t["history"][-1]) if t["history"] else None) for t in trajectories],
-        failed_trajectories=sum(not t["success"] for t in trajectories),verified_factor_states=verified_factors,
+        failed_trajectories=sum(not t["success"] for j,t in enumerate(trajectories) if j not in unavailable),
+        validation_stopped_trajectories=sum(t["termination_reason"] == "validation_stop" for t in trajectories),
+        verified_factor_states=verified_factors,
         validation_audit=_validation_audit_totals([validation_audit]),
         configuration=record["configuration"]["runner"],implementation_fingerprint=record["implementation_fingerprint"])
+    if unavailable:
+        audit.update(unavailable_grid_candidate_ids=list(unavailable),
+            planned_candidate_count=len(grid), available_candidate_count=len(grid)-len(unavailable))
+    return audit
 
 
 def _aggregate(cells, budgets, absolute, relative, *, model=False):
@@ -725,6 +925,7 @@ def summarize(result_root=DEFAULT_ROOT, *, model_ids=(0,1,2),seed_ids=(0,1,2,3,4
         recorded_inapplicable_cells=sum(not c["applicable"] and not c["missing"] for c in cells),
         missing_inapplicable_cells=sum(not c["applicable"] and c["missing"] for c in cells),
         regenerated_unique_datasets=len(cache.seen_keys),verified_factor_states=sum(c.get("verified_factor_states",0) for c in cells),
+        validation_stopped_trajectories=sum(c.get("validation_stopped_trajectories", 0) for c in cells),
         validation_audit=_validation_audit_totals(c.get("validation_audit", {}) for c in cells),
         configurations=[json.loads(c) for c in configs],
         implementation_fingerprints=sorted(set.union(*implementations.values())),
@@ -732,7 +933,7 @@ def summarize(result_root=DEFAULT_ROOT, *, model_ids=(0,1,2),seed_ids=(0,1,2,3,4
                                                      for key, values in implementations.items()},
         input_files=files,cells=cells,per_setting=groups,
         per_model=[dict(model=f"model{m+1}",transitions=_aggregate([c for c in cells if c["model_id"]==m],budgets,absolute,relative,model=True)) for m in model_ids],
-        interpretation="Unreached or failed extensions cannot establish a plateau; retained earlier fits remain eligible. Validation is reused for tuning. Coefficient truth is descriptive only. No universal sufficient-budget or convergence claim follows.")
+        interpretation="Intentional validation stops complete the declared stopping policy, without claiming an unvisited iteration budget or optimization convergence. Unreached or failed extensions cannot establish a fixed-budget plateau; retained earlier fits remain eligible. Validation is reused for tuning. Coefficient truth is descriptive only. No universal sufficient-budget or convergence claim follows.")
 
 
 def _fmt(value):
@@ -754,6 +955,7 @@ def write_outputs(report, output_root):
          f"{report.get('validation_audit', {}).get('factor_verified_points', 0)} independently factor-verified, "
          f"{report.get('validation_audit', {}).get('metadata_only_points', 0)} scalar-only. "
          "Detailed comparison-coverage counts are recorded in summary.json."), "",
+        f"Validation stopping: {report.get('validation_stopped_trajectories', 0)} trajectories stopped under the declared patience policy. Their scalar stopping decisions are replayed independently; intentional stops remain separate from failures, stationarity, and full fixed-budget coverage.", "",
         "## Paired validation gains", "",
         "The 2000 → 8000 comparison is included alongside adjacent caps whenever available: two adjacent gains below the threshold can jointly exceed it.", "",
         "Means and SEs below use only seeds with complete candidate coverage at both caps. Incomplete pairs are explicitly excluded; one pair has no estimable SE. Coefficient errors are descriptive diagnostics and never select stopping or a budget.", "",
@@ -782,7 +984,7 @@ def write_outputs(report, output_root):
             diagnostic=cap["endpoint_diagnostics"] or {}
             lines.append(f"| {c['model']} | {c['setting']} | {c['seed_id']} | {cap['iteration_budget']} | {cap['reached_candidates']} | {_fmt(cap['validation_mse'])} | {cap['selected_iteration']} | {cap['selected_near_cap']} | {cap['selected_converged']} | {_fmt(diagnostic.get('projected_gradient_norm'))} | {_fmt(diagnostic.get('proximal_uncertainty'))} |")
     lines += ["", "## Interpretation and audit", "", report["interpretation"], "",
-        "The default design is three models, three difficult settings and five saved seeds, with 100 additional independent tuning observations per cell. Five-seed summaries do not establish a universal budget from a single smoke test. Comparisons with the paper's 100 repetitions have different tuning data and procedures; no competing method is rerun.", "",
+        "The default design is three models, three difficult settings and five saved seeds. The current runner uses 200 independent tuning observations per cell; historical records retain their saved sample size and stopping policy. Five-seed summaries do not establish a universal budget from a single smoke test. Comparisons with the paper's 100 repetitions have different tuning data and procedures; no competing method is rerun.", "",
         f"Regenerated {report['regenerated_unique_datasets']} distinct data settings and independently scored {report['verified_factor_states']} saved factor states. Configuration identities, seed/data hashes, checkpoint eligibility, coverage and cumulative winners were audited. Per-model paired statistics average all requested settings within each seed before computing SEs, avoiding treating repeated settings as independent seeds.", "",
         "Full per-cell, per-setting and per-model results, numerical diagnostics, failed-trajectory counts and input-file SHA256 hashes are in [summary.json](summary.json).", ""]
     (output/"report.md").write_text("\n".join(lines))

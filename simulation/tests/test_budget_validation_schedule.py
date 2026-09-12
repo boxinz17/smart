@@ -28,7 +28,7 @@ def early_validation_record():
     """Iteration 1 improves, 2 supersedes it, 3 loses, and 4 is the first full checkpoint."""
     record = fixtures.fixture()
     setting = runner.SimulationSetting(**record["setting"])
-    config = runner.RunnerConfig(iteration_budgets=(4, 8), checkpoint_interval=4,
+    config = runner.RunnerConfig(iteration_budgets=(4, 8), checkpoint_interval=4, validation_interval=4, validation_patience=None, n_validation=100,
         validation_iterations=(1, 2, 3), init_penalties=(.03,), penalties_u=(.0025, .01), penalties_v=(.0025,))
     record["configuration"] = fixtures._json_value(runner.resolved_configuration(setting, config))
     data = fixtures.generated(0)

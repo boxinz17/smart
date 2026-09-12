@@ -420,8 +420,10 @@ tuner = SparseSMARTTuner(
     rank=5, source_rank=7, sparsity=(5, 5), margins=margins,
     init_penalties=(.03,), penalties_u=(.0025, .01, .04),
     penalties_v=(.0025, .01, .04),
-    iterations=8000, iteration_budgets=(500, 1000, 2000, 4000, 8000),
+    iterations=2000, iteration_budgets=(500, 1000, 2000),
     checkpoint_execution="continuous", checkpoint_interval=250,
+    validation_interval=50, validation_patience=300,
+    validation_min_iterations=500, validation_min_relative_improvement=.001,
     refinement_solver="anchor_projected", enforce_source_accuracy=False,
 )
 tuner.fit(X_train, Y_train, source=source,
@@ -429,25 +431,47 @@ tuner.fit(X_train, Y_train, source=source,
 ```
 
 Each grid point has one initializer and one solver trajectory. Validation is
-evaluated at iteration zero, every 250 updates, all comparison budgets, and
-an earlier stationary endpoint if needed. The optimization state continues
+evaluated at iteration zero, every 50 updates, all full checkpoints and
+comparison budgets, and a successful terminal endpoint if needed. Full
+checkpoints are captured every 250 updates in this example. The optimization state continues
 between checkpoints, retaining the solver's step-search policy.
 The validation sample never enters the updates. Both earlier successful
 prefixes and their best validation states remain available after a later
 numerical failure.
 The original independent-budget mode remains the default.
 
+Validation stopping is opt-in: `validation_patience=None` preserves the package's
+existing behavior. The example stops at the first eligible validation check at
+or after 500 accepted updates when 300 updates have passed without a meaningful
+improvement. A meaningful improvement is a decrease of at least 0.1% from the
+last significant best validation MSE; smaller decreases accumulate against that
+reference. The actual best evaluated iterate is retained even when its improvement
+is smaller than this threshold. A stop reports `termination_reason="validation_stop"`
+and a successful fit, with `optimization_converged_=False`. Its final state is
+captured even between ordinary checkpoints. `validation_stopping_` records the
+checks, reference loss, last significant improvement, and stop iteration.
+The rule is a practical compute policy, not a convergence certificate or a
+statistical test. It can miss a later improvement, so the maximum budget and
+patience should be checked in a small paired trial before a larger campaign.
+
+`validation_interval` controls evaluation independently of checkpoint capture.
+Its default `None` uses `checkpoint_interval` in continuous tuning and one
+update in independent tuning. The tuner's validation-stop policy requires
+continuous execution; independent mode may customize validation frequency but
+rejects a non-`None` `validation_patience`.
+
 To resolve minima before the first regular checkpoint, continuous mode also
 accepts `validation_iterations=(10, 25, 50, 100, 150, 200)`.
 These points add validation evaluations without changing the full checkpoint
-schedule, gradient updates, or stationarity stopping rule. The schedule must
+schedule or gradient updates. When validation stopping is enabled, these points
+also evaluate its patience rule. The schedule must
 contain strictly increasing unique nonnegative integers; points above the
 maximum budget are ignored. The default is empty, and independent mode rejects
-a nonempty schedule because it already validates every accepted iterate.
+a nonempty schedule; its default already validates every accepted iterate.
 An early validation winner propagates into subsequent full checkpoints. Extra
 points do not establish budget coverage or rescue a trajectory that fails before
 its first positive full checkpoint. `best_validation_states_` stores read-only
-compact chart states only for improving extra points, including improvements
+compact chart states only for improving validation points between full checkpoints, including improvements
 that are superseded before the next full checkpoint; scalar evaluations remain
 in `validation_history_` and optimization records in `history_`.
 
@@ -474,6 +498,14 @@ example, after failure at update 400, a completed 250-update prefix may remain
 eligible at cap 500, with `budget_reached=False`. A failed partial iterate is
 never substituted for that completed checkpoint. An initializer alone is not
 a fallback after failure before the first positive checkpoint.
+
+For a clean validation stop at update 650, the retained result is eligible at
+caps 1000 and 2000, with `budget_reached=False` and `policy_completed=True`.
+The latter records successful completion under the requested compute policy;
+it does not claim that those larger caps were explored. Earlier prefixes retain
+their own stopping metadata and cannot inherit the later stop. Aggregate
+`policy_fully_completed` and `budget_fully_covered` therefore answer different
+questions. A numerical failure does not complete the validation-stop policy.
 
 The separate simulation budget-study runner records validation MSE, diagnostic
 coefficient error, objective, movement, and stationarity at every checkpoint.

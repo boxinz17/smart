@@ -6,9 +6,9 @@ usage() {
     cat <<'EOF'
 Usage: submit_budget_study.sh --workers N [options]
 
-One GNU Parallel pool; each Slurm step fits a tuning subset of one data case.
+One fit-only GNU Parallel pool; each Slurm step fits a tuning subset of one data case.
 The full defaults request 7,200 cells, including 900 inapplicable records.
-The 100 penalty combinations are continuous trajectories, each capped at 8,000;
+The 100 penalty combinations are continuous trajectories, each capped at 2,000;
 by default each combination gets its own work item (630,900 for 100 seeds).
 This is a provisional pilot grid; preview a restricted three-seed scope first.
 
@@ -16,14 +16,22 @@ Study options:
   --tuning-preset NAME     expanded (default), source-rank-5, or source-rank-7
                           Rank probes require --models with one ID and select
                           experiment 2, setting 2 (rank 5) or 3 (rank 7)
-                          Both probes add a 16,000 cap; rank 5 also adds .001
+                          Rank 5 adds .001
                           to U/V. Explicit tuning options override preset values
   --models IDS             IDs 0-2 (default: 0-2)
   --experiments IDS        IDs 0-3 (default: 0-3)
   --seeds IDS              Saved seed IDs 0-99 (default: 0-99)
   --setting-index N        Restrict one model and experiment to one grid setting
-  --iteration-budgets IDS  Increasing caps (default: 500,1000,2000,4000,8000)
-  --checkpoint-interval N  Regular validation/checkpoint interval (default: 250)
+  --iteration-budgets IDS  Increasing caps (default: 500,1000,2000)
+  --checkpoint-interval N  Full checkpoint interval (default: 250)
+  --validation-interval N  Validation evaluation interval (default: 50)
+  --validation-patience N  Iterations without significant improvement (default: 300)
+  --validation-min-iterations N
+                          Earliest validation stop (default: 500)
+  --validation-min-relative-improvement X
+                          Improvement needed to reset patience (default: .001)
+  --no-validation-stop    Disable validation stopping for fixed-budget controls
+  --n-validation N        Independent validation observations (default: 200)
   --validation-iterations VALUES
                           Extra times (default: 1,2,5,10,15,20,25,50,100,150,200)
                           Use none for only regular checkpoints and budget caps
@@ -46,7 +54,7 @@ Allocation options:
   --account ACCOUNT       Default: SMART_ACCOUNT or mkolar_1314
   --partition NAME        Default: SMART_PARTITION or main
   --run-root PATH         Default: SMART_RUN_ROOT or /scratch1/$USER/smart/runs
-  --archive-root PATH     Default: SMART_ARCHIVE_ROOT or $HOME/smart-results
+  --archive-root PATH     Deprecated: record this value only; no archive is made
   --dry-run               Create plan/snapshot and print command; never submit
 
 SMART_PLAN_PYTHON selects the existing Python used for metadata-only planning.
@@ -55,6 +63,8 @@ No packages are installed. Each task uses one CPU and runner --workers 1;
 Slurm distributes steps across the allocated nodes. No node count is fixed.
 The CPU allocation is fixed once granted; choose --workers based on current
 availability. Values above the number of planned work items are capped to that count.
+Results, source provenance, and logs stay under the run directory. The job exits
+when fitting finishes; aggregation, scientific summaries, and archival are deferred.
 EOF
 }
 die() { printf 'Error: %s\n' "$*" >&2; exit 2; }
@@ -63,13 +73,15 @@ need_value() { [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || die "$1 needs a value
 models=0-2 experiments=0-3 seeds=0-99 settings=''
 tuning_preset=expanded models_explicit=0 experiments_explicit=0
 budgets='' checkpoint_interval=250
+validation_interval=50 validation_patience=300 validation_min_iterations=500
+validation_min_relative_improvement=.001 n_validation=200 no_validation_stop=0
 validation_iterations=1,2,5,10,15,20,25,50,100,150,200
 init_penalties='' penalties_u='' penalties_v=''
 stationarity_tol=1e-6 tuning_task_size=1 workers='' time_limit=24:00:00 memory=8G dry_run=0
 account=${SMART_ACCOUNT:-mkolar_1314}
 partition=${SMART_PARTITION:-main}
 run_root=${SMART_RUN_ROOT:-/scratch1/${USER}/smart/runs}
-archive_root=${SMART_ARCHIVE_ROOT:-$HOME/smart-results}
+archive_root=${SMART_ARCHIVE_ROOT:-}
 planner=${SMART_PLAN_PYTHON:-python3}
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -92,6 +104,12 @@ while [[ $# -gt 0 ]]; do
         --tuning-preset) need_value "$@"; tuning_preset=$2; shift 2 ;;
         --setting-index) need_value "$@"; settings=$2; shift 2 ;;
         --checkpoint-interval) need_value "$@"; checkpoint_interval=$2; shift 2 ;;
+        --validation-interval) need_value "$@"; validation_interval=$2; shift 2 ;;
+        --validation-patience) need_value "$@"; validation_patience=$2; shift 2 ;;
+        --validation-min-iterations) need_value "$@"; validation_min_iterations=$2; shift 2 ;;
+        --validation-min-relative-improvement) need_value "$@"; validation_min_relative_improvement=$2; shift 2 ;;
+        --n-validation) need_value "$@"; n_validation=$2; shift 2 ;;
+        --no-validation-stop) no_validation_stop=1; shift ;;
         --stationarity-tol) need_value "$@"; stationarity_tol=$2; shift 2 ;;
         --tuning-task-size) need_value "$@"; tuning_task_size=$2; shift 2 ;;
         --workers) need_value "$@"; workers=$2; shift 2 ;;
@@ -127,7 +145,7 @@ parse_indices() {
 }
 parse_indices "$models" 2 model; model_ids=("${parsed_indices[@]}")
 case "$tuning_preset" in
-    expanded) preset_budgets=500,1000,2000,4000,8000
+    expanded) preset_budgets=500,1000,2000
               preset_penalties=.0025,.01,.04,.16,.32 ;;
     source-rank-5|source-rank-7)
         (( models_explicit && ${#model_ids[@]} == 1 )) || die '--tuning-preset source-rank probes require --models with exactly one model ID'
@@ -136,7 +154,7 @@ case "$tuning_preset" in
         else
             preset_setting=3; preset_penalties=.0025,.01,.04,.16,.32
         fi
-        preset_budgets=500,1000,2000,4000,8000,16000
+        preset_budgets=500,1000,2000
         if (( ! experiments_explicit )); then experiments=2; fi
         [[ -z "$settings" || "$settings" == "$preset_setting" ]] || die "--tuning-preset $tuning_preset requires --setting-index $preset_setting"
         settings=$preset_setting ;;
@@ -171,16 +189,11 @@ if (( ! dry_run )); then command -v sbatch >/dev/null || die 'Submit on Discover
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 repo=$(cd -- "$script_dir/../.." && pwd -P)
-mkdir -p -- "$run_root" "$archive_root"
+mkdir -p -- "$run_root"
 run_root=$(cd -- "$run_root" && pwd -P)
-archive_root=$(cd -- "$archive_root" && pwd -P)
-[[ "$run_root" != "$archive_root" ]] || die 'Run and archive roots must differ'
-for location in "$run_root" "$archive_root"; do
-    [[ "$location" != "$repo" && "$location" != "$repo/"* ]] || die 'Run/archive roots must be outside the source repository'
-done
+[[ "$run_root" != "$repo" && "$run_root" != "$repo/"* ]] || die 'Run root must be outside the source repository'
 run_dir=$(mktemp -d "$run_root/$(date -u +%Y%m%dT%H%M%SZ)_sparse_smart_budget_XXXXXX")
-archive_dir="$archive_root/${run_dir##*/}"
-mkdir -p "$run_dir/source" "$run_dir/logs" "$run_dir/tasks" "$archive_dir"
+mkdir -p "$run_dir/source" "$run_dir/logs" "$run_dir/tasks"
 rsync -a --prune-empty-dirs \
     --exclude='.git/' --exclude='.venv/' --exclude='venv/' --exclude='env/' \
     --exclude='__pycache__/' --exclude='.pytest_cache/' --exclude='*.egg-info/' \
@@ -193,9 +206,13 @@ rsync -a --prune-empty-dirs \
     "$repo/" "$run_dir/source/"
 
 budget_args=(--iteration-budgets "${budget_ids[@]}" --checkpoint-interval "$checkpoint_interval"
+    --validation-interval "$validation_interval" --validation-patience "$validation_patience"
+    --validation-min-iterations "$validation_min_iterations"
+    --validation-min-relative-improvement "$validation_min_relative_improvement" --n-validation "$n_validation"
     --validation-iterations "$validation_iterations"
     --init-penalties "$init_penalties" --penalties-u "$penalties_u" --penalties-v "$penalties_v"
     --stationarity-tol "$stationarity_tol")
+if (( no_validation_stop )); then budget_args+=(--no-validation-stop); fi
 plan_args=("$planner" "$run_dir/source/simulation/discovery_budget_study.py" plan
     --output-root "$run_dir" --models "${model_ids[@]}" --experiments "${experiment_ids[@]}"
     --seed-ids "${seed_ids[@]}" --profile full --tuning-task-size "$tuning_task_size" "${budget_args[@]}")
@@ -208,13 +225,16 @@ work_count=${work_count//[[:space:]]/}
 pool_workers=$workers
 if (( pool_workers > work_count )); then pool_workers=$work_count; fi
 {
-    printf 'run_dir=%q\narchive_dir=%q\npool_workers=%q\n' "$run_dir" "$archive_dir" "$pool_workers"
+    printf 'run_dir=%q\npool_workers=%q\n' "$run_dir" "$pool_workers"
+    # Compatibility metadata only: no fit-only script opens this destination.
+    printf 'requested_archive_root=%q\n' "$archive_root"
     printf 'export VENV=%q\n' "${VENV:-$HOME/envs/smart}"
     printf 'export SMART_PARALLEL_MODULE=%q\n' "${SMART_PARALLEL_MODULE:-parallel/20240522}"
     printf 'budget_args=('; printf '%q ' "${budget_args[@]}"; printf ')\n'
 } > "$run_dir/budget-job-config.sh"
 {
-    printf 'Created UTC: %s\nSource: %s\nRun: %s\nArchive: %s\n' "$(date -u +%FT%TZ)" "$repo" "$run_dir" "$archive_dir"
+    printf 'Created UTC: %s\nSource: %s\nRun: %s\n' "$(date -u +%FT%TZ)" "$repo" "$run_dir"
+    printf 'Execution: fit-only\nPostprocessing: deferred\nArchival: deferred\nRequested archive root (unused): %s\n' "$archive_root"
     printf 'Work items: %s\nRequested workers: %s\nEffective workers: %s\nMemory per CPU: %s\nWhole-pool time: %s\n' "$work_count" "$workers" "$pool_workers" "$memory" "$time_limit"
     printf 'Account: %s\nPartition: %s\n' "$account" "$partition"
     printf 'Tuning combinations per task: %s\n' "$tuning_task_size"
@@ -225,20 +245,17 @@ if (( pool_workers > work_count )); then pool_workers=$work_count; fi
         printf '\nGit status (snapshot includes uncommitted source):\n'; git -C "$repo" status --short
     fi
 } > "$run_dir/manifest.txt"
+printf 'deferred\n' > "$run_dir/postprocessing-status.txt"
+printf 'deferred\n' > "$run_dir/archive-status.txt"
 slurm_log_root=${run_dir//%/%%}
 submit=(sbatch --parsable --account="$account" --partition="$partition" --job-name=sparse-smart-budget
     --ntasks="$pool_workers" --cpus-per-task=1 --mem-per-cpu="$memory" --time="$time_limit"
     --chdir="$run_dir" --output="$slurm_log_root/logs/pool-%j.out" --error="$slurm_log_root/logs/pool-%j.err"
     "$run_dir/source/hpc/discovery/budget_pool.sbatch" "$run_dir")
 { printf '%q ' "${submit[@]}"; printf '\n'; } > "$run_dir/submission-command.txt"
-rsync -a "$run_dir/source/" "$archive_dir/source/"
-if [[ -d "$run_dir/task-configs" ]]; then rsync -a "$run_dir/task-configs/" "$archive_dir/task-configs/"; fi
-rsync -a "$run_dir/study-plan.json" "$run_dir/work-items.tsv" "$run_dir/budget-job-config.sh" \
-    "$run_dir/manifest.txt" "$run_dir/submission-command.txt" "$archive_dir/"
-printf 'Run directory: %s\nArchive directory: %s\nWork items: %s; simultaneous single-CPU steps: %s\nCommand: ' "$run_dir" "$archive_dir" "$work_count" "$pool_workers"
+printf 'Run directory: %s\nPostprocessing: deferred; archival: deferred\nWork items: %s; simultaneous single-CPU steps: %s\nCommand: ' "$run_dir" "$work_count" "$pool_workers"
 printf '%q ' "${submit[@]}"; printf '\n'
-if (( dry_run )); then printf 'Dry run: plan and source archived; no jobs submitted.\n'; exit 0; fi
+if (( dry_run )); then printf 'Dry run: plan and source saved in run directory; no jobs submitted.\n'; exit 0; fi
 job_id=$("${submit[@]}")
 printf '%s\n' "$job_id" | tee "$run_dir/job-id.txt"
-cp "$run_dir/job-id.txt" "$archive_dir/job-id.txt"
 printf 'Submitted pool job %s. Inspect with: squeue -j %s\n' "$job_id" "${job_id%%;*}"

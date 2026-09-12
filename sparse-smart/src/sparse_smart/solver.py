@@ -11,6 +11,7 @@ from .thresholding import threshold_step
 from .spectral import project_singular_values
 from .objective import loss_context, objective_change
 from .support import coordinate_support
+from .stopping import ValidationStopRequest
 
 
 @dataclass(frozen=True)
@@ -174,6 +175,9 @@ def refine(
     exactly ``iterations`` updates are requested unless a numerical failure or
     stall occurs. The callback receives (iteration, state.copy(), record) at
     initialization and each accepted update; callback exceptions propagate.
+    Returning ValidationStopRequest stops successfully without claiming
+    convergence; all other callback return values are ignored. Certified
+    stationarity takes precedence when both stop conditions coincide.
     """
     _integer(iterations, "iterations")
     _integer(max_backtracks, "max_backtracks")
@@ -234,7 +238,14 @@ def refine(
     diagnostic = _mapping(chart, x, grad, reference_L, penalty, limits, margins, domain_args)
     history = [_record(chart, x, 0, smooth, pen, initial_L, 0., [], loss_offset, diagnostic)]
     if iterate_callback is not None:
-        iterate_callback(0, x.copy(), history[-1])
+        request = iterate_callback(0, x.copy(), history[-1])
+        if isinstance(request, ValidationStopRequest):
+            if (iterations and stationarity_tol is not None
+                    and diagnostic[0] <= stationarity_tol and diagnostic[3] is None):
+                return _result(x, "converged", "The spectral/support projected gradient mapping meets tolerance.",
+                               0, history, termination_reason="stationarity")
+            return _result(x, "completed", request.message, 0, history,
+                           termination_reason="validation_stop")
     for t in range(iterations):
         if stationarity_tol is not None and diagnostic[0] <= stationarity_tol and diagnostic[3] is None:
             return _result(x, "converged", "The spectral/support projected gradient mapping meets tolerance.",
@@ -296,7 +307,14 @@ def refine(
                 history.append(_record(chart, x, t + 1, smooth, pen, L, step_norm, rejects, loss_offset,
                                        diagnostic, objective_change=change))
                 if iterate_callback is not None:
-                    iterate_callback(t + 1, x.copy(), history[-1])
+                    request = iterate_callback(t + 1, x.copy(), history[-1])
+                    if isinstance(request, ValidationStopRequest):
+                        if (stationarity_tol is not None and diagnostic[0] <= stationarity_tol
+                                and diagnostic[3] is None):
+                            return _result(x, "converged", "The spectral/support projected gradient mapping meets tolerance.",
+                                           t + 1, history, termination_reason="stationarity")
+                        return _result(x, "completed", request.message, t + 1, history,
+                                       termination_reason="validation_stop")
                 break
             rejects.append(str(reason))
             if trial < max_backtracks:

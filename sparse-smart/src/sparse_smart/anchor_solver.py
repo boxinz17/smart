@@ -18,6 +18,7 @@ states and callback states always use the original chart's Z encoding.
 This numerical solver does not provide a statistical/theorem certificate.
 """
 from __future__ import annotations
+from .stopping import ValidationStopRequest
 
 from dataclasses import dataclass, replace
 import numbers
@@ -522,6 +523,9 @@ def refine_anchor_projected(
     the fixed iteration budget; otherwise the complete constrained residual
     (including a proximal-solve error allowance) enables stationarity stopping.
     No anchors or source frames are changed, and callback exceptions propagate.
+    An explicit ValidationStopRequest callback return stops successfully
+    without asserting stationarity; other callback return values are ignored.
+    Certified stationarity takes precedence when both stop conditions coincide.
     An empty ``numerical_work`` dictionary requests per-update work summaries;
     otherwise only compact totals are attached to the result. Failure caching
     reuses only an identical, unrefined reference solve within this fit.
@@ -605,7 +609,14 @@ def refine_anchor_projected(
     history = [_record(chart, x, 0, smooth, penalty_value, initial_L, 0., [], loss_offset,
                        diagnostic, effective_support=True)]
     if iterate_callback is not None:
-        iterate_callback(0, x.copy(), history[-1])
+        request = iterate_callback(0, x.copy(), history[-1])
+        if isinstance(request, ValidationStopRequest):
+            if (iterations and stationarity_tol is not None and diagnostic[3] is None
+                    and diagnostic[0] <= stationarity_tol):
+                return finish(x, "converged", "The complete fixed-chart constrained residual meets tolerance.",
+                              0, history, termination_reason="stationarity")
+            return finish(x, "completed", request.message, 0, history,
+                          termination_reason="validation_stop")
     search = _FailureAwareSearch(float(initial_L), float(initial_L))
     for iteration in range(iterations):
         if stationarity_tol is not None and diagnostic[3] is None and diagnostic[0] <= stationarity_tol:
@@ -714,7 +725,14 @@ def refine_anchor_projected(
                                         relative_step_norm=step_norm / relative_scale,
                                         line_search_start_inverse=start_L, effective_support=True))
                 if iterate_callback is not None:
-                    iterate_callback(iteration + 1, x.copy(), history[-1])
+                    request = iterate_callback(iteration + 1, x.copy(), history[-1])
+                    if isinstance(request, ValidationStopRequest):
+                        if (stationarity_tol is not None and diagnostic[3] is None
+                                and diagnostic[0] <= stationarity_tol):
+                            return finish(x, "converged", "The complete fixed-chart constrained residual meets tolerance.",
+                                          iteration + 1, history, termination_reason="stationarity")
+                        return finish(x, "completed", request.message, iteration + 1, history,
+                                      termination_reason="validation_stop")
                 break
             rejects.append(str(reason))
             if backtrack < max_backtracks:

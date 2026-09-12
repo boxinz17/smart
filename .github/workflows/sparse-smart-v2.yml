@@ -1,0 +1,33 @@
+name: sparse-smart-v2
+
+on:
+  push:
+    paths: ["sparse-smart-v2/**", "sparse-smart/**", ".github/workflows/sparse-smart-v2.yml", ".python-version", "python-constraints.txt"]
+  pull_request:
+    paths: ["sparse-smart-v2/**", "sparse-smart/**", ".github/workflows/sparse-smart-v2.yml", ".python-version", "python-constraints.txt"]
+
+jobs:
+  package:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+      - name: Install pinned build tools
+        run: python -m pip install --constraint python-constraints.txt setuptools wheel
+      - name: Build both local packages
+        run: python -m pip wheel --constraint python-constraints.txt --no-build-isolation --no-deps ./sparse-smart ./sparse-smart-v2 --wheel-dir wheelhouse
+      - name: Install wheels and tests
+        run: python -m pip install --constraint python-constraints.txt wheelhouse/*.whl pytest
+      - name: Verify runtime
+        run: |
+          python -m pip check
+          python environment/check_runtime.py
+      - name: Test installed v2 package
+        run: python -m pytest -q sparse-smart-v2/tests --import-mode=importlib
+      - name: Run example
+        run: python sparse-smart-v2/examples/quickstart.py

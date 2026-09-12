@@ -7,6 +7,7 @@ model is retained as fitted; there is no implicit refit on all observations.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from itertools import product
 from numbers import Integral, Real
 import time
@@ -107,7 +108,9 @@ class SparseSMARTTuner:
 
     With ``checkpoint_execution='continuous'``, each grid point is fit once
     to the maximum budget. ``checkpoint_interval`` defaults to 250 in this
-    mode and controls dense checkpoint capture and validation evaluation.
+    mode and controls dense checkpoint capture. ``validation_interval=None``
+    uses this interval in continuous mode and every iterate in independent
+    mode; an explicit positive interval changes validation frequency only.
     Completed prefixes survive later failures; ``budget_reached`` separately
     records cap coverage. The initializer alone cannot rescue a trajectory
     that fails before its first positive checkpoint. Continuous histories
@@ -115,8 +118,15 @@ class SparseSMARTTuner:
     ``validation_iterations=()`` adds sorted, unique nonnegative validation
     points in continuous mode without adding full checkpoints or budget
     coverage. Points above the maximum iteration budget are ignored. Independent
-    mode already validates every accepted iterate and rejects a nonempty extra
-    schedule. Generic defaults retain the existing validation schedules.
+    mode rejects a nonempty extra schedule. Generic defaults retain the
+    existing validation schedules.
+
+    ``validation_patience=None`` disables compute stopping. In continuous mode,
+    a positive patience measured in iterations enables validation stopping,
+    with ``validation_min_iterations=500`` and a relative meaningful improvement
+    threshold of ``validation_min_relative_improvement=0.001``. A validation
+    stop keeps the best evaluated iterate eligible without establishing
+    optimization convergence or physical coverage of a larger budget.
     """
 
     def __init__(
@@ -129,6 +139,8 @@ class SparseSMARTTuner:
         lasso_tol=1e-9, lasso_max_iter=20000,
         initialization_spectrum="auto", refinement_solver="auto",
         checkpoint_execution="independent", checkpoint_interval=None, validation_iterations=(),
+        validation_interval=None, validation_patience=None, validation_min_iterations=500,
+        validation_min_relative_improvement=0.001,
     ):
         self.rank, self.source_rank, self.sparsity = rank, source_rank, sparsity
         self.margins = margins
@@ -147,6 +159,10 @@ class SparseSMARTTuner:
         self.checkpoint_execution = checkpoint_execution
         self.checkpoint_interval = checkpoint_interval
         self.validation_iterations = validation_iterations
+        self.validation_interval = validation_interval
+        self.validation_patience = validation_patience
+        self.validation_min_iterations = validation_min_iterations
+        self.validation_min_relative_improvement = validation_min_relative_improvement
 
     def _split(self, X, Y, validation_data):
         if validation_data is not None:
@@ -215,8 +231,11 @@ class SparseSMARTTuner:
         self.trajectory_models_, self.trajectory_history_ = [], []
         self.diagnostics_.update(checkpoint_execution="continuous_trajectory",
             checkpoint_interval=self.checkpoint_interval_, checkpoint_iterations=schedule,
+            validation_interval=self.validation_interval_,
             validation_iterations=self.validation_iterations_,
-            validation_schedule=sorted({*schedule, *(t for t in self.validation_iterations_
+            validation_schedule=sorted({*schedule,
+                                        *range(0, self.iterations + 1, self.validation_interval_),
+                                        *(t for t in self.validation_iterations_
                                                     if t <= self.iterations)}),
             candidate_records_are_checkpoint_prefixes=True,
             elapsed_time_scope="one_measurement_per_trajectory")
@@ -236,8 +255,11 @@ class SparseSMARTTuner:
                     spectral_step=self.spectral_step, stationarity_tol=self.stationarity_tol,
                     initialization_spectrum=self.initialization_spectrum,
                     refinement_solver=self.refinement_solver,
-                    checkpoint_iterations=schedule, validation_interval=self.checkpoint_interval_,
-                    validation_iterations=self.validation_iterations_)
+                    checkpoint_iterations=schedule, validation_interval=self.validation_interval_,
+                    validation_iterations=self.validation_iterations_,
+                    validation_patience=self.validation_patience,
+                    validation_min_iterations=self.validation_min_iterations,
+                    validation_min_relative_improvement=self.validation_min_relative_improvement)
                 model._fit_cache = preparation
                 preparation.validation_context = dict(grid_candidate_id=grid_id,
                                                        iteration_budget=self.iterations)
@@ -253,6 +275,7 @@ class SparseSMARTTuner:
                 message=str(exception) if exception else getattr(model, "message_", status),
                 n_iter=int(getattr(model, "n_iter_", 0)),
                 termination_reason=(status if exception else getattr(model, "termination_reason_", status)),
+                validation_stopping=deepcopy(getattr(model, "validation_stopping_", {})),
                 checkpoint_iterations=list(getattr(model, "checkpoint_iterations_", ())),
                 diagnostics=getattr(model, "diagnostics_", {}).copy(), elapsed_time_sec=elapsed))
 
@@ -274,9 +297,12 @@ class SparseSMARTTuner:
                     trajectory_status=trajectory["status"], trajectory_success=trajectory["success"],
                     trajectory_termination_reason=trajectory["termination_reason"],
                     trajectory_n_iter=trajectory["n_iter"], trajectory_checkpoint_iteration=None,
-                    budget_reached=False, diagnostics={})
+                    budget_reached=False, policy_completed=False, validation_stopping={}, diagnostics={})
                 terminal_stationary = (trajectory["success"]
                     and trajectory["termination_reason"] == "stationarity"
+                    and trajectory["n_iter"] <= budget)
+                terminal_validation_stop = (trajectory["success"]
+                    and trajectory["termination_reason"] == "validation_stop"
                     and trajectory["n_iter"] <= budget)
                 available = [t for t in trajectory["checkpoint_iterations"] if t <= budget
                              and (t > 0 or terminal_stationary or self.iterations == 0)]
@@ -294,10 +320,14 @@ class SparseSMARTTuner:
                             raise ValueError("checkpoint validation selection score is nonfinite")
                         record.update(summary, has_partial_coefficient=False,
                             trajectory_checkpoint_iteration=endpoint,
-                            budget_reached=(endpoint == budget or terminal_stationary))
+                            budget_reached=(endpoint == budget or terminal_stationary),
+                            policy_completed=(endpoint == budget or terminal_stationary
+                                              or (terminal_validation_stop
+                                                  and endpoint == trajectory["n_iter"])))
                     except (ValueError, np.linalg.LinAlgError, FloatingPointError, ArithmeticError, FitFailure) as error:
                         record.update(success=False, status=type(error).__name__, message=str(error),
-                                      validation_mse=None, selection_score=None, budget_reached=False)
+                                      validation_mse=None, selection_score=None, budget_reached=False,
+                                      policy_completed=False)
                 self.selection_history_.append(record)
                 budget_records.append(record)
             # Compare selected factor predictions directly. Only incumbent
@@ -326,7 +356,8 @@ class SparseSMARTTuner:
                             best_global["candidate_id"] if best_global is not None else None)
                     except (ValueError, np.linalg.LinAlgError, FloatingPointError, ArithmeticError, FitFailure) as error:
                         record.update(success=False, status=type(error).__name__, message=str(error),
-                                      validation_mse=None, selection_score=None, budget_reached=False)
+                                      validation_mse=None, selection_score=None, budget_reached=False,
+                                      policy_completed=False)
                         continue
                     record["budget_selection_comparison"], record["selection_comparison"] = local, overall
                     if best_budget is None or local["loss_difference"] < 0:
@@ -352,7 +383,8 @@ class SparseSMARTTuner:
                         materialized[record["candidate_id"]] = checkpoint
                     except (ValueError, np.linalg.LinAlgError, FloatingPointError, ArithmeticError, FitFailure) as error:
                         record.update(success=False, status=type(error).__name__, message=str(error),
-                                      validation_mse=None, selection_score=None, budget_reached=False)
+                                      validation_mse=None, selection_score=None, budget_reached=False,
+                                      policy_completed=False)
                         break
                 if len(materialized) != len(required):
                     continue
@@ -367,6 +399,8 @@ class SparseSMARTTuner:
                 break
         self.diagnostics_.update(trajectory_fits=len(grid),
             successful_trajectories=sum(t["success"] for t in self.trajectory_history_),
+            validation_stopped_trajectories=sum(t["success"] and t["termination_reason"] == "validation_stop"
+                                               for t in self.trajectory_history_),
             failed_trajectories=sum(not t["success"] for t in self.trajectory_history_))
         return budget_scores, winner_ids
 
@@ -419,6 +453,27 @@ class SparseSMARTTuner:
         if isinstance(interval, (bool, np.bool_)) or not isinstance(interval, Integral) or interval < 1:
             raise ValueError("checkpoint_interval must be a positive integer or None")
         self.checkpoint_interval_ = int(interval) if self.checkpoint_execution == "continuous" else None
+        validation_interval = self.validation_interval
+        if validation_interval is None:
+            validation_interval = self.checkpoint_interval_ or 1
+        if (isinstance(validation_interval, (bool, np.bool_))
+                or not isinstance(validation_interval, Integral) or validation_interval < 1):
+            raise ValueError("validation_interval must be a positive integer or None")
+        self.validation_interval_ = int(validation_interval)
+        if self.validation_patience is not None:
+            if (isinstance(self.validation_patience, (bool, np.bool_))
+                    or not isinstance(self.validation_patience, Integral) or self.validation_patience < 1):
+                raise ValueError("validation_patience must be a positive integer or None")
+            if self.checkpoint_execution != "continuous":
+                raise ValueError("validation_patience requires continuous checkpoint execution")
+        if (isinstance(self.validation_min_iterations, (bool, np.bool_))
+                or not isinstance(self.validation_min_iterations, Integral) or self.validation_min_iterations < 0):
+            raise ValueError("validation_min_iterations must be a nonnegative integer")
+        if (isinstance(self.validation_min_relative_improvement, (bool, np.bool_))
+                or not isinstance(self.validation_min_relative_improvement, Real)
+                or not np.isfinite(self.validation_min_relative_improvement)
+                or not 0 <= self.validation_min_relative_improvement < 1):
+            raise ValueError("validation_min_relative_improvement must lie in [0, 1)")
         dimensions = ((self.source_rank, self.source_rank) if isinstance(source, ExactSource)
                       else (X.shape[1], Y.shape[1]))
         maximum = tuple((dimension - self.rank) * self.rank for dimension in dimensions)
@@ -447,6 +502,10 @@ class SparseSMARTTuner:
             "refinement_solver": self.refinement_solver,
             "iteration_budgets": self.iteration_budgets_,
             "checkpoint_execution": "independent_fits",
+            "validation_interval": self.validation_interval_,
+            "validation_stopping": dict(enabled=self.validation_patience is not None,
+                patience=self.validation_patience, min_iterations=self.validation_min_iterations,
+                min_relative_improvement=self.validation_min_relative_improvement),
         }
         grid = tuple(product(init_grid, grid_u, grid_v, support_grid))
         preparation = _FitPreparationCache()
@@ -483,6 +542,7 @@ class SparseSMARTTuner:
                         stationarity_tol=self.stationarity_tol,
                         initialization_spectrum=self.initialization_spectrum,
                         refinement_solver=self.refinement_solver,
+                        validation_interval=self.validation_interval_,
                     )
                     model._fit_cache = preparation
                     preparation.validation_context = dict(grid_candidate_id=grid_id, iteration_budget=budget)
@@ -552,8 +612,11 @@ class SparseSMARTTuner:
                 if budget in budget_winner_ids else None)
             if self.checkpoint_execution == "continuous":
                 reached = sum(record["budget_reached"] for record in records)
+                policy_completed = sum(record["policy_completed"] for record in records)
                 budget_statuses[-1].update(budget_reached_candidates=reached,
-                    unreached_candidates=len(records)-reached, budget_fully_covered=(reached == len(records)))
+                    unreached_candidates=len(records)-reached, budget_fully_covered=(reached == len(records)),
+                    policy_completed_candidates=policy_completed,
+                    policy_fully_completed=(policy_completed == len(records)))
         n_successful = sum(record["success"] for record in self.selection_history_)
         self.diagnostics_.update(selected_budget=self.selected_budget_,
             best_selection_score=self.best_selection_score_,
@@ -569,6 +632,7 @@ class SparseSMARTTuner:
             self.selected_checkpoint_iteration_ = winner["trajectory_checkpoint_iteration"] if winner else None
             self.diagnostics_.update(selected_checkpoint_iteration=self.selected_checkpoint_iteration_,
                 selected_budget_reached=winner["budget_reached"] if winner else False,
+                selected_policy_completed=winner["policy_completed"] if winner else False,
                 selected_checkpoint_retained_after_failure=bool(winner and not winner["trajectory_success"]))
         if self.model_ is None:
             self.message_ = "No candidate completed successfully; failed partial fits were not selected."

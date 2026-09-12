@@ -39,9 +39,10 @@ baseline/dispatch build, an unavailable baseline, or an enabled optional group,
 and records the baseline, dispatch groups, and active CPU feature flags.
 
 The runtime report records the requested numerical environment and active
-library paths, versions, architectures, and thread counts. Worker reports are
-in `tasks/<task-id>/slurm.out`; the controller report is in
-`logs/environment.txt`, and both are archived. Fixed package versions alone
+library paths, versions, architectures, and thread counts. Budget-study worker
+reports remain in `tasks/<task-id>/slurm.out`. Historical combined jobs also
+have a postprocessing controller report in `logs/environment.txt`; the fit-only
+launcher does not run that stage or copy reports to archive storage. Fixed package versions alone
 do not establish matching floating-point results across node types; use a
 cross-node data-fingerprint check before a new campaign. Historical runs keep
 their original saved environment and provenance. Use a fresh results root
@@ -102,7 +103,10 @@ export R_LIBS_USER="${R_LIBS_USER:-$VENV/R/library}"
 
 Use `submit_budget_study.sh` for `run_sparse_smart_budget_study.py`, whose named
 arguments and batch manifests differ from the per-seed runners supported by
-the generic `submit.sh` below. The expanded grid is provisional: first use
+the generic `submit.sh` below. This launcher is **fit-only**: it saves primary
+results and execution records, then releases its allocation when fitting ends.
+Aggregation, scientific summaries, and archival are separate, deferred work.
+The expanded grid is provisional: first use
 three-seed probes in settings sensitive to the previous grid boundaries, then
 reassess coverage and runtime before a 100-seed campaign. To preview the expanded
 grid across every model, experiment, and setting on Discovery:
@@ -124,15 +128,15 @@ dropped or fitted using a different method.
 Each applicable case tunes 100 combinations: the initialization penalties
 `{0.01, 0.03, 0.1, 0.3}` crossed with the left/right penalties
 `{0.0025, 0.01, 0.04, 0.16, 0.32}`, using all paper-grid
-training rows and 100 independent validation rows. The three-seed pilot above
+training rows and 200 independent validation rows. The three-seed pilot above
 contains 216 cases, including 189 applicable cases and 27 explicit exclusions,
 for **18,900 continuous trajectories in 18,927 work items** (including the 27
 inapplicable records). The full 100-seed scope has 630,000 trajectories in
 630,900 work items. Split a full campaign into smaller submissions or use larger
 tuning chunks to respect cluster Slurm-step limits; the launcher does not
 automatically batch that campaign. It compares budgets
-**500, 1,000, 2,000, 4,000, and 8,000**, retaining
-regular checkpoints every 250 updates. Additional validation checks at
+**500, 1,000, and 2,000**, retaining
+regular checkpoints every 250 updates and evaluating validation every 50. Additional validation checks at
 **1, 2, 5, 10, 15, 20, 25, 50, 100, 150, and 200** capture useful iterates before the first regular
 checkpoint. Extra validation checks retain factors when they improve the
 validation best; regular checkpoints and budget endpoints retain their states.
@@ -140,6 +144,23 @@ This separates validation frequency from full-state retention. The optimizer che
 every iteration and stops early at tolerance `1e-6`, including its proximal
 uncertainty allowance. The maximum budget is a limit, not a convergence claim;
 validation selection and optimization convergence are reported separately.
+Validation stopping is enabled by default: after at least 500 accepted updates,
+stop at an evaluation when 300 iterations have elapsed without a cumulative
+0.1% decrease from the last significant best MSE. Every actual improvement
+remains eligible for selection, including improvements smaller than 0.1%.
+The model retains the best observed iterate and records `validation_stop` as
+the terminal reason. This completes the declared policy without claiming
+convergence or coverage of a larger unattained iteration cap. Such case results
+use `policy_complete`; their cap records keep `coverage_complete=false` where
+appropriate. Full-budget comparison summaries therefore remain conservative.
+
+Use `--validation-interval`, `--validation-patience`,
+`--validation-min-iterations`, and `--validation-min-relative-improvement` to
+configure the rule. `--no-validation-stop` creates a fixed-budget control;
+stationarity stopping remains active. `--n-validation` changes the independent
+validation sample size without changing training observations. Validation
+sizes, schedules, and stopping policy all enter the saved identity; use a fresh
+output root after changing them. Historical plans retain their recorded settings.
 `--iteration-budgets`, `--checkpoint-interval`, `--validation-iterations`, `--stationarity-tol`,
 `--init-penalties`, `--penalties-u`, and `--penalties-v` make these choices explicit.
 Additional validation iterations must be positive, unique, and increasing.
@@ -158,13 +179,12 @@ refinement penalties can tie. Use the pilot to reassess grid boundaries and
 runtime before committing to 100 seeds; final performance should be evaluated
 separately from the validation data used for tuning.
 
-Two optional presets prepare targeted longer-budget probes. Each requires an
+Two optional presets prepare targeted source-rank probes. Each requires an
 explicit **single model** and selects experiment 2 (vary the fitted source
-rank), with setting index 2 for rank 5 or index 3 for rank 7. Both retain all
-earlier budget caps and add **16,000**. `source-rank-5` also adds `0.001` to both
+rank), with setting index 2 for rank 5 or index 3 for rank 7. Both use the same
+500/1,000/2,000 caps and validation stopping. `source-rank-5` adds `0.001` to both
 U/V grids, giving 144 combinations per case; `source-rank-7` retains the expanded
-100-combination grid. These are exploratory probes for settings showing continued
-improvement, not a claim that every such setting needs the larger budget.
+100-combination grid. Longer caps require an explicit `--iteration-budgets` override.
 
 ```bash
 # Source-rank-5 probe for Model 1 (model ID 0): 3 cases, 432 work items.
@@ -190,10 +210,13 @@ cap alone does not repair trajectories that terminate with numerical stagnation.
 
 `--dry-run` creates a source snapshot, `study-plan.json`, `work-items.tsv`,
 shared tuning-subset overrides in `task-configs/`,
-submission metadata, and an archive copy, but does not submit a job or fit
+and submission metadata in the run directory, but does not submit a job or fit
 anything. Remove `--dry-run` to submit that scope. Use `--models`,
 `--experiments`, `--seeds`, and `--setting-index` to request a smaller scope;
 `--setting-index` requires one model and one experiment. Indices are zero-based.
+`--archive-root` and `SMART_ARCHIVE_ROOT` are accepted as deprecated compatibility
+metadata only: the fit-only launcher does not resolve, create, validate, or write
+that destination. Archive storage is not required for preparation or execution.
 
 `--workers N` is required: choose the concurrency for each submission based on
 cluster availability, for example 16, 32, 64, or 128. It is independent of the
@@ -207,7 +230,7 @@ cases times 100 combinations, plus nine inapplicable records. Workers use
 Slurm distributes its requested CPU slots across suitable nodes, with no fixed
 node count. For example, 32 workers at the default 8 GB per CPU request
 **32 CPUs and 256 GB of aggregate memory**. The 24-hour limit covers the entire
-queue and final audit, not each case. These resource choices are adjustable;
+fitting queue, not each case. These resource choices are adjustable;
 the small pilot does not predict full-grid runtime. Slurm grants the requested
 allocation before starting the pool; it stays fixed while the queue drains.
 
@@ -225,30 +248,38 @@ Every worker has a separate `tasks/<task-id>/results` manifest/output root.
 Split task IDs such as `m0_e0_s0_k0_g0` identify their original data case and
 first global grid index. `task-configs/g0.sh` and similar files hold the tuning
 overrides shared by every data case; the default grid needs only 100 such files.
-These overrides and the source snapshot are archived before submission.
-After workers finish, the controller verifies the
-runtime and assembles `results/`, merging saved tuning subsets into one result
-per original data case. It compares saved predictions in the original grid
-order and preserves initializer ties and validation selection semantics.
-The merge performs no fitting and keeps incomplete candidate coverage visible.
-Each task retains its original validation-score reference; cross-task selection
-uses direct differences between saved predictions on the same validation data.
-Merged fitting times sum task work; pool wall time is recorded in the job logs.
-Collection preserves complete,
-partial, failed, inapplicable, and missing outcomes, then runs the existing
-summary with `--manifest-scope`. `aggregation-report.json`, the study manifest,
-stage exit codes, worker logs, and GNU Parallel job log distinguish execution
-failures from scientific outcomes. No separate processes write one shared
-runner manifest. Source and seed hashes remain attached to the results.
-If runtime validation fails, collection reports available task metadata and
-missing cases without performing a scientific merge or summary.
+These overrides and the source snapshot remain in the run directory. Workers
+validate the numerical environment before fitting and preserve the full result
+JSON, including every currently retained trajectory, factor checkpoint,
+validation record and numerical diagnostic. Scientific runner arguments and
+source/seed fingerprints are unchanged by the fit-only execution boundary.
 
-Completed-task artifacts are copied to the durable archive. Checkpoint states
-are held in memory until that task's trajectories finish; an interrupted task
-must restart. The launcher does not automatically resubmit a timed-out queue.
-Provision storage for all checkpoint records and archive copies, and inspect
-the report's coverage before treating the campaign as complete. The full-grid
-audit bounds its regenerated-data cache instead of retaining every dataset.
+After the last task terminates, the controller writes its fitting outcome and
+exits. It performs no post-fitting environment inventory, aggregation, summary,
+or recursive archival. Neither worker exit trap copies task directories.
+`process-exit-code.txt`, `exit-code.txt`, and `launcher-exit-code.txt` preserve
+the task outcomes; task/step logs, `logs/parallel-joblog.tsv`,
+`stage-status.tsv`, and `pool-exit-code.txt` preserve batch execution evidence.
+Run-level `postprocessing-status.txt` and `archive-status.txt` say `deferred`;
+task-level `archive-status.txt` also says `deferred`. A successful Slurm job
+means **fits finished; aggregation pending**, not a completed scientific campaign.
+Real fit and launch failures remain nonzero; numerical stagnation and incomplete
+tuning coverage remain visible in the scientific JSONs.
+
+Keep the raw task directories and their manifests/status records for later
+aggregation. The existing collector can merge the tuning shards, retain their
+original validation references and deterministic candidate order, and report
+missing or failed cases without fitting again. It is no longer invoked by the
+launcher. Separate case-parallel aggregation is now implemented locally; its
+Slurm launcher is described in [CASE_AGGREGATION.md](CASE_AGGREGATION.md).
+Archival and cleanup remain separate decisions; see the [rollout plan](PIPELINE_RESTRUCTURE_PLAN.md).
+
+Checkpoint states are held in memory until that task's trajectories finish and
+are serialized into its final result JSON; an interrupted task must restart.
+The launcher does not automatically resubmit a timed-out queue or delete raw
+results. Provision primary storage and file quota for all retained results until
+separate aggregation/archival occurs. Existing completed-job archives remain
+unchanged. The generic launchers below retain their own archival behavior.
 
 See the [budget-study guide](../../simulation/SPARSE_SMART_V05_BUDGET_STUDY.md)
 for selection, early stopping, and interpretation details.
@@ -441,3 +472,19 @@ USC references: [Getting started with Discovery](https://www.carc.usc.edu/user-g
 and [Python on CARC](https://www.carc.usc.edu/user-guides/advanced-hpc-programming/programming-languages/python).
 The pool dispatch pattern follows the
 [RCC GNU Parallel guide](https://docs.rcc.uchicago.edu/slurm/sbatch/#gnu-parallel).
+
+## Independent SparseSMART case aggregation
+
+The local phase-two case runner, compact campaign reducer and dedicated Slurm
+array launcher are documented in [CASE_AGGREGATION.md](CASE_AGGREGATION.md).
+They audit existing outputs in place, with model-scoped indexes, selected-factor
+publication and verified per-case restart support. The default compact mode
+keeps all other factors in the raw files rather than writing a full duplicate.
+
+`submit_case_aggregation.sh --models 1` selects Model II (zero-based ID 1).
+The launcher defaults to metadata/code preparation only; `--dry-run` also prints
+the request and `--submit` explicitly submits. Each array element uses one CPU
+for a sequential chunk of cases; the concurrency cap is configurable. One
+summary job follows the array with `afterany`, so failed or missing cases stay
+visible. No fits, per-worker source copies, raw-data copies or archive operations
+are part of this stage. Default memory/time requests require a Discovery pilot.

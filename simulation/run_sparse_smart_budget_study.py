@@ -1,8 +1,8 @@
 """Continuous SparseSMART budget study with independently verifiable checkpoints.
 
 This opt-in runner has its own schema and output root. Each parameter grid point
-is fitted once to the maximum budget; validation uses the checkpoint interval
-plus optional early checks that retain only improving states. Earlier certified
+is fitted once up to its maximum budget or validation stopping rule. Validation
+uses its own interval plus optional early checks that retain only improving states. Earlier certified
 prefixes survive a later trajectory failure, while unattained comparison caps
 remain explicitly unresolved.
 """
@@ -44,15 +44,19 @@ SCHEMA_VERSION = 1
 
 @dataclass(frozen=True)
 class RunnerConfig:
-    iteration_budgets: tuple[int, ...] = (500, 1000, 2000, 4000, 8000)
+    iteration_budgets: tuple[int, ...] = (500, 1000, 2000)
     checkpoint_interval: int = 250
+    validation_interval: int = 50
+    validation_patience: int | None = 300
+    validation_min_iterations: int = 500
+    validation_min_relative_improvement: float = .001
     validation_iterations: tuple[int, ...] = (1, 2, 5, 10, 15, 20, 25, 50, 100, 150, 200)
     init_penalties: tuple[float, ...] = (.01, .03, .1, .3)
     penalties_u: tuple[float, ...] = (.0025, .01, .04, .16, .32)
     penalties_v: tuple[float, ...] = (.0025, .01, .04, .16, .32)
     inverse_step: float = 20.
     stationarity_tol: float = 1e-6
-    n_validation: int = 100
+    n_validation: int = 200
     validation_seed_tag: int = external_validation_data.VALIDATION_SEED_TAG
     checkpoint_execution: str = 'continuous'
     initialization_spectrum: str = 'projected'
@@ -72,6 +76,16 @@ class RunnerConfig:
             raise ValueError('iteration_budgets must be positive, unique, and increasing')
         if type(self.checkpoint_interval) is not int or self.checkpoint_interval <= 0:
             raise ValueError('checkpoint_interval must be a positive integer')
+        if type(self.validation_interval) is not int or self.validation_interval <= 0:
+            raise ValueError('validation_interval must be a positive integer')
+        if self.validation_patience is not None and (type(self.validation_patience) is not int or self.validation_patience <= 0):
+            raise ValueError('validation_patience must be a positive integer or None')
+        if type(self.validation_min_iterations) is not int or self.validation_min_iterations < 0:
+            raise ValueError('validation_min_iterations must be a nonnegative integer')
+        improvement = self.validation_min_relative_improvement
+        if (isinstance(improvement, bool) or not isinstance(improvement, (int, float))
+                or not math.isfinite(improvement) or not 0 <= improvement < 1):
+            raise ValueError('validation_min_relative_improvement must be finite in [0, 1)')
         checks = self.validation_iterations
         if (not isinstance(checks, (tuple, list))
                 or any(type(t) is not int or t <= 0 for t in checks)
@@ -88,8 +102,8 @@ class RunnerConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f'{name} must be finite and positive')
-        if type(self.n_validation) is not int or self.n_validation != 100:
-            raise ValueError('The budget study requires exactly 100 independent validation observations')
+        if type(self.n_validation) is not int or self.n_validation <= 0:
+            raise ValueError('n_validation must be a positive integer')
         if type(self.validation_seed_tag) is not int or not 0 <= self.validation_seed_tag < 2**32:
             raise ValueError('validation_seed_tag must be a 32-bit nonnegative integer')
         fixed = dict(checkpoint_execution='continuous', initialization_spectrum='projected',
@@ -117,6 +131,7 @@ def validation_schedule(config):
     """Planned validation points; successful early stationarity adds its endpoint."""
     return sorted({0, config.iterations, *config.iteration_budgets,
                    *range(config.checkpoint_interval, config.iterations+1, config.checkpoint_interval),
+                   *range(config.validation_interval, config.iterations+1, config.validation_interval),
                    *(t for t in config.validation_iterations if t <= config.iterations)})
 
 
@@ -133,7 +148,7 @@ def resolved_configuration(setting, config):
         rank=rank, source_rank=source_rank, sparsity=[sparsity, sparsity],
         support_limits=[counts], actual_complement_counts=counts, candidate_grid=grid,
         trajectory_count=len(grid), candidate_count=len(grid)*len(config.iteration_budgets),
-        checkpoint_execution='continuous', validation_interval=config.checkpoint_interval,
+        checkpoint_execution='continuous', validation_interval=config.validation_interval,
         validation_iterations=list(config.validation_iterations), validation_schedule=validation_schedule(config),
         validation_state_policy='checkpoints_and_validation_bests',
         n_train=setting.n, n_validation=config.n_validation, fit_sample='all_supplied_training_rows',
@@ -197,6 +212,8 @@ def _encode_trajectory(model, metadata, data):
     _require(keys == sorted(set(keys)) and keys == sorted(snapshots), 'Inconsistent estimator checkpoint indices')
     value['checkpoint_iterations'] = keys
     value['validation_history'] = _json_value(getattr(model, 'validation_history_', []))
+    if hasattr(model, 'validation_stopping_'):
+        value['validation_stopping'] = _json_value(model.validation_stopping_)
     score_cache = {}
     def factors(state, iteration):
         key = str(iteration)
@@ -233,6 +250,8 @@ def _encode_trajectory(model, metadata, data):
             terminal_record=history[k], selected_record=history[selected],
             optimization_converged=snapshot.status == 'converged',
             selected_converged=snapshot.status == 'converged' and selected == k, endpoint_selected=selected == k))
+        if getattr(snapshot, 'validation_stopping', None) is not None:
+            value['checkpoints'][-1]['validation_stopping'] = _json_value(snapshot.validation_stopping)
         validation_rows = {row["iteration"]:row for row in value["validation_history"]}
         if validation_rows.get(selected, {}).get("selection_rule") == PAIRWISE_RULE:
             value["checkpoints"][-1]["selection_rule"] = PAIRWISE_RULE
@@ -299,6 +318,12 @@ def _cap_outcomes(candidates, trajectories, resolved, config, data=None):
             winner_checkpoint_iteration=None, selected_iteration=None, validation_mse=None, coefficient_error=None,
             terminal_validation_mse=None, terminal_coefficient_error=None, selected_factor_key=None,
             optimization_converged=False, selected_converged=False)
+        # Intentional validation stopping finishes the declared policy without
+        # claiming that an unattained fixed iteration budget was explored.
+        stopped = [c for c in rows if c['success']
+                   and c.get('termination_reason') == 'validation_stop']
+        outcome.update(validation_stopped_count=len(stopped),
+            policy_complete=all(c['budget_reached'] or c in stopped for c in rows))
         if winner is not None:
             checkpoint = lookup[(winner['grid_candidate_id'], winner['trajectory_checkpoint_iteration'])]
             outcome.update(winner_candidate_id=winner['candidate_id'], winner_grid_candidate_id=winner['grid_candidate_id'],
@@ -378,6 +403,10 @@ def run_setting(*, setting: SimulationSetting, model, experiment, seed_id, rando
             init_penalties=config.init_penalties, penalties_u=config.penalties_u, penalties_v=config.penalties_v,
             support_limits=None, iterations=config.iterations, iteration_budgets=config.iteration_budgets,
             checkpoint_execution='continuous', checkpoint_interval=config.checkpoint_interval,
+            validation_interval=config.validation_interval,
+            validation_patience=config.validation_patience,
+            validation_min_iterations=config.validation_min_iterations,
+            validation_min_relative_improvement=config.validation_min_relative_improvement,
             validation_iterations=config.validation_iterations,
             step_size_inverse=config.inverse_step, stationarity_tol=config.stationarity_tol,
             enforce_source_accuracy=False, initialization_spectrum='projected', refinement_solver='anchor_projected',
@@ -402,8 +431,9 @@ def run_setting(*, setting: SimulationSetting, model, experiment, seed_id, rando
                      and math.isclose(tuner.best_score_,final['validation_mse'],rel_tol=1e-10,abs_tol=1e-12),
                      'Tuner winner differs from cumulative checkpoint selection')
         value.update(success=final['success'],
-            status='complete' if final['coverage_complete'] else 'partial' if final['success'] else 'all_candidates_failed',
-            failure_reason=None if final['coverage_complete'] else 'unresolved_maximum_budget',
+            status=('complete' if final['coverage_complete'] else 'policy_complete' if final['policy_complete']
+                    else 'partial' if final['success'] else 'all_candidates_failed'),
+            failure_reason=None if final['policy_complete'] else 'unresolved_maximum_budget',
             tuning_diagnostics=_json_value(tuner.diagnostics_), tuner_status=tuner.status_,
             selected_budget=final['winner_origin_budget'], selected_candidate_id=final['winner_candidate_id'],
             selected_iteration=final['selected_iteration'], validation_loss=final['validation_mse'], avg_err=final['coefficient_error'])
@@ -450,6 +480,18 @@ def main(argv=None):
     parser.add_argument('--setting-index',type=int,help='Original paper-grid index; requires one model and experiment')
     parser.add_argument('--iteration-budgets',type=int,nargs='+',default=list(defaults.iteration_budgets))
     parser.add_argument('--checkpoint-interval',type=int,default=defaults.checkpoint_interval)
+    parser.add_argument('--validation-interval',type=int,default=defaults.validation_interval,
+        help='Evaluate validation every N iterations, independently of full checkpoints (default: 50)')
+    parser.add_argument('--validation-patience',type=int,default=defaults.validation_patience,
+        help='Stop after N iterations without a significant validation improvement (default: 300)')
+    parser.add_argument('--no-validation-stop',action='store_true',
+        help='Disable validation stopping for fixed-budget controls')
+    parser.add_argument('--validation-min-iterations',type=int,default=defaults.validation_min_iterations)
+    parser.add_argument('--validation-min-relative-improvement',type=float,
+        default=defaults.validation_min_relative_improvement,
+        help='Relative improvement required to reset patience (default: .001 = 0.1%%)')
+    parser.add_argument('--n-validation',type=int,default=defaults.n_validation,
+        help='Independent validation observations; training sample is unchanged (default: 200)')
     parser.add_argument('--validation-iterations',nargs='+',default=[','.join(map(str, defaults.validation_iterations))],
         help='Extra validation-only iterations (comma/space separated), or none; full checkpoints stay periodic')
     parser.add_argument('--stationarity-tol',type=float,default=defaults.stationarity_tol,
@@ -466,6 +508,11 @@ def main(argv=None):
         parser.error('Require unique valid models, experiments, seed IDs and positive workers/seed count')
     try:
         config = RunnerConfig(iteration_budgets=tuple(args.iteration_budgets),checkpoint_interval=args.checkpoint_interval,
+            validation_interval=args.validation_interval,
+            validation_patience=None if args.no_validation_stop else args.validation_patience,
+            validation_min_iterations=args.validation_min_iterations,
+            validation_min_relative_improvement=args.validation_min_relative_improvement,
+            n_validation=args.n_validation,
             validation_iterations=parse_validation_iterations(args.validation_iterations),
             init_penalties=args.init_penalties,penalties_u=args.penalties_u,penalties_v=args.penalties_v,
             stationarity_tol=args.stationarity_tol)

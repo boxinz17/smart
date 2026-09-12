@@ -33,13 +33,20 @@ def trajectories(monkeypatch):
                             'completed' if self.success_ else 'numerical_stagnation')
             self.message_ = self.status_
             self.diagnostics_ = {'terminal': self.n_iter_}
+            self.validation_stopping_ = self._validation_stopping(self.n_iter_)
             self.coefficient_ = np.zeros((X.shape[1], Y.shape[1]))
             self.checkpoint_iterations_ = tuple(t for t in self.options['checkpoint_iterations'] if t <= self.n_iter_)
-            if self.termination_reason_ == 'stationarity':
+            if self.termination_reason_ in ('stationarity', 'validation_stop'):
                 self.checkpoint_iterations_ = tuple(sorted({*self.checkpoint_iterations_, self.n_iter_}))
             if self.outcome.get('exception'):
                 raise FloatingPointError('validation failed after a completed checkpoint')
             return self
+
+        def _validation_stopping(self, endpoint):
+            stopped = self.termination_reason_ == 'validation_stop' and endpoint == self.n_iter_
+            return dict(enabled=self.options['validation_patience'] is not None,
+                        stopped=stopped, stop_iteration=endpoint if stopped else None,
+                        last_significant_iteration=min(endpoint, 2))
 
         def _checkpoint_view(self, endpoint):
             assert endpoint in self.checkpoint_iterations_
@@ -56,9 +63,12 @@ def trajectories(monkeypatch):
             coefficient = self.coefficient_.copy()
             coefficient[0, 0] = values.get(selected, 10.-selected)
             stationary = self.termination_reason_ == 'stationarity' and endpoint == self.n_iter_
+            validation_stop = self.termination_reason_ == 'validation_stop' and endpoint == self.n_iter_
             return SimpleNamespace(success_=True, status_='converged' if stationary else 'completed',
-                message_='completed prefix', termination_reason_='stationarity' if stationary else 'max_iterations',
+                message_='completed prefix', termination_reason_=('stationarity' if stationary else
+                    'validation_stop' if validation_stop else 'max_iterations'),
                 coefficient_=coefficient, n_iter_=endpoint, selected_iteration_=selected,
+                validation_stopping_=self._validation_stopping(endpoint),
                 best_selection_score_=selection_scores[selected],
                 validation_history_=[{'iteration': t, 'loss': scores[t],
                                       'selection_score': selection_scores[t]} for t in points],
@@ -70,6 +80,7 @@ def trajectories(monkeypatch):
                 validation_mse=min(row['loss'] for row in view.validation_history_),
                 selection_score=view.best_selection_score_,
                 selected_iteration=view.selected_iteration_, n_iter=view.n_iter_,
+                validation_stopping=view.validation_stopping_,
                 termination_reason=view.termination_reason_, validation_history=view.validation_history_,
                 diagnostics=view.diagnostics_)
 
@@ -162,6 +173,52 @@ def test_certified_early_stationarity_covers_later_caps_even_off_grid(data, traj
                and r['termination_reason'] == 'stationarity' for r in fitted.selection_history_)
 
 
+def test_validation_stop_is_eligible_without_claiming_later_budget_coverage(data, trajectories):
+    X, Y, source = data
+    trajectories.outcomes = {p: dict(n_iter=5, reason='validation_stop', values={2: .1})
+                             for p in (.01, .02)}
+    fitted = continuous(validation_interval=1, validation_patience=3,
+                        validation_min_iterations=4).fit(X, Y, source=source)
+    assert fitted.success_ and fitted.selected_iteration_ == 2
+    assert fitted.diagnostics_['failed_trajectories'] == 0
+    assert fitted.diagnostics_['validation_stopped_trajectories'] == 2
+    first_cap, later_cap = fitted.selection_history_[:2], fitted.selection_history_[2:]
+    assert all(r['success'] and r['budget_reached'] and r['policy_completed'] for r in first_cap)
+    assert all(r['success'] and not r['budget_reached'] and r['policy_completed'] for r in later_cap)
+    assert all(r['termination_reason'] == 'max_iterations' and not r['validation_stopping']['stopped']
+               and r['validation_stopping']['stop_iteration'] is None for r in first_cap)
+    assert all(r['termination_reason'] == 'validation_stop'
+               and r['trajectory_checkpoint_iteration'] == 5
+               and r['validation_stopping']['stop_iteration'] == 5 for r in later_cap)
+    assert all(row['policy_fully_completed'] for row in fitted.diagnostics_['budget_statuses'])
+    assert not fitted.diagnostics_['budget_statuses'][1]['budget_fully_covered']
+    assert not fitted.diagnostics_['selected_checkpoint_retained_after_failure']
+    assert all(t['validation_stopping']['stopped'] for t in fitted.trajectory_history_)
+    for model in trajectories.instances:
+        assert model.options['validation_interval'] == 1
+        assert model.options['validation_patience'] == 3
+        assert model.options['validation_min_iterations'] == 4
+        assert model.options['validation_min_relative_improvement'] == .001
+    assert fitted.diagnostics_['validation_schedule'] == list(range(9))
+
+
+def test_failure_does_not_complete_validation_policy(data, trajectories):
+    X, Y, source = data
+    trajectories.outcomes = {p: dict(success=False, n_iter=5) for p in (.01, .02)}
+    fitted = continuous(validation_patience=3, validation_min_iterations=4).fit(X, Y, source=source)
+    assert all(r['policy_completed'] for r in fitted.selection_history_[:2])
+    assert all(not r['policy_completed'] for r in fitted.selection_history_[2:])
+    assert not fitted.diagnostics_['budget_statuses'][1]['policy_fully_completed']
+
+
+def test_validation_frequency_does_not_add_full_checkpoints(data, trajectories):
+    X, Y, source = data
+    fitted = continuous(validation_interval=3).fit(X, Y, source=source)
+    assert fitted.diagnostics_['validation_schedule'] == [0, 2, 3, 4, 6, 8]
+    assert all(model.options['checkpoint_iterations'] == [0, 2, 4, 6, 8]
+               and model.options['validation_interval'] == 3 for model in trajectories.instances)
+
+
 def test_best_prefix_can_be_an_interior_dense_checkpoint_with_earliest_ties(data, trajectories):
     X, Y, source = data
     trajectories.outcomes = {p: dict(values={0: 5., 2: 2., 4: 3., 6: 1., 8: 1.}) for p in (.01, .02)}
@@ -237,3 +294,30 @@ def test_real_continuous_tuner_matches_independent_optimization_prefixes():
         np.testing.assert_array_equal(independent.coefficient_, prefix.coefficient_)
         assert independent.validation_history_ == prefix.validation_history_
         assert independent.history_ == prefix.history_
+
+
+def test_real_tuner_stop_metadata_is_limited_to_each_prefix():
+    from sparse_smart import ExactSource, Margins
+    rng = np.random.default_rng(712)
+    X = rng.normal(size=(35, 3))
+    Y = np.column_stack((2.*X[:, 0], .15*X[:, 1]))
+    source = ExactSource(np.eye(3)[:, :2], np.eye(2))
+    fitted = tuning.SparseSMARTTuner(rank=1, source_rank=2, sparsity=(1, 1),
+        margins=Margins(.05, 6., .01), init_penalties=(.03,), penalties_u=(.01,),
+        penalties_v=(.01,), stationarity_tol=None, refinement_solver='anchor_projected',
+        iterations=8, iteration_budgets=(4, 8), checkpoint_execution='continuous',
+        checkpoint_interval=4, validation_interval=1, validation_patience=5,
+        validation_min_iterations=6).fit(X, Y, source=source,
+            validation_data=(np.zeros((7, 3)), np.ones((7, 2))))
+    assert fitted.success_
+    path, = fitted.trajectory_models_
+    earlier, terminal = fitted.selection_history_
+    assert path.n_iter_ == 6 and path.termination_reason_ == 'validation_stop'
+    assert path.checkpoint_iterations_ == (0, 4, 6)
+    assert earlier['n_iter'] == 4 and earlier['validation_stopping']['last_check_iteration'] == 4
+    assert earlier['budget_reached'] and not earlier['validation_stopping']['stopped']
+    assert terminal['n_iter'] == 6 and terminal['termination_reason'] == 'validation_stop'
+    assert not terminal['budget_reached'] and terminal['policy_completed']
+    assert terminal['validation_stopping']['stop_iteration'] == 6
+    assert not terminal['diagnostics']['optimization_converged']
+    assert fitted.checkpoints_[8].validation_stopping_['stop_iteration'] == 6

@@ -68,6 +68,11 @@ def test_full_plan_has_exact_existing_scope_and_explicit_exclusions():
     assert (len(plan["configuration"]["init_penalties"])*len(plan["configuration"]["penalties_u"])
             *len(plan["configuration"]["penalties_v"])) == 100
     assert plan["configuration"]["validation_iterations"] == [1, 2, 5, 10, 15, 20, 25, 50, 100, 150, 200]
+    assert plan["configuration"]["n_validation"] == 200
+    assert plan["configuration"]["validation_interval"] == 50
+    assert plan["configuration"]["validation_patience"] == 300
+    assert plan["configuration"]["validation_min_iterations"] == 500
+    assert plan["configuration"]["validation_min_relative_improvement"] == .001
     assert {cell["inapplicability_reason"] for cell in plan["cells"]} == {
         None, "source_rank_must_be_positive", "target_rank_exceeds_source_rank"}
 
@@ -147,7 +152,11 @@ def test_invalid_scope_is_rejected(kwargs):
     dict(init_penalties=(0.,)), dict(penalties_u=(.01, .01)),
     dict(validation_iterations=(25, 10)), dict(validation_iterations=(10, 10)),
     dict(validation_iterations=(0,)), dict(validation_iterations=(-10,)),
-    dict(validation_iterations=(True,)), dict(validation_iterations=(10.,))])
+    dict(validation_iterations=(True,)), dict(validation_iterations=(10.,)),
+    dict(validation_interval=0), dict(validation_interval=True), dict(validation_patience=0),
+    dict(validation_patience=2.5), dict(validation_min_iterations=-1),
+    dict(validation_min_relative_improvement=float("nan")),
+    dict(validation_min_relative_improvement=1.), dict(n_validation=0), dict(n_validation=True)])
 def test_invalid_configuration_is_rejected(kwargs):
     with pytest.raises(ValueError):
         study.configuration(**kwargs)
@@ -192,20 +201,38 @@ def test_planner_cli_rejects_invalid_validation_iteration_list(tmp_path, argumen
 
 def test_old_plan_and_records_keep_periodic_only_identity(tmp_path):
     legacy = study.configuration(iteration_budgets=(2, 4), checkpoint_interval=2,
-                                 penalties_u=(.01,), penalties_v=(.01,))
-    legacy.pop("validation_iterations")
+                                 penalties_u=(.01,), penalties_v=(.01,), n_validation=100,
+                                 validation_patience=None)
+    for key in ("validation_iterations", "validation_interval", "validation_patience",
+                "validation_min_iterations", "validation_min_relative_improvement"):
+        legacy.pop(key)
     plan = study.make_plan(models=(0,), experiments=(0,), seed_ids=(0,), setting_index=0,
                            config=legacy)
     fingerprint = plan["plan_fingerprint"]
     study.write_plan(plan, tmp_path)
     study.validate_plan(plan)
     assert "validation_iterations" not in plan["configuration"]
+    assert "validation_patience" not in plan["configuration"]
+    assert plan["configuration"]["n_validation"] == 100
     path, record, _ = save_cell(tmp_path, plan, plan["cells"][0])
     assert "validation_schedule" not in record["configuration"]
     assert "validation_iterations" not in record["configuration"]
     assert "validation_state_policy" not in record["configuration"]
     assert study.aggregate(tmp_path)["execution_complete"]
     assert study.read_json(tmp_path/"study-plan.json")["plan_fingerprint"] == fingerprint
+
+
+def test_stopping_and_validation_size_are_distinct_plan_identities():
+    options = dict(models=(0,), experiments=(0,), seed_ids=(0,), setting_index=0)
+    configs = [study.configuration(), study.configuration(validation_patience=None),
+               study.configuration(validation_patience=None, n_validation=100)]
+    plans = [study.make_plan(**options, config=config) for config in configs]
+    assert len({plan["plan_fingerprint"] for plan in plans}) == 3
+    for plan, config in zip(plans, configs):
+        study.validate_plan(plan)
+        resolved = study.resolved_configuration(plan["cells"][0]["simulation_setting"], config)
+        assert resolved["n_validation"] == config["n_validation"]
+        assert resolved["runner"]["validation_patience"] == config["validation_patience"]
 
 
 def test_previous_pilot_grid_and_early_schedule_remain_explicit_on_resume(tmp_path):

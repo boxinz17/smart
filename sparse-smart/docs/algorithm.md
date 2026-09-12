@@ -396,11 +396,15 @@ The default independent-budget mode is unchanged.
 The capture schedule is the union of iteration zero, multiples of
 `checkpoint_interval` (250 by default in continuous mode), all requested
 comparison budgets, and the maximum budget. Validation is evaluated at
-those scheduled points, optional additive `validation_iterations`, and a
+those scheduled points, multiples of `validation_interval`, optional additive
+`validation_iterations`, and a
 successful terminal iterate. The extra schedule defaults to empty, is strictly
 increasing and unique, and accepts nonnegative integers; points beyond the
 maximum budget are ignored. It never adds full checkpoints. A computed
 pairwise loss difference of zero retains the earlier evaluated state.
+The tuner defaults `validation_interval=None` to the capture interval in
+continuous mode and one in independent mode. Setting it to 50 while capturing
+every 250 updates adds validation checks independently of full checkpoint capture.
 Validation never modifies a gradient or an acceptance condition. The initializer participates in validation
 selection once a positive prefix completes, but cannot by itself rescue a
 trajectory that fails before its first positive checkpoint. A stationary
@@ -411,7 +415,7 @@ Each estimator stores compact original-chart endpoint and selected states in
 truncated histories, and selected/terminal diagnostics without fitting. Views
 are independent of the ongoing or failed parent estimator's mutable arrays.
 Nonfinite objective/gradient callback records are excluded from validation
-selection and do not become successful checkpoints. Improving extra validation
+selection and do not become successful checkpoints. Improving intermediate validation
 states are kept in the read-only `best_validation_states_` mapping; losing
 extra points keep scalar diagnostics only. Every early improvement is retained,
 even if superseded before the next full checkpoint. These states do not certify
@@ -436,6 +440,39 @@ establish cap coverage. Candidate records stay in budget-major order, with
 a negative pairwise validation loss difference replacing the winner; a computed
 zero retains earlier caps and then grid order. Per-trajectory timing is
 reported once rather than charged again to every prefix.
+
+### Validation-based compute stopping
+
+`validation_patience=None` disables this policy in the estimator and tuner.
+In continuous tuning, set `validation_interval=50`, `validation_patience=300`,
+`validation_min_iterations=500`, and
+`validation_min_relative_improvement=0.001` to check every 50 updates and stop
+after at least 500 accepted updates once no meaningful validation improvement
+has occurred for 300 accepted updates. Additional validation points and full
+checkpoints also run the check. A meaningful improvement lowers the best raw
+validation MSE by at least 0.1% relative to the last significant reference loss;
+small improvements can accumulate to cross that threshold. The exact best
+validation-selected state is retained separately and is never rounded to the
+significance threshold. Repeated use of the validation sample for stopping and
+tuning means its winning MSE is not an independent performance estimate.
+
+A solver handles a validation-stop request only after an accepted finite update;
+numerical failures and optimizer stationarity retain their distinct outcomes.
+Successful off-schedule termination captures both terminal and selected states.
+The stop reports `termination_reason="validation_stop"`, successful status, and
+`optimization_converged_=False`. `validation_stopping_` and per-check metadata
+record the configured rule, significant-reference loss, iterations and stop
+reason. Prefix views truncate this audit alongside their validation history, so
+earlier budget records cannot acquire a future stop or future improvement.
+
+A validation-stopped prefix remains eligible for later caps. It has
+`policy_completed=True`, while `budget_reached=False` for an unvisited larger
+cap. Existing physical-cap coverage and plateau diagnostics remain unchanged;
+ending under this practical policy is not evidence of optimization convergence
+or of the validation curve at unvisited budgets. The tuner only permits this
+policy with continuous execution; independent fits retain their legacy budget
+semantics. The policy may stop before a later recovery and should be assessed
+with matched stopped/unstopped trials before a large campaign.
 
 The simulation study compares cumulative validation minima at 500, 1,000,
 2,000, 4,000, and 8,000 updates. It saves compact ambient singular factors for

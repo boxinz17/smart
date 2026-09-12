@@ -18,6 +18,7 @@ from .spectral import project_singular_values
 from .support import coordinate_support
 from .thresholding import hard_threshold
 from .validation import SELECTION_RULE, ValidationReference, validation_loss_difference
+from .stopping import ValidationStopping, ValidationStopRequest
 
 
 class FitFailure(RuntimeError):
@@ -76,6 +77,7 @@ class TrajectoryCheckpoint:
     termination_reason: str
     message: str
     best_selection_score: float | None = None
+    validation_stopping: dict | None = None
 
 
 def _checkpoint_schedule(values, iterations):
@@ -136,6 +138,8 @@ class SparseSMART:
         initialization_spectrum: str = "auto", refinement_solver: str = "auto",
         checkpoint_iterations=None, validation_interval: int = 1,
         validation_iterations=(),
+        validation_patience: int | None = None, validation_min_iterations: int = 500,
+        validation_min_relative_improvement: float = .001,
     ):
         if not isinstance(initialization_spectrum, str) or initialization_spectrum not in ("auto", "projected", "reject"):
             raise ValueError("initialization_spectrum must be 'auto', 'projected', or 'reject'")
@@ -153,6 +157,9 @@ class SparseSMART:
         self.refinement_solver = refinement_solver
         self.checkpoint_iterations, self.validation_interval = checkpoint_iterations, validation_interval
         self.validation_iterations = validation_iterations
+        self.validation_patience = validation_patience
+        self.validation_min_iterations = validation_min_iterations
+        self.validation_min_relative_improvement = validation_min_relative_improvement
 
     @property
     def best_validation_states_(self):
@@ -189,9 +196,15 @@ class SparseSMART:
         never enter initialization, gradients, or line-search acceptance.
         ``validation_iterations`` adds evaluation points to the periodic and
         full-checkpoint schedules without creating additional checkpoints.
-        Points beyond ``iterations`` are ignored. Improving extra points are
-        retained in the read-only ``best_validation_states_`` mapping; their
-        optimization diagnostics remain in ``history_``.
+        Points beyond ``iterations`` are ignored. When checkpoints or stopping
+        are enabled, improving validation points outside full checkpoints are
+        retained in ``best_validation_states_``; explicitly requested extra
+        points are also retained. Diagnostics remain in ``history_``.
+        ``validation_patience`` optionally stops actual refinement after that
+        many accepted iterations without a significant raw-MSE decrease and
+        after ``validation_min_iterations``. Small decreases accumulate against
+        the last significant reference; the returned model always keeps the
+        actual best validation state. A validation stop is not convergence.
         """
         cache = self.__dict__.pop("_fit_cache", None)
         validation_reference = cache.validation_reference if cache is not None else ValidationReference()
@@ -209,6 +222,11 @@ class SparseSMART:
             raise ValueError("refinement_solver must be 'auto', 'chart', or 'anchor_projected'")
         if self.stationarity_tol is not None:
             _positive_real(self.stationarity_tol, "stationarity_tol")
+        validation_stopping = ValidationStopping(self.validation_patience,
+            self.validation_min_iterations, self.validation_min_relative_improvement)
+        if validation_stopping.enabled and validation_data is None:
+            raise ValueError("validation_data is required when validation_patience is enabled")
+        self.validation_stopping_ = validation_stopping.snapshot()
         if validation_data is not None:
             if not isinstance(validation_data, (tuple, list)) or len(validation_data) != 2:
                 raise ValueError("validation_data must contain (X_validation, Y_validation)")
@@ -252,6 +270,7 @@ class SparseSMART:
         self.termination_reason_, self.converged_, self.optimization_converged_ = None, False, False
         self.diagnostics_ = {"theorem_certified": False, "arithmetic": "float64",
                              "selection_rule": SELECTION_RULE,
+                             "validation_stopping": deepcopy(self.validation_stopping_),
                              "validation_iterations_requested": requested_validation,
                              "validation_iterations": [],
                              "same_target_data": True, "input_rescaling": False}
@@ -406,11 +425,19 @@ class SparseSMART:
                         or iteration in extra_validation
                         or requested_checkpoints is not None and iteration in requested_checkpoints)
             if validation_data is not None and eligible:
-                evaluate_validation(iteration, state)
+                stationary = (self.iterations > 0 and self.stationarity_tol is not None
+                    and record.mapping_domain_reason is None
+                    and record.projected_gradient_norm is not None
+                    and record.projected_gradient_norm <= self.stationarity_tol)
+                # Certified optimization stopping takes precedence if both
+                # conditions become true on the same accepted update.
+                evaluate_validation(iteration, state, allow_stop=not stationary)
             if requested_checkpoints is not None and iteration in requested_checkpoints:
                 capture(iteration, state, record)
+            if validation_stopping.stopped:
+                return ValidationStopRequest()
 
-        def evaluate_validation(iteration, state):
+        def evaluate_validation(iteration, state, *, allow_stop=True):
             nonlocal selected_state, selected_iteration, selected_prediction
             if self.validation_history_ and self.validation_history_[-1]["iteration"] == iteration:
                 return
@@ -436,11 +463,18 @@ class SparseSMART:
                 self.best_selection_score_ = selection_score
                 selected_state, selected_iteration = state.copy(), iteration
                 selected_prediction = prediction.copy()
-                if (iteration in extra_validation and iteration != 0
+                if (iteration != 0
+                        and (iteration in extra_validation or requested_checkpoints is not None
+                             or validation_stopping.enabled)
                         and (requested_checkpoints is None or iteration not in requested_checkpoints)):
                     saved = state.copy()
                     saved.setflags(write=False)
                     retained_validation_states[iteration] = saved
+            stopping_check = validation_stopping.observe(iteration, score, allow_stop=allow_stop)
+            self.validation_stopping_ = validation_stopping.snapshot()
+            self.diagnostics_["validation_stopping"] = deepcopy(self.validation_stopping_)
+            if validation_stopping.enabled:
+                self.validation_history_[-1]["validation_stopping"] = stopping_check
 
         def capture(iteration, state, record, *, terminal=None):
             # Solvers also observe an accepted state whose subsequent gradient
@@ -464,7 +498,7 @@ class SparseSMART:
             self.checkpoints_[iteration] = TrajectoryCheckpoint(
                 iteration, endpoint, chosen, iteration if selected_iteration is None else selected_iteration,
                 self.best_validation_loss_, len(self.history_), len(self.validation_history_),
-                status, reason, message, self.best_selection_score_)
+                status, reason, message, self.best_selection_score_, validation_stopping.snapshot())
             self.checkpoint_iterations_ = tuple(sorted(self.checkpoints_))
 
         solver_options = dict(calibration=self.calibration_, margins=self.margins,
@@ -479,8 +513,11 @@ class SparseSMART:
         if (result.success and result.history
                 and _finite_accepted_record(result.state, result.history[-1])):
             if validation_data is not None:
-                evaluate_validation(result.n_iter, result.state)
-            if requested_checkpoints is not None and result.termination_reason == "stationarity":
+                # A final off-schedule observation cannot retroactively turn
+                # budget completion or stationarity into a validation stop.
+                evaluate_validation(result.n_iter, result.state, allow_stop=False)
+            if (result.termination_reason == "validation_stop" or
+                    requested_checkpoints is not None and result.termination_reason == "stationarity"):
                 capture(result.n_iter, result.state, result.history[-1], terminal=result)
         if cache is None and validation_reference.prediction is not None:
             self.validation_reference_prediction_ = validation_reference.prediction.copy()
@@ -579,12 +616,14 @@ class SparseSMART:
             snapshot.best_selection_score)
         diagnostics = deepcopy(self.diagnostics_)
         diagnostics.update(metadata)
+        diagnostics["validation_stopping"] = deepcopy(snapshot.validation_stopping)
         diagnostics["validation_iterations"] = [row["iteration"] for row in
             self.validation_history_[:snapshot.validation_history_length]]
         return dict(success=result.success, status=snapshot.status, message=snapshot.message,
                     validation_mse=snapshot.best_validation_loss, selected_iteration=snapshot.selected_iteration,
                     selection_score=snapshot.best_selection_score, selection_rule=SELECTION_RULE,
                     n_iter=snapshot.iteration, termination_reason=snapshot.termination_reason,
+                    validation_stopping=deepcopy(snapshot.validation_stopping),
                     validation_history=deepcopy(self.validation_history_[:snapshot.validation_history_length]),
                     diagnostics=diagnostics)
 
@@ -619,6 +658,8 @@ class SparseSMART:
         for state in retained_validation_states.values():
             state.setflags(write=False)
         view._best_validation_states_ = retained_validation_states
+        view.validation_stopping_ = deepcopy(snapshot.validation_stopping)
+        view.diagnostics_["validation_stopping"] = deepcopy(snapshot.validation_stopping)
         view.diagnostics_["validation_iterations"] = [row["iteration"] for row in view.validation_history_]
         view.best_validation_loss_ = snapshot.best_validation_loss
         view.best_selection_score_ = snapshot.best_selection_score

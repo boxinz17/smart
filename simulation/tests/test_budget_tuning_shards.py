@@ -20,7 +20,7 @@ from sparse_smart_selection import PAIRWISE_RULE, prediction_selection_score, pa
 from sparse_smart_provenance import FINGERPRINT_SCHEME, _manifest_digest
 
 
-CONFIG = runner.RunnerConfig(iteration_budgets=(4, 8), checkpoint_interval=4,
+CONFIG = runner.RunnerConfig(iteration_budgets=(4, 8), checkpoint_interval=4, validation_interval=4, validation_patience=None, n_validation=100,
     validation_iterations=(1, 2, 3), init_penalties=(.01, .03),
     penalties_u=(.0025, .01), penalties_v=(.0025, .01))
 
@@ -223,6 +223,53 @@ def test_shard_artifact_hashes_and_order_are_preserved():
     assert merged["trajectory_validation_references"]["0"] != merged["trajectory_validation_references"]["2"]
 
 
+@pytest.mark.parametrize("options", [{}, {"tied": True}, {"failed_ids": (6, 7)}],
+                         ids=["complete", "exact-ties", "partial-coverage"])
+def test_merge_with_audit_matches_existing_api_without_repeating_final_validation(monkeypatch, options):
+    shards = list(reversed(_shards(**options)))
+    sources = [dict(path=f"scratch/task-{index}.json", task_id=f"task-{index}",
+                    sha256=str(index)*64, provenance_label="original-fit")
+               for index in range(len(shards))]
+    before = deepcopy((shards, sources))
+    expected = merger.merge_records(shards, config=CONFIG, source_artifacts=sources,
+                                    generate_data_fn=fixtures.generator)
+    expected_audit = _audit(expected)
+    validation_calls, generated_calls = [], []
+    original_validate = summary.validate_record
+
+    def validate(record, **kwargs):
+        audit = original_validate(record, **kwargs)
+        validation_calls.append((record, kwargs["data_cache"], audit))
+        return audit
+
+    def generator(**kwargs):
+        generated_calls.append(kwargs)
+        return fixtures.generator(**kwargs)
+
+    def no_fitting(*args, **kwargs):
+        pytest.fail("Merging saved records must not load or run an estimator")
+
+    monkeypatch.setattr(summary, "validate_record", validate)
+    monkeypatch.setattr(runner, "run_setting", no_fitting)
+    monkeypatch.setattr(runner.external_runner.old_runner, "_load_sparse_api", no_fitting)
+    merged, audit = merger.merge_records_with_audit(shards, config=CONFIG,
+        source_artifacts=sources, generate_data_fn=generator)
+
+    assert merged == expected
+    assert audit == expected_audit
+    assert (shards, sources) == before
+    assert len(validation_calls) == len(shards) + 1
+    assert all(call[0] is shard for call, shard in zip(validation_calls[:-1], shards))
+    assert validation_calls[-1][0] is merged
+    assert validation_calls[-1][2] is audit
+    assert len({id(call[1]) for call in validation_calls}) == 1
+    assert len(generated_calls) == 1
+    assert all(source["provenance_label"] == "original-fit"
+               for source in merged["tuning_shard_merge"]["source_artifacts"])
+    assert "trajectories" not in audit and "factor_states" not in audit
+    json.dumps((merged, audit), allow_nan=False)
+
+
 def test_identical_source_contents_from_different_checkouts_preserve_each_location():
     shards = _shards()
     manifest = dict(api="injected-api", generator="fixture", files=[
@@ -303,3 +350,215 @@ def test_merged_reference_mappings_are_complete_explicit_and_factor_verified(mut
     mutation(merged)
     with pytest.raises(ValueError):
         _audit(merged)
+
+
+def _without_shard(index=3, *, tied=False):
+    records = _shards(tied=tied)
+    declarations = [dict(grid_candidate_id=candidate, task_id=f"task-{index}", reason="user_canceled")
+                    for candidate in range(2*index, 2*index+2)]
+    records.pop(index)
+    sources = [dict(task_id=f"task-{j}", path=f"task-{j}.json", sha256=str(j)*64)
+               for j in range(4) if j != index]
+    return records, sources, declarations
+
+
+def test_explicit_missing_winning_shard_preserves_full_grid_and_audits_available_winner(monkeypatch):
+    records, sources, declarations = _without_shard()
+    before = deepcopy((records, sources, declarations))
+    calls, generated_calls = [], []
+    original_validate = summary.validate_record
+
+    def validate(record, **kwargs):
+        calls.append(record)
+        return original_validate(record, **kwargs)
+
+    def generator(**kwargs):
+        generated_calls.append(kwargs)
+        return fixtures.generator(**kwargs)
+
+    def no_fit(*args, **kwargs):
+        pytest.fail("Missing candidates must not trigger estimator fitting")
+
+    monkeypatch.setattr(summary, "validate_record", validate)
+    monkeypatch.setattr(runner, "run_setting", no_fit)
+    monkeypatch.setattr(runner.external_runner.old_runner, "_load_sparse_api", no_fit)
+    merged, audit = merger.merge_records_with_audit(records, config=CONFIG,
+        source_artifacts=sources, unavailable_candidates=declarations, generate_data_fn=generator)
+    assert (records, sources, declarations) == before
+    assert len(calls) == len(records)+1
+    assert calls[-1] is merged and len(generated_calls) == 1
+    baseline = _synthetic()
+    assert baseline["cap_outcomes"][-1]["winner_grid_candidate_id"] == 7
+    assert merged["configuration"] == baseline["configuration"]
+    assert merged["configuration_fingerprint"] == baseline["configuration_fingerprint"]
+    assert [t["grid_candidate_id"] for t in merged["trajectories"]] == list(range(8))
+    assert [r["candidate_id"] for r in merged["selection_history"]] == list(range(16))
+    assert [r["grid_candidate_id"] for r in merged["selection_history"]] == list(range(8))*2
+    assert merged["status"] == audit["status"] == "partial"
+    assert merged["success"] is True
+    assert audit["unavailable_grid_candidate_ids"] == [6, 7]
+    assert audit["available_candidate_count"] == 6 and audit["planned_candidate_count"] == 8
+    assert audit["failed_trajectories"] == 0
+    assert audit["trajectory_status_counts"] == {"completed": 6, "unavailable": 2}
+    assert audit["verified_factor_states"] == 30
+    assert merged["tuning_diagnostics"]["trajectory_fits"] == 6
+    assert merged["tuning_diagnostics"]["failed_trajectories"] == 0
+    assert merged["tuning_diagnostics"]["failed_candidate_fits"] == 0
+    assert merged["fit_time_sec"] == .75 and merged["elapsed_time_sec"] == 1.5
+    for cap, audited_cap in zip(merged["cap_outcomes"], audit["caps"], strict=True):
+        assert cap["coverage_complete"] is audited_cap["coverage_complete"] is False
+        assert cap["unresolved_grid_candidate_ids"] == audited_cap["unresolved_candidate_ids"] == [6, 7]
+        assert cap["budget_reached_count"] == 6
+        available = [row for row in baseline["selection_history"]
+                     if row["grid_candidate_id"] < 6 and row["iteration_budget"] <= cap["iteration_budget"]]
+        expected = min(available, key=lambda row: (row["validation_mse"], row["candidate_id"]))
+        assert cap["winner_candidate_id"] == expected["candidate_id"]
+        assert cap["winner_grid_candidate_id"] == expected["grid_candidate_id"] == 5
+        assert cap["validation_mse"] == expected["validation_mse"]
+    for candidate in (6, 7):
+        trajectory = merged["trajectories"][candidate]
+        assert trajectory["status"] == "unavailable" and trajectory["success"] is False
+        assert trajectory["n_iter"] is None and "elapsed_time_sec" not in trajectory
+        assert trajectory["termination_reason"] == "allowed_missing_shard"
+        assert trajectory["unavailable_origin"] == declarations[candidate-6]
+        assert trajectory["history"] == trajectory["validation_history"] == trajectory["checkpoints"] == []
+        assert trajectory["factor_states"] == {}
+        for row in merged["selection_history"]:
+            if row["grid_candidate_id"] == candidate:
+                assert not row["success"] and not row["budget_reached"]
+                assert all(row[key] is None for key in ("n_iter", "selected_iteration", "validation_mse",
+                    "selection_score", "trajectory_checkpoint_iteration"))
+                assert "selection_comparison" not in row and "budget_selection_comparison" not in row
+    assert merged["tuning_shard_merge"]["schema_version"] == 2
+    assert merged["tuning_shard_merge"]["unavailable_candidates"] == declarations
+    json.dumps((merged, audit), allow_nan=False)
+
+
+def test_missing_first_shard_keeps_original_tie_order_and_global_candidate_ids():
+    records, sources, declarations = _without_shard(index=0, tied=True)
+    merged, audit = merger.merge_records_with_audit(list(reversed(records)), config=CONFIG,
+        source_artifacts=list(reversed(sources)), unavailable_candidates=list(reversed(declarations)),
+        generate_data_fn=fixtures.generator)
+    assert audit["unavailable_grid_candidate_ids"] == [0, 1]
+    assert merged["tuning_shard_merge"]["unavailable_candidates"] == declarations
+    assert [cap["winner_grid_candidate_id"] for cap in merged["cap_outcomes"]] == [2, 2]
+    assert [cap["winner_candidate_id"] for cap in merged["cap_outcomes"]] == [2, 10]
+    assert merged["tuning_shard_merge"]["source_artifacts"][0]["local_to_global_grid_ids"] == {"0": 2, "1": 3}
+
+
+@pytest.mark.parametrize("declarations", [None, []])
+def test_no_unavailable_candidates_preserves_existing_merge_and_audit_contract(declarations):
+    records = _shards()
+    expected = merger.merge_records(records, config=CONFIG, generate_data_fn=fixtures.generator)
+    merged, audit = merger.merge_records_with_audit(records, config=CONFIG,
+        unavailable_candidates=declarations, generate_data_fn=fixtures.generator)
+    assert merged == expected
+    assert audit == _audit(expected)
+    assert merged["tuning_shard_merge"]["schema_version"] == 1
+    assert "unavailable_grid_candidate_ids" not in audit
+    assert "unavailable_candidates" not in merged["tuning_shard_merge"]
+
+
+def test_unavailable_merge_does_not_require_optional_source_artifacts():
+    records, _, missing = _without_shard()
+    merged, audit = merger.merge_records_with_audit(records, config=CONFIG,
+        unavailable_candidates=missing, generate_data_fn=fixtures.generator)
+    assert audit["unavailable_grid_candidate_ids"] == [6, 7]
+    assert all("task_id" not in artifact for artifact in merged["tuning_shard_merge"]["source_artifacts"])
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda records, sources, missing: missing.pop(),
+    lambda records, sources, missing: missing.append(deepcopy(missing[0])),
+    lambda records, sources, missing: missing[0].update(grid_candidate_id=8),
+    lambda records, sources, missing: missing[0].update(grid_candidate_id=-1),
+    lambda records, sources, missing: missing[0].update(grid_candidate_id=True),
+    lambda records, sources, missing: missing[0].update(grid_candidate_id=0),
+    lambda records, sources, missing: missing[0].update(task_id=""),
+    lambda records, sources, missing: missing[0].update(reason=""),
+    lambda records, sources, missing: missing[0].update(extra="unrecognized"),
+    lambda records, sources, missing: missing[0].update(task_id="task-0"),
+    lambda records, sources, missing: sources[0].update(grid_candidate_ids=[6, 7]),
+    lambda records, sources, missing: sources[0].update(task_id=[]),
+    lambda records, sources, missing: records.append(deepcopy(records[0])),
+])
+def test_unavailable_declarations_cannot_hide_coverage_or_provenance_mismatches(mutation):
+    records, sources, missing = _without_shard()
+    mutation(records, sources, missing)
+    with pytest.raises(ValueError):
+        merger.merge_records_with_audit(records, config=CONFIG, source_artifacts=sources,
+            unavailable_candidates=missing, generate_data_fn=fixtures.generator)
+
+
+def test_unavailable_mode_still_requires_at_least_one_available_shard():
+    missing = [dict(grid_candidate_id=j, task_id=f"task-{j}", reason="user_canceled") for j in range(8)]
+    with pytest.raises(ValueError, match="No tuning shards|All candidates"):
+        merger.merge_records_with_audit([], config=CONFIG, unavailable_candidates=missing,
+                                        generate_data_fn=fixtures.generator)
+    with pytest.raises(ValueError, match="All candidates"):
+        merger.merge_records_with_audit(_shards(), config=CONFIG, unavailable_candidates=missing,
+                                        generate_data_fn=fixtures.generator)
+
+
+def test_unavailable_mode_does_not_excuse_numerically_corrupted_available_shard():
+    records, sources, missing = _without_shard()
+    records[0]["trajectories"][0]["factor_states"]["2"]["singular_values"][0] += 1.
+    with pytest.raises(ValueError, match="Factor prediction"):
+        merger.merge_records_with_audit(records, config=CONFIG, source_artifacts=sources,
+            unavailable_candidates=missing, generate_data_fn=fixtures.generator)
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda r: r["tuning_shard_merge"].update(schema_version=1),
+    lambda r: r["tuning_shard_merge"].update(schema_version=2.),
+    lambda r: r["tuning_shard_merge"].pop("unavailable_candidates"),
+    lambda r: r["tuning_shard_merge"].update(available_candidate_count=8),
+    lambda r: r["tuning_shard_merge"]["unavailable_candidates"][0].update(task_id="wrong-task"),
+    lambda r: r["tuning_shard_merge"]["source_artifacts"][0].update(task_id="task-3"),
+    lambda r: r["tuning_shard_merge"]["source_artifacts"][0].update(task_id=[]),
+    lambda r: r["tuning_shard_merge"]["source_artifacts"][0]["local_to_global_grid_ids"].update({"0": 6}),
+    lambda r: r["trajectories"][0]["tuning_shard_origin"].update(record_digest="b"*64),
+    lambda r: r["trajectories"][6].update(n_iter=0),
+    lambda r: r["trajectories"][6].update(elapsed_time_sec=0.),
+    lambda r: r["trajectories"][6].update(success=True),
+    lambda r: r["trajectories"][6].update(success=0),
+    lambda r: r["trajectories"][6].update(grid_candidate_id=6.),
+    lambda r: r["trajectory_validation_references"]["6"].update(selection_reference={}),
+    lambda r: r["selection_history"][6].update(validation_mse=0.),
+    lambda r: r["selection_history"][6].update(selected_iteration=0),
+    lambda r: r["selection_history"][6].update(budget_reached=True),
+    lambda r: r["selection_history"][6].update(budget_reached=0),
+    lambda r: r["cap_outcomes"][0].update(coverage_complete=True),
+])
+def test_missing_input_merge_validator_rejects_invented_results_and_provenance(mutation):
+    records, sources, missing = _without_shard()
+    merged, _ = merger.merge_records_with_audit(records, config=CONFIG, source_artifacts=sources,
+        unavailable_candidates=missing, generate_data_fn=fixtures.generator)
+    mutation(merged)
+    with pytest.raises(ValueError):
+        _audit(merged)
+
+
+def test_ordinary_runner_record_cannot_smuggle_an_unavailable_trajectory():
+    record = _synthetic()
+    declaration = dict(grid_candidate_id=0, task_id="task-0", reason="user_canceled")
+    record["trajectories"][0] = summary._unavailable_trajectory(declaration, record["configuration"]["candidate_grid"][0])
+    with pytest.raises(ValueError, match="explicit merge declaration"):
+        _audit(record)
+
+
+def test_legacy_shards_keep_their_original_configuration_schema_when_merged():
+    records = _shards()
+    fields = ("validation_interval", "validation_patience", "validation_min_iterations",
+              "validation_min_relative_improvement")
+    for record in records:
+        for key in fields:
+            del record["configuration"]["runner"][key]
+        for cap in record["cap_outcomes"]:
+            del cap["policy_complete"], cap["validation_stopped_count"]
+        schedule_fixture._refresh_identity(record)
+    merged, audit = merger.merge_records_with_audit(records, config=CONFIG,
+        generate_data_fn=fixtures.generator)
+    assert all(key not in merged["configuration"]["runner"] for key in fields)
+    assert audit["status"] == "complete"
+    assert summary._configuration(merged, runner.SimulationSetting(**merged["setting"])).validation_patience is None

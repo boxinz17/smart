@@ -123,6 +123,17 @@ def test_explicit_validation_drives_selection_but_never_enters_training(data, fa
         np.testing.assert_array_equal(candidate.validation_Y, Yv)
 
 
+def test_independent_validation_interval_is_explicit_and_defaults_are_unchanged(data, fake_estimator):
+    X, Y, source = data
+    _tuner().fit(X, Y, source=source)
+    assert all(candidate.options['validation_interval'] == 1 for candidate in fake_estimator.instances)
+    fake_estimator.instances.clear()
+    fitted = _tuner(validation_interval=2).fit(X, Y, source=source)
+    assert all(candidate.options['validation_interval'] == 2 for candidate in fake_estimator.instances)
+    assert fitted.diagnostics_['validation_interval'] == 2
+    assert not fitted.diagnostics_['validation_stopping']['enabled']
+
+
 @pytest.mark.parametrize("noisy,expected", [(False, (1, 1)), (True, (2, 1))])
 def test_default_supports_use_actual_working_dimensions_and_source_gate_stays_on(
         data, fake_estimator, noisy, expected):
@@ -195,6 +206,11 @@ def test_nonfinite_validation_candidate_is_recorded_and_not_selected(data, fake_
     {"random_state": True}, {"random_state": -1},
     {"initialization_spectrum": "unknown"}, {"refinement_solver": "unknown"},
     {"initialization_spectrum": np.array(["auto"])}, {"refinement_solver": np.array(["auto"])},
+    {"validation_interval": 0}, {"validation_interval": True}, {"validation_interval": 1.5},
+    {"validation_patience": 3}, {"validation_patience": True}, {"validation_patience": 0},
+    {"validation_min_iterations": -1}, {"validation_min_iterations": True},
+    {"validation_min_relative_improvement": -0.1}, {"validation_min_relative_improvement": 1.},
+    {"validation_min_relative_improvement": float('nan')},
 ])
 def test_invalid_search_or_split_inputs_fail_before_fitting(data, fake_estimator, options):
     X, Y, source = data

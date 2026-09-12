@@ -17,27 +17,13 @@ fi
 task_dir="$run_dir/tasks/$task_id"
 mkdir -p "$task_dir" "$run_dir/logs/steps"
 
-archive_task() {
-    mkdir -p "$archive_dir/tasks/$task_id" && \
-        rsync -a --exclude='tmp/' --exclude='matplotlib/' "$task_dir/" "$archive_dir/tasks/$task_id/"
-}
 if [[ "$worker_mode" == dispatch ]]; then
     exec >> "$run_dir/logs/steps/$task_id.out" 2>> "$run_dir/logs/steps/$task_id.err"
     dispatch_finish() {
         status=$?
         trap - EXIT
         printf '%s\n' "$status" > "$task_dir/launcher-exit-code.txt"
-        if ! archive_task; then
-            printf 'Could not archive launch outcome for %s\n' "$task_id" >&2
-            printf 'failed\n' > "$task_dir/archive-status.txt"
-            [[ "$status" -ne 0 ]] || status=74
-        fi
-        printf '%s\n' "$status" > "$task_dir/launcher-exit-code.txt"
-        if ! cp "$task_dir/launcher-exit-code.txt" "$archive_dir/tasks/$task_id/"; then
-            printf 'failed\n' > "$task_dir/archive-status.txt"
-            [[ "$status" -ne 0 ]] || status=74
-            printf '%s\n' "$status" > "$task_dir/launcher-exit-code.txt"
-        fi
+        printf 'deferred\n' > "$task_dir/archive-status.txt"
         exit "$status"
     }
     trap dispatch_finish EXIT
@@ -62,19 +48,7 @@ finish() {
     printf '%s\n' "$status" > "$task_dir/process-exit-code.txt"
     printf '%s\n' "$status" > "$task_dir/exit-code.txt"
     printf 'Finished %s with process exit %s at %s\n' "$task_id" "$status" "$(date -u +%FT%TZ)"
-    if archive_task; then
-        printf 'complete\n' > "$task_dir/archive-status.txt"
-    else
-        printf 'failed\n' > "$task_dir/archive-status.txt"
-        printf 'Archive failed; recover task from %s\n' "$task_dir" >&2
-        [[ "$status" -ne 0 ]] || status=74
-    fi
-    printf '%s\n' "$status" > "$task_dir/exit-code.txt"
-    if ! cp "$task_dir/exit-code.txt" "$task_dir/archive-status.txt" "$archive_dir/tasks/$task_id/"; then
-        printf 'failed\n' > "$task_dir/archive-status.txt"
-        [[ "$status" -ne 0 ]] || status=74
-        printf '%s\n' "$status" > "$task_dir/exit-code.txt"
-    fi
+    printf 'deferred\n' > "$task_dir/archive-status.txt"
     exit "$status"
 }
 trap finish EXIT

@@ -85,11 +85,29 @@ def _merge_selection(rows, trajectories, data):
 def merge_records(records, *, config, source_artifacts=None, generate_data_fn=None):
     """Return a fully audited, JSON-safe full-cell record from exact shard coverage.
 
+    See :func:`merge_records_with_audit` to also retain the compact audit without
+    repeating numerical validation of the merged record.
+    """
+    value, _ = merge_records_with_audit(records, config=config,
+        source_artifacts=source_artifacts, generate_data_fn=generate_data_fn)
+    return value
+
+
+def merge_records_with_audit(records, *, config, source_artifacts=None, generate_data_fn=None,
+                             unavailable_candidates=None):
+    """Return ``(merged_record, compact_audit)`` from exact shard coverage.
+
     Shards must contain one initialization penalty, one U penalty, and one or
     more V penalties. Their disjoint union must equal ``config`` exactly.
     ``source_artifacts`` optionally supplies one metadata dictionary per input
     (for example task_id/path/sha256). Input order does not affect grid order or
-    tie breaking. No estimator is called.
+    tie breaking. No estimator is called. The compact audit is the final
+    ``summary.validate_record`` result already computed while merging: each
+    input shard and the merged record are numerically validated once, sharing
+    the regenerated-data cache. ``unavailable_candidates`` may explicitly
+    declare absent grid IDs with their original task IDs and reasons. Available
+    shards plus those declarations must cover the unchanged full grid exactly;
+    absent candidates never acquire scores, iterations, or invented fit states.
     """
     records = list(records)
     config.validate()
@@ -101,7 +119,14 @@ def merge_records(records, *, config, source_artifacts=None, generate_data_fn=No
     setting, cell = _cell(first)
     _require(setting.inapplicability_reason() is None, "Inapplicable cells do not have fitted tuning shards")
     resolved = _json_value(runner.resolved_configuration(setting, config))
+    stopping_fields = ("validation_interval", "validation_patience", "validation_min_iterations",
+                       "validation_min_relative_improvement")
+    legacy_stopping_fields = {name for name in stopping_fields if name not in first["configuration"]["runner"]}
+    for name in legacy_stopping_fields:
+        resolved["runner"].pop(name)
     full_grid = resolved["candidate_grid"]
+    unavailable = summary._unavailable_declarations(unavailable_candidates, len(full_grid))
+    unavailable_tasks = {entry["task_id"] for entry in unavailable.values()}
     grid_lookup = {_grid_key(params): j for j, params in enumerate(full_grid)}
     _require(len(grid_lookup) == len(full_grid), "Full tuning grid contains duplicates")
     target_options = _json_value(asdict(config))
@@ -111,13 +136,21 @@ def merge_records(records, *, config, source_artifacts=None, generate_data_fn=No
     cache = summary._RegeneratedDataCache()
     trajectory_by_grid, rows_by_grid, references, source_records = {}, {}, {}, []
     for record, supplied_source in zip(records, sources):
+        _require({name for name in stopping_fields if name not in record["configuration"]["runner"]}
+                 == legacy_stopping_fields, "Tuning shards mix validation policy schema versions")
+        if unavailable:
+            task_id = supplied_source.get("task_id")
+            _require(task_id is None or isinstance(task_id, str), "Malformed available source task ID")
+            _require(task_id not in unavailable_tasks, "Available source overlaps an unavailable task")
         _require("tuning_shard_merge" not in record, "A tuning shard must be an ordinary runner record")
         _require(record.get("selection_rule") == PAIRWISE_RULE and "selection_score" in record,
                  "Tuning shards require the current pairwise validation selection rule")
         for name in _SHARED_KEYS:
             _require(record.get(name) == first.get(name) and (name in record) == (name in first),
                      f"Tuning shard {name} mismatch")
-        local_options = record["configuration"]["runner"]
+        # Normalize historical configurations using the saved policy: absent
+        # stopping fields mean disabled, never the new runner default.
+        local_options = _json_value(asdict(summary._configuration(record, setting)))
         _require({k: v for k, v in local_options.items()
                   if k not in ("init_penalties", "penalties_u", "penalties_v")} == fixed_options,
                  "Tuning shard fixed configuration mismatch")
@@ -133,6 +166,7 @@ def merge_records(records, *, config, source_artifacts=None, generate_data_fn=No
             _require(key in grid_lookup, "Tuning shard contains a candidate outside the full grid")
             global_id = grid_lookup[key]
             _require(global_id not in trajectory_by_grid, "Duplicate tuning shard candidate coverage")
+            _require(global_id not in unavailable, "Available tuning shard overlaps an unavailable candidate")
             mapping[local_id] = global_id
             trajectory = deepcopy(record["trajectories"][local_id])
             trajectory["grid_candidate_id"] = global_id
@@ -161,7 +195,13 @@ def merge_records(records, *, config, source_artifacts=None, generate_data_fn=No
             local_to_global_grid_ids={str(k): v for k, v in mapping.items()},
             grid_candidate_ids=sorted(mapping.values()))
         source_records.append(artifact)
-    _require(set(trajectory_by_grid) == set(range(len(full_grid))), "Missing tuning shard candidate coverage")
+    _require(set(range(len(full_grid)))-set(trajectory_by_grid) == set(unavailable),
+             "Missing tuning shard candidate coverage differs from explicit unavailable declarations")
+    for j, declaration in unavailable.items():
+        trajectory_by_grid[j] = summary._unavailable_trajectory(declaration, full_grid[j])
+        rows_by_grid[j] = {budget: summary._unavailable_row(declaration, full_grid[j],
+            budget=budget, candidate_id=i*len(full_grid)+j) for i,budget in enumerate(config.iteration_budgets)}
+        references[str(j)] = dict(validation_reference_prediction=None, selection_reference=None)
     trajectories = [trajectory_by_grid[j] for j in range(len(full_grid))]
     rows = []
     for budget in config.iteration_budgets:
@@ -184,8 +224,9 @@ def merge_records(records, *, config, source_artifacts=None, generate_data_fn=No
         selected_budget=final["winner_origin_budget"], selected_candidate_id=final["winner_candidate_id"],
         selected_iteration=final["selected_iteration"], validation_loss=final["validation_mse"],
         avg_err=final["coefficient_error"], success=final["success"],
-        status="complete" if final["coverage_complete"] else "partial" if final["success"] else "all_candidates_failed",
-        failure_reason=None if final["coverage_complete"] else "unresolved_maximum_budget",
+        status="complete" if final["coverage_complete"] else "policy_complete" if final.get("policy_complete")
+            else "partial" if final["success"] else "all_candidates_failed",
+        failure_reason=None if final.get("policy_complete", final["coverage_complete"]) else "unresolved_maximum_budget",
         tuner_status="selected" if final["success"] else "no_successful_candidate",
         fit_time_sec=sum(float(record.get("fit_time_sec", sum(t["elapsed_time_sec"] for t in record["trajectories"])))
                          for record in records),
@@ -203,7 +244,11 @@ def merge_records(records, *, config, source_artifacts=None, generate_data_fn=No
             best_validation_mse=None if best is None else best["validation_mse"],
             best_selection_score=None if best is None else best["selection_score"],
             budget_reached_candidates=reached, unreached_candidates=len(current)-reached,
-            budget_fully_covered=reached == len(current)))
+            budget_fully_covered=reached == len(current),
+            policy_complete=all(row["budget_reached"] or row["success"]
+                and row["termination_reason"] == "validation_stop" for row in current),
+            validation_stopped_candidates=sum(row["success"] and row["termination_reason"] == "validation_stop"
+                for row in current)))
     value["tuning_diagnostics"] = dict(
         derived_from="audited_tuning_shard_merge", theorem_certified=False,
         selection_metric="pairwise_validation_loss_difference", selection_rule=PAIRWISE_RULE,
@@ -212,6 +257,9 @@ def merge_records(records, *, config, source_artifacts=None, generate_data_fn=No
         refit_on_all_data=False, split_mode="explicit_validation", training_rows=setting.n,
         validation_rows=config.n_validation, validation_score_is_independent_test_estimate=False,
         checkpoint_execution="continuous_trajectory", checkpoint_interval=config.checkpoint_interval,
+        validation_interval=config.validation_interval, validation_patience=config.validation_patience,
+        validation_min_iterations=config.validation_min_iterations,
+        validation_min_relative_improvement=config.validation_min_relative_improvement,
         checkpoint_iterations=sorted({0, *config.iteration_budgets,
             *range(config.checkpoint_interval, config.iterations+1, config.checkpoint_interval)}),
         validation_iterations=list(config.validation_iterations), validation_schedule=runner.validation_schedule(config),
@@ -233,6 +281,21 @@ def merge_records(records, *, config, source_artifacts=None, generate_data_fn=No
         fit_time_scope="sum_of_shard_fit_work_not_wall_time",
         elapsed_time_scope="sum_of_shard_elapsed_work_not_wall_time",
         merge_source_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+    if unavailable:
+        availability = dict(unavailable_grid_candidate_ids=list(unavailable),
+            planned_candidate_count=len(full_grid), available_candidate_count=len(full_grid)-len(unavailable))
+        value["tuning_shard_merge"].update(schema_version=2,
+            unavailable_candidates=list(unavailable.values()), **availability)
+        # Absent inputs are not failed optimization attempts. All timing sums
+        # above already refer only to the actual available source records.
+        value["tuning_diagnostics"].update(**availability,
+            trajectory_fits=len(full_grid)-len(unavailable),
+            failed_trajectories=sum(not t["success"] for j,t in enumerate(trajectories) if j not in unavailable),
+            failed_candidate_fits=sum(not row["success"] for row in rows
+                                     if row["grid_candidate_id"] not in unavailable))
+        for status in budget_statuses:
+            status["failed_candidates"] -= len(unavailable)
+            status["unavailable_candidates"] = len(unavailable)
     value = _json_value(value)
-    summary.validate_record(value, data_cache=cache, generate_data_fn=generator, **cell)
-    return value
+    audit = summary.validate_record(value, data_cache=cache, generate_data_fn=generator, **cell)
+    return value, audit

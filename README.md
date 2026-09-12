@@ -11,6 +11,12 @@ The estimator is solved with an ADMM / Riemannian-optimization hybrid and is
 paired with data-driven rank selection (Bunea–She–Wegkamp RSC) and
 cross-validated structural-rank tuning.
 
+The separate [SparseSMART v2 package](sparse-smart-v2/README.md) implements
+the newer two-stage procedure: full source-SVD frames, selected anchors,
+expandable unpenalized directions, and chart proximal gradient with hard
+sparsity caps. It includes its own estimator, validation tuner, and tests.
+Existing SparseSMART and simulation launchers retain their current behavior.
+
 The repository is organized into a standalone Python package and two experiment
 folders that reproduce the paper end to end:
 
