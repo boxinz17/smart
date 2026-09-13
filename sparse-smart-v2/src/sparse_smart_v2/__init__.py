@@ -3,7 +3,8 @@
 from sparse_smart.chart import AnchorChart
 
 from .calibration import CalibrationError, Margins, PracticalCalibration
-from .estimator import FitFailure, SparseSMARTv2, TrajectoryCheckpoint
+from .estimator import FitFailure, SparseSMARTv2, TrajectoryCheckpoint, RRRCheckpoint
+from .rrr import target_rrr, RRRResult
 from .initialization import InitializationFailure, LassoInitialization, reduced_lasso
 from .solver import IterationRecord, RefinementResult, refine
 from .source import ExactSource, NoisySource, ObservedSource, SourceBases, prepare_source
@@ -23,5 +24,6 @@ __all__ = [
     "CalibrationError", "Margins", "PracticalCalibration", "ExactSource", "NoisySource", "ObservedSource",
     "SourceBases", "prepare_source", "AnchorChart", "FreeRows", "choose_free_rows",
     "threshold_state", "FitFailure", "InitializationFailure", "LassoInitialization",
-    "reduced_lasso", "TrajectoryCheckpoint", "IterationRecord", "RefinementResult", "refine",
+    "reduced_lasso", "TrajectoryCheckpoint", "RRRCheckpoint", "RRRResult", "target_rrr",
+    "IterationRecord", "RefinementResult", "refine",
 ]

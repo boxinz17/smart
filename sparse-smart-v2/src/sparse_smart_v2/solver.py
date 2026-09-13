@@ -1,7 +1,8 @@
 """Chart proximal gradient with hard caps outside the declared free rows.
 
-The quadratic model is solved exactly by soft thresholding followed by top-k
-truncation. Domain tests follow that step; they never project or rotate it.
+The separable quadratic model uses bounded gap-separated spectral projection
+and masked soft thresholding followed by top-k truncation. The remaining chart,
+anchor, trial-radius and sufficient-decrease checks still accept or reject it.
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from sparse_smart.solver import IterationRecord, RefinementResult
 from sparse_smart.stopping import ValidationStopRequest
 
 from .support import threshold_state
+from .spectral import spectral_proximal_step
 
 
 def _blocks(chart, state, free_rows):
@@ -50,6 +52,20 @@ def _integer(value, name, minimum=0):
         raise ValueError(f"{name} must be an integer >= {minimum}")
 
 
+def _proximal_trial(chart, state, gradient, inverse_step, calibration, free_rows, domain):
+    # Only the diagonal has the convex spectral constraint. Its projection
+    # neither permutes the factor columns nor modifies any other coordinate.
+    trial = state.copy()
+    trial[:chart.d_slice.start] -= gradient[:chart.d_slice.start] / inverse_step
+    trial[chart.d_slice.stop:] -= gradient[chart.d_slice.stop:] / inverse_step
+    trial[chart.d_slice], spectral_mapping = spectral_proximal_step(
+        state[chart.d_slice], gradient[chart.d_slice], inverse_step,
+        d_lower=domain["d_lower"], d_upper=domain["d_upper"], gap=domain["gap"])
+    trial = threshold_state(chart, trial, free_rows, calibration.penalties,
+                            calibration.support_limits, inverse_step)
+    return trial, spectral_mapping
+
+
 def _mapping(chart, state, gradient, reference_L, calibration, free_rows, domain, radius):
     """Independent fixed-step hard-prox mapping, not the accepted step size.
 
@@ -58,11 +74,12 @@ def _mapping(chart, state, gradient, reference_L, calibration, free_rows, domain
     """
     raw = float(stable_norm(gradient, check_finite=False))
     try:
-        trial = threshold_state(chart, state - gradient / reference_L, free_rows,
-                                calibration.penalties, calibration.support_limits, reference_L)
-        # Free-coordinate mapping equals the gradient exactly. Retaining that
-        # expression avoids a false zero from rounded state subtraction.
+        trial, spectral_mapping = _proximal_trial(
+            chart, state, gradient, reference_L, calibration, free_rows, domain)
+        # Unconstrained free-coordinate mapping equals the gradient exactly.
+        # Retaining it avoids a false zero from rounded state subtraction.
         mapped = gradient.copy()
+        mapped[chart.d_slice] = spectral_mapping
         for sl, mask, lam in ((chart.z_u_slice, free_rows.penalized_u, calibration.penalties[0]),
                               (chart.z_v_slice, free_rows.penalized_v, calibration.penalties[1])):
             flat = mask.ravel()
@@ -189,8 +206,8 @@ def refine(chart, initial_state, design, response, *, calibration, margins, free
             accepted = False
             try:
                 with np.errstate(over="raise", invalid="raise", divide="raise"):
-                    trial = threshold_state(chart, state - gradient / L, free_rows,
-                                            penalties, calibration.support_limits, L)
+                    trial, _ = _proximal_trial(chart, state, gradient, L,
+                                               calibration, free_rows, domain)
                 step = float(np.linalg.norm(trial - state))
                 resolution = 64 * np.finfo(float).eps * max(1., float(np.linalg.norm(state)))
                 if step <= resolution:

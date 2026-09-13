@@ -20,6 +20,7 @@ def problem():
 
 def model(**overrides):
     options = dict(rank=1, source_rank=3, margins=Margins(.1, 8., .1),
+        rrr_shortcut=False,
         calibration=PracticalCalibration(0., 0., 20., (3, 3)), iterations=4)
     options.update(overrides)
     return SparseSMARTv2(**options)

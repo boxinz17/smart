@@ -5,11 +5,51 @@
 It is a separate package and imports reusable chart, anchor, and numerical
 components from `sparse-smart`. It does not modify the original estimator.
 
-Both stages use fixed full source frames. A reduced Lasso–SVD initializer
+The penalized path uses fixed full source frames. A reduced Lasso–SVD initializer
 selects well-conditioned anchor rows. Refinement leaves those rows and any
 additional requested source directions unpenalized, while applying entrywise
-soft thresholding and hard support limits outside them. There is one procedure
-at every penalty value, including zero.
+soft thresholding and hard support limits outside them. Unpenalized configurations
+with full support capacities now return target-only RRR directly. This explicit
+shortcut is a practical extension of the note's chart-based procedure.
+
+## Unpenalized RRR endpoint
+
+With the default `rrr_shortcut=True`, fitting returns ordinary target-only
+rank-at-most-`rank` reduced-rank least squares when both effective refinement
+penalties vanish and both support caps equal their full outside capacities:
+
+- `penalty=(0, 0)` with `support_limits=((p-ru)*rank, (q-rv)*rank)`.
+- `free_directions=(p, q)` with `support_limits=(0, 0)`, regardless of penalties.
+- The corresponding mixed case: one side has every row free and the other
+  side has zero penalty and full support capacity.
+
+This dispatch occurs before source initialization or chart checks. It ignores
+the initializer penalty, anchor floor, spectral bounds, spectral gaps, rotation
+limits, and iteration budget when computing the coefficient. It uses the target
+training rows only; there is no implicit refit on validation data. Validation
+scores this single coefficient and can select it against other tuning candidates,
+but cannot replace it with an initializer or an earlier iterate.
+
+The calculation uses an SVD of the design and rank truncation of its projected
+response, not truncation of the ordinary least-squares coefficient. A singular
+design uses the minimum-norm lift of the selected fitted response, with numerical
+rank tolerances and deterministic boundary-tie conventions recorded in
+`rrr_certificate_`. The certificate checks attainment of the optimal training
+loss on the numerical design range. No floor or jitter is added to the design.
+
+Direct fits have `method_ == "target_rrr"`, termination reason
+`"target_rrr_closed_form"`, and zero iterative updates. Their single checkpoint
+is numbered zero and holds the physical coefficient, not an initializer or a
+chart state. `left_factors_`, `right_factors_`, and `factors_` are in physical
+coordinates, with as many columns as the effective fitted rank. Source and
+chart attributes are absent. `checkpoint_model(0)` returns an independent copy.
+
+Restrictive hard caps or a nonzero effective penalty keep the chart path.
+`rrr_shortcut=False` explicitly restores legacy behavior for reproducibility
+or initializer preflight. RRR is never substituted after a failed penalized fit.
+The tuner caches one direct solve per training split and requested rank. New
+Discovery plans record the shortcut; old frozen plans without the setting keep
+their original behavior. No running campaign is changed by editing local code.
 
 ## Install and run locally
 
@@ -67,7 +107,8 @@ does not fit an intercept. Any preprocessing must be fitted on training data
 and applied consistently to validation/test observations and source coordinates.
 
 `rank` is the fitted target rank. `source_rank` is the number of leading source
-directions used by initialization, with `rank <= source_rank <= min(p, q)`.
+directions used by initialization, with `rank <= source_rank <= min(p, q)` on
+the chart path. Direct RRR does not require `rank <= source_rank`.
 The full working frames still have sizes `p × p` and `q × q`.
 
 `ObservedSource(C_source)` accepts a source coefficient without asserting a
@@ -131,7 +172,8 @@ they repeat the refinement work; shared initialization does not avoid that cost.
 
 Without `validation_data`, the tuner reserves `ceil(n/3)` observations by
 default using its seeded random split. All candidates use the same split and
-the same full source frames; they must share `source_rank`. Each template is
+share `source_rank`. Source frames are prepared only if a chart candidate needs
+them. Each template is
 deep-copied before fitting. Within that search, candidates with the same
 initialization penalty and rank reuse the reduced initializer calculated on
 the shared training rows. Validation choices and refinement runs remain
@@ -158,27 +200,54 @@ estimate; use separate test data for performance reporting.
 - `support_limits=(ku, kv)` counts **entries outside the free rows**. Free
   entries have no penalty or hard cap. Enlarging free sets, enlarging caps,
   and reducing penalties have different effects.
-- Setting either refinement penalty to zero preserves its hard cap. Setting
+- `adaptive_anchors=True` permits a bounded continuation when refinement
+  stalls at an anchor or Cayley rotation boundary. It selects better anchor rows only within
+  the original, unchanged free sets. The source frames, fitted coefficient,
+  spectrum, penalty, and hard outside support are preserved at the switch.
+  `max_anchor_switches=16` limits these attempts; the default
+  `adaptive_anchors=False` keeps a fixed chart. Each switch is logged in
+  `anchor_switches_`. The global iteration budget and validation patience
+  continue across switches. This coordinate extension does not carry an
+  additional theoretical guarantee.
+  An anchor replacement must strictly improve its margin beyond numerical
+  slack while meeting the supplied floor; no percentage buffer is required. Rotation recentering
+  can retain the same anchor indices with new centers. `anchor_switches_`
+  records both kinds of chart transition, with explicit per-side actions.
+  Numerical work reports total chart transitions, anchor-row changes, and
+  rotation recenterings separately. If both primary anchor searches fail to
+  find a positive gain, a bounded fallback searches from one-row neighbors
+  of the current anchor, stopping at the first useful result. Every search
+  stays inside the exact original free rows.
+- Setting either refinement penalty to zero preserves a restrictive hard cap. Setting
   `init_penalty=0` uses reduced minimum-norm least squares followed by
   coefficient-SVD truncation in the same initialization path. It does not
-  dispatch to a target-only RRR solver. Full caps must be supplied explicitly.
+  by itself trigger the RRR shortcut; the refinement penalties and full caps
+  determine that dispatch. Full caps must be supplied explicitly.
 - For a nonunique positive-penalty Lasso solution, initialization uses a
   checked minimum-norm quadratic solve on its tied solution face. The solve
   normalizes coefficient scale and verifies the fit, L1 norm, and numerical
   norm optimality; an unsuccessful check produces an initialization failure.
-- Initialization and refinement apply strict spectrum and chart checks.
-  Infeasible singular values are rejected rather than clipped or repaired.
+- On the chart path, initialization applies strict spectrum checks and rejects an infeasible
+  spectrum without repairing it. Refinement includes the declared singular-value
+  bounds and adjacent gaps in its quadratic proximal model, using bounded
+  isotonic projection of the proposed singular-value block. This lets an update
+  move along an active gap boundary instead of repeatedly rejecting an outward
+  gradient step. Anchor and Cayley chart checks remain separate.
   Backtracking halves the step until a valid decreasing update is found or
   the trial limit is reached. Each iteration starts again at the supplied
   `step_size_inverse`; it does not inherit the preceding backtracked value.
   Failures have inspectable statuses; set
   `raise_on_failure=True` to raise `FitFailure`. A retained partial estimate
   can be inspected explicitly but cannot win a tuning search.
-- With validation data, `coefficient_` is the best evaluated iterate and
+- On the chart path, with validation data, `coefficient_` is the best evaluated iterate and
   `last_coefficient_` is the last accepted iterate. `selected_iteration_`,
   `validation_history_`, `history_`, and `metadata_` record that distinction.
   Requested `checkpoint_iterations` retain additional full states; ordinary
   validation evaluations need only loss records and the current best state.
+  With adaptive anchors, `chart_` describes the terminal state and
+  `selected_chart_` describes the validation-selected state. Every saved
+  checkpoint retains its endpoint and selected charts separately; an earlier
+  state must never be reconstructed using a later chart.
 - Optional `validation_patience` stops after a specified number of accepted
   iterations without meaningful validation improvement, evaluated according
   to `validation_interval` and `validation_iterations`. This is a compute
@@ -196,3 +265,23 @@ finite iteration budget or validation stop; it does not establish the
 manuscript's source, restricted-curvature, initialization, or basin conditions.
 See [the algorithm description](docs/algorithm.md) for the exact update and
 the boundary between the implementation and the theory.
+
+### Optional constraint-aware solver
+
+Set `refinement_solver="masked_anchor_projected"` to optimize in `H = Z / d`
+coordinates and include the anchor and Cayley constraints in each proximal
+update. The masked L1 objective, source frames, free rows, spectral margins,
+and declared anchor floor remain the same. This practical option uses the
+certified constrained-proximal routines from SparseSMART v1; it does not
+replace the initializer or repair an invalid initial spectrum.
+
+This option requires `support_limits` equal to the full outside capacities
+`((p-ru)*rank, (q-rv)*rank)`. Restrictive hard caps raise an error because an
+operator-norm projection can change entry support. The default remains
+`masked_chart_spectral_soft_hard`, which supports restrictive caps.
+
+Saved states remain Z-encoded. Step and gradient diagnostics use H coordinates;
+trial-radius checks remain in Z coordinates. Proximal work and uncertainty are
+logged, and small unresolved steps remain numerical failures. This alternative
+does not carry a new statistical guarantee. Discovery plans select it explicitly
+with `plan --refinement-solver masked_anchor_projected`.

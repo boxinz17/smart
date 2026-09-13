@@ -7,7 +7,7 @@ from sparse_smart.chart import AnchorChart
 from sparse_smart.stopping import ValidationStopRequest
 
 from sparse_smart_v2.calibration import Margins, PracticalCalibration
-from sparse_smart_v2.solver import _mapping, objective_change, penalty_value, refine
+from sparse_smart_v2.solver import _mapping, _proximal_trial, objective_change, penalty_value, refine
 from sparse_smart_v2.support import choose_free_rows, threshold_state
 
 
@@ -182,7 +182,7 @@ def test_masked_mapping_does_not_round_a_small_gradient_to_an_exact_fixed_point(
     assert diagnostic[4] == 0.  # The float proposal rounded back to the state.
 
 
-def test_line_search_failure_does_not_fallback_or_project():
+def test_line_search_failure_does_not_fallback_or_relax_other_chart_guards():
     chart, state, X, Y = problem()
     result = refine(chart, state, X, Y,
         calibration=PracticalCalibration(.01, 0., 1e-10, (3, 2)),
@@ -191,6 +191,62 @@ def test_line_search_failure_does_not_fallback_or_project():
     assert not result.success and result.status == "line_search_failed"
     assert result.n_iter == 0
     assert_array_equal(result.state, state)
+
+
+def test_spectral_projection_preserves_an_interior_full_prox_trial_bitwise():
+    chart, state, X, Y = problem()
+    _, gradient = chart.value_gradient(state, X, Y)
+    free = choose_free_rows(chart, (2, 2))
+    calibration = PracticalCalibration(.01, (.02, .03), 20., (1, 1))
+    domain = dict(d_lower=.01, d_upper=10., gap=.001, anchor_min=.01)
+    expected = threshold_state(chart, state - gradient / 20., free,
+                               calibration.penalties, calibration.support_limits, 20.)
+    actual, mapped = _proximal_trial(chart, state, gradient, 20., calibration, free, domain)
+    assert actual.tobytes() == expected.tobytes()
+    assert_array_equal(mapped, gradient[chart.d_slice])
+
+
+def test_refinement_progresses_along_active_gap_instead_of_inflating_inverse_step():
+    chart = AnchorChart(2, 2, [0, 1], [0, 1], np.eye(2), np.eye(2))
+    state = chart.pack([0.], [0.], [3., 2.5], np.empty((0, 2)), np.empty((0, 2)))
+    design = np.sqrt(2.) * np.eye(2)
+    response = design @ np.diag([1., 1.])
+    margins = Margins(.01, 10., .5, anchor_min=.01)
+    states = []
+    result = refine(chart, state, design, response,
+        calibration=PracticalCalibration(.01, 0., 2., (0, 0)), margins=margins,
+        free_rows=choose_free_rows(chart, (2, 2)), iterations=100, stationarity_tol=1e-9,
+        iterate_callback=lambda t, x, record: states.append(x))
+    assert result.success and result.termination_reason == "stationarity", result.message
+    assert result.n_iter > 1
+    assert_allclose(result.state[chart.d_slice], [1.25, .75], atol=2e-9)
+    assert max(record.step_size_inverse for record in result.history) <= 4.
+    assert result.history[-1].objective < result.history[0].objective
+    for point in states:
+        assert chart.domain_reason(point, d_lower=.01, d_upper=10., gap=.5, anchor_min=.01) is None
+
+
+def test_constrained_spectral_fixed_point_is_not_misclassified_as_stagnation():
+    chart = AnchorChart(2, 2, [0, 1], [0, 1], np.eye(2), np.eye(2))
+    state = chart.pack([0.], [0.], [1.25, .75], np.empty((0, 2)), np.empty((0, 2)))
+    result = refine(chart, state, np.eye(2), np.eye(2),
+        calibration=PracticalCalibration(.01, 0., 20., (0, 0)),
+        margins=Margins(.01, 10., .5), free_rows=choose_free_rows(chart, (2, 2)),
+        iterations=10)
+    assert result.success and result.termination_reason == "stationarity"
+    assert result.projected_gradient_norm == 0. and result.raw_gradient_norm > 0
+    assert result.n_iter == 0
+
+
+def test_diagonal_mapping_does_not_round_a_small_gradient_to_zero():
+    chart = AnchorChart(1, 1, [0], [0], np.eye(1), np.eye(1))
+    state = chart.pack([], [], [1e12], np.empty((0, 1)), np.empty((0, 1)))
+    gradient = np.full_like(state, 1e-6)
+    diagnostic = _mapping(chart, state, gradient, 20.,
+        PracticalCalibration(0., 0., 20., (0, 0)), choose_free_rows(chart, (1, 1)),
+        dict(d_lower=.01, d_upper=1e14, gap=.01, anchor_min=.01), 1.)
+    assert diagnostic[0] == pytest.approx(1e-6)
+    assert diagnostic[3] is None and diagnostic[4] == 0.
 
 
 def test_zero_penalty_still_rejects_initial_support_over_cap():

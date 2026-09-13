@@ -11,7 +11,8 @@ import numpy as np
 
 from sparse_smart.validation import SELECTION_RULE, validation_loss_difference
 
-from .estimator import FitFailure
+from .estimator import FitFailure, SparseSMARTv2
+from .rrr import shortcut_reason
 from .source import prepare_source
 
 
@@ -35,6 +36,7 @@ def _settings(candidate):
         "stationarity_tol", "checkpoint_iterations", "validation_interval",
         "validation_iterations", "validation_patience", "validation_min_iterations",
         "validation_min_relative_improvement", "margins", "calibration",
+        "adaptive_anchors", "max_anchor_switches", "refinement_solver", "rrr_shortcut",
     )
     result = {}
     for name in names:
@@ -148,7 +150,8 @@ class SparseSMARTv2Tuner:
         if len(X) != len(Y):
             raise ValueError("X and Y must have matching rows")
         Xtr, Ytr, Xv, Yv = self._split(X, Y, validation_data)
-        prepared = prepare_source(source, p=X.shape[1], q=Y.shape[1], source_rank=ranks[0])
+        not_prepared = object()
+        prepared, preparation_error = not_prepared, None
         # A fit-scoped cache may reuse training initialization, never validation
         # selection. Read-only shared arrays keep identities stable and prevent
         # a candidate from modifying the next candidate's training observations.
@@ -161,7 +164,7 @@ class SparseSMARTv2Tuner:
             "refit_on_all_data": False,
             "validation_score_is_independent_test_estimate": False,
             "selection_rule": SELECTION_RULE,
-            "source_preparations": 1,
+            "source_preparations": 0,
             "training_rows": len(Xtr), "validation_rows": len(Xv),
             "retains_all_candidate_trajectories": False,
             "initialization_reuse": "same_training_data_source_rank_target_rank_and_init_penalty",
@@ -175,7 +178,22 @@ class SparseSMARTv2Tuner:
             params = _settings(template)
             try:
                 model = deepcopy(template)
-                model.fit(Xtr, Ytr, source=prepared, validation_data=(Xv, Yv),
+                direct = (isinstance(model, SparseSMARTv2) and model.rrr_shortcut
+                    and shortcut_reason(rank=model.rank, p=X.shape[1], q=Y.shape[1],
+                        free_directions=model.free_directions, penalties=model.calibration.penalties,
+                        support_limits=model.calibration.support_limits) is not None)
+                candidate_source = source
+                if not direct:
+                    if prepared is not_prepared and preparation_error is None:
+                        self.metadata_["source_preparations"] += 1
+                        try:
+                            prepared = prepare_source(source, p=X.shape[1], q=Y.shape[1], source_rank=ranks[0])
+                        except Exception as exception:
+                            preparation_error = exception
+                    if preparation_error is not None:
+                        raise preparation_error
+                    candidate_source = prepared
+                model.fit(Xtr, Ytr, source=candidate_source, validation_data=(Xv, Yv),
                           _initialization_cache=initialization_cache)
                 if bool(getattr(model, "success_", False)):
                     prediction = np.asarray(model.predict(Xv.copy()))
@@ -204,6 +222,11 @@ class SparseSMARTv2Tuner:
                 "loss_difference": difference if eligible else None,
                 "selected_iteration": getattr(model, "selected_iteration_", None),
                 "n_iter": getattr(model, "n_iter_", None),
+                "anchor_switches": deepcopy(getattr(model, "anchor_switches_", [])),
+                "fit_method": getattr(model, "method_", None),
+                "termination_reason": getattr(model, "termination_reason_", None),
+                "numerical_work": deepcopy(getattr(model, "numerical_work_", None)),
+                "rrr_certificate": deepcopy(getattr(model, "rrr_certificate_", None)),
                 "validation_history": deepcopy(getattr(model, "validation_history_", [])),
                 "elapsed_time_sec": time.perf_counter() - started,
                 "theorem_certified": False,
@@ -213,6 +236,9 @@ class SparseSMARTv2Tuner:
                 self.best_estimator_ = model
                 self.best_index_, self.best_score_, self.best_params_ = index, score, deepcopy(params)
                 incumbent_prediction = np.array(prediction, copy=True)
+
+        self.metadata_["rrr_solves"] = sum((row["numerical_work"] or {}).get("rrr_solves", 0) for row in self.results_)
+        self.metadata_["rrr_cache_hits"] = sum((row["numerical_work"] or {}).get("rrr_cache_hits", 0) for row in self.results_)
 
         if self.best_estimator_ is None:
             self.status_ = "no_successful_candidate"
