@@ -4,6 +4,7 @@ import gzip
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 
 import numpy as np
 import pytest
@@ -20,6 +21,62 @@ from sparse_smart_v2.support import FreeRows
 
 
 DOMAIN = dict(anchor_min=.04, d_lower=.05, d_upper=12., gap=.01)
+
+
+def _prepared_case_fixture(tmp_path):
+    root = tmp_path / "campaign"
+    folder = root / "cases" / "synthetic"
+    folder.mkdir(parents=True)
+    case = dict(case_id="synthetic", n_train=2, p=2, q=2, initializer_source_rank=1)
+    data = dict(X=np.eye(2), Y=np.eye(2), C0=np.diag([2., 1.]), C_star=np.eye(2),
+                X_validation=np.eye(2), Y_validation=np.eye(2))
+    source = dict(left=np.eye(2), right=np.eye(2), leading_left=np.eye(2)[:, :1],
+                  leading_right=np.eye(2)[:, :1], source_singular_values=np.array([2., 1.]))
+    np.savez(folder / "data.npz", **data)
+    np.savez(folder / "source.npz", **source)
+    plan = dict(plan_fingerprint="fixture-plan", configuration=dict(n_validation=2))
+    meta = dict(case=case, plan_fingerprint=plan["plan_fingerprint"], initializers=[],
+                files={name: audit.sha(folder / name) for name in ("data.npz", "source.npz")},
+                fingerprints=audit._fingerprints(data),
+                source_fingerprint=audit._array_fingerprint(source, tuple(sorted(source))))
+    _write_json(folder / "case.json", meta)
+    prep = dict(case_id=case["case_id"], case_json_sha256=audit.sha(folder / "case.json"),
+                files=meta["files"], initializers=[])
+    _write_json(root / "preparation.json", dict(cases=[prep]))
+    return root, case, prep, plan
+
+
+def test_in_place_case_audit_reuses_verified_preparation_record(tmp_path, monkeypatch):
+    root, case, prep, plan = _prepared_case_fixture(tmp_path)
+    original_read, calls = audit.read, []
+    def recorded_read(path):
+        calls.append(path)
+        assert path.name != "preparation.json", "in-place audit must reuse verified preparation"
+        return original_read(path)
+    monkeypatch.setattr(audit, "read", recorded_read)
+    data, source, meta = audit.load_case(root, root, case, prep, plan)
+    assert calls == [root / "cases/synthetic/case.json"]
+    assert meta["case"] == case and data["X"].shape == source["left"].shape == (2, 2)
+    (root / "cases/synthetic/data.npz").write_bytes(b"corrupted")
+    with pytest.raises(ValueError, match="SHA256 mismatch"):
+        audit.load_case(root, root, case, prep, plan)
+
+
+def test_external_case_audit_keeps_separate_preparation_hash_binding(tmp_path, monkeypatch):
+    root, case, prep, plan = _prepared_case_fixture(tmp_path)
+    external = tmp_path / "external"
+    shutil.copytree(root, external)
+    original_read, calls = audit.read, []
+    def recorded_read(path):
+        calls.append(path)
+        return original_read(path)
+    monkeypatch.setattr(audit, "read", recorded_read)
+    assert audit.load_case(root, external, case, prep, plan)[2]["case"] == case
+    assert external / "preparation.json" in calls
+    with (external / "cases/synthetic/case.json").open("a") as stream:
+        stream.write(" ")
+    with pytest.raises(ValueError, match="SHA256 mismatch"):
+        audit.load_case(root, external, case, prep, plan)
 
 
 @pytest.mark.parametrize("solver", ["masked_chart_spectral_soft_hard", "masked_anchor_projected"])
@@ -270,6 +327,19 @@ def test_full_task_audit_checks_all_saved_chart_epochs_and_metadata(tmp_path):
     report = audit.audit_task(task_root, plan, cache)
     assert report["success"] and report["accepted_states_checked"] == 6
     assert report["anchor_switches_checked"] == 1 and report["checkpoints_checked"] == 2
+
+
+def test_task_audit_uses_actual_task_id_and_binds_preserved_grid_index(tmp_path):
+    task_root, plan, cache, result, _ = _task_fixture(tmp_path)
+    # Deduplication leaves holes in the original Cartesian grid indices;
+    # task_id remains the consecutive execution-table index.
+    result["task"]["grid_index"] = 119
+    _seal(task_root, result)
+    assert audit.audit_task(task_root, plan, cache)["success"]
+    altered_plan = deepcopy(plan)
+    altered_plan["tasks"][0]["grid_index"] = 118
+    with pytest.raises(ValueError, match="task index/plan mismatch"):
+        audit.audit_task(task_root, altered_plan, cache)
 
 
 def test_full_task_rejects_resealed_task_case_identity_mismatch(tmp_path):

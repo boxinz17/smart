@@ -155,19 +155,26 @@ def completed_task(root, plan, tid):
 
 def scheduler_state(job_id):
     queue = subprocess.run(['squeue', '--noheader', '--jobs', job_id, '--format=%T'], capture_output=True, text=True)
-    require(queue.returncode == 0, f'Cannot inspect active job {job_id}: {queue.stderr.strip()}')
+    # Discovery may reject an otherwise valid ID after the job leaves squeue.
+    # This response permits an accounting lookup, never a submission by itself.
+    missing_from_queue = not queue.stdout.strip() and re.fullmatch(
+        r'(?:squeue: error: )?slurm_load_jobs error: Invalid job id specified', queue.stderr.strip()) is not None
+    require(queue.returncode == 0 or missing_from_queue,
+            f'Cannot inspect active job {job_id}: {queue.stderr.strip()}')
     states = [row.strip() for row in queue.stdout.splitlines() if row.strip()]
     if states:
         return 'active'
     accounting = subprocess.run(['sacct', '--noheader', '--allocations', '--jobs', job_id,
                                   '--format=JobIDRaw,State', '--parsable2'], capture_output=True, text=True)
     require(accounting.returncode == 0, f'Cannot inspect completed job {job_id}: {accounting.stderr.strip()}')
-    for row in accounting.stdout.splitlines():
-        fields = row.strip().split('|')
-        if len(fields) >= 2 and fields[0] == job_id:
-            state = fields[1].split()[0].rstrip('+')
-            if state in TERMINAL:
-                return 'terminal'
+    matches = [fields for row in accounting.stdout.splitlines()
+               if len(fields := row.strip().split('|')) >= 2 and fields[0] == job_id]
+    # Repeated allocation rows can represent reused IDs or conflicting records.
+    # Resume only when accounting identifies one conclusive terminal allocation.
+    if len(matches) == 1 and matches[0][1].split():
+        state = matches[0][1].split()[0].rstrip('+')
+        if state in TERMINAL:
+            return 'terminal'
     raise ValueError(f'Job {job_id} is absent from the queue and has no conclusive accounting state; no duplicate submission is allowed')
 
 

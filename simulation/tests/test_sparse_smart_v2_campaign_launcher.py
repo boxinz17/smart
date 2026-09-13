@@ -127,6 +127,35 @@ def test_dry_run_chunks_are_case_aligned_and_independent(campaign, capsys):
     assert (root / 'work-items.tsv').read_text() == '0\n1\n2\n3\n4\n5\n'
 
 
+@pytest.mark.parametrize('deduplicated', [False, True])
+def test_chunks_preserve_actual_ids_with_legacy_or_deduplicated_grid(campaign, deduplicated):
+    root, env = campaign
+    plan = json.loads((root / 'plan.json').read_text())
+    # Six initializer strengths, twenty U/V pairs. The first pair is the
+    # identical RRR endpoint; new plans retain it only for the first strength.
+    grid_indices = [i for i in range(120) if not deduplicated or i == 0 or i % 20]
+    plan['tasks'] = []
+    for case in plan['cases']:
+        for grid_index in grid_indices:
+            plan['tasks'].append(dict(task_id=len(plan['tasks']), case_id=case['case_id'],
+                                      grid_index=grid_index))
+    plan['n_tasks'] = len(plan['tasks'])
+    json_write(root / 'plan.json', plan)
+    (root / 'work-items.tsv').write_text(''.join(f'{i}\n' for i in range(plan['n_tasks'])))
+    refresh(root)
+    per_case = 115 if deduplicated else 120
+    assert launcher.main(['--run-dir', str(root), '--max-tasks-per-chunk', str(per_case),
+                          '--dry-run']) == 0
+    chunks = json.loads((root / 'campaign/chunks.json').read_text())['chunks']
+    assert [chunk['n_tasks'] for chunk in chunks] == [per_case, per_case]
+    assert [tid for chunk in chunks for tid in chunk['task_ids']] == list(range(2 * per_case))
+    assert [chunk['case_ids'] for chunk in chunks] == [['a'], ['b']]
+    loaded = launcher.load_inputs(root)
+    assert [task['grid_index'] for task in loaded['tasks'][:per_case]] == grid_indices
+    assert loaded['tasks'][per_case - 1]['grid_index'] == 119
+    assert not Path(env['FAKE_SCHEDULER_CALLED']).exists()
+
+
 def test_actual_submission_records_independent_chunks_and_live_resume_skips(campaign, monkeypatch, tmp_path):
     root, env = campaign
     (root / 'preparation.json').unlink()

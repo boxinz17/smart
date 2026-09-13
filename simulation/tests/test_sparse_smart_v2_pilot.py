@@ -1,5 +1,6 @@
 """Small operational fixtures; these tests never launch the pilot grid."""
 import importlib.util
+from itertools import product
 import json
 from pathlib import Path
 import sys
@@ -62,10 +63,11 @@ def test_rank11_requires_explicit_policy_and_expansion_changes_only_that_setting
     for case in expanded:
         size = 11 if case["rank"] == 11 else 10
         assert case["initializer_source_rank"] == size
-        assert case["source_rank"] == 10
+        assert case["source_rank"] == size
         assert case["free_directions"] == [size, size]
         assert case["support_limits"] == [(case["p"]-size)*case["rank"], (case["q"]-size)*case["rank"]]
     assert all(case["free_directions"] == [10, 10] for case in raw)  # Inputs are not rewritten.
+    assert all(case["source_rank"] == 10 for case in raw)
     subset, omitted = pilot._configure_cases(raw, 10, "omit")
     assert len(subset) == 900 and len(omitted) == 90
     assert all(case["rank"] <= 9 for case in subset)
@@ -294,18 +296,24 @@ def test_explicit_full_paper_plan_counts_and_immutability(campaign, monkeypatch)
     monkeypatch.setattr(pilot, "_case_specs", REAL_CASE_SPECS)
     # Preserve real campaign grid while the fixture's Slurm/source guards stay local.
     config = dict(pilot._configuration(), init_penalties=[.003, .03, .1, .3, 1., 3.],
-                  penalties_u=[0., .001, .0025, .01, .04], penalties_v=[0., .001, .0025, .01])
+                  penalties_u=[0., .001, .0025, .01, .04], penalties_v=[0., .001, .0025, .01],
+                  rrr_shortcut=True)
     monkeypatch.setattr(pilot, "_configuration", lambda: dict(config))
     selectors = dict(models=[0, 1, 2], experiments=[0, 1], seed_ids=range(30), rank11_policy="expand")
     value = pilot.plan(root, 10, **selectors)
-    assert value["n_cases"] == 990 and value["n_tasks"] == 118800
+    assert value["n_cases"] == 990 and value["n_tasks"] == 113850
     assert value["configuration"]["rank"] == "per_case"
     assert value["configuration"]["fitted_ranks"] == [1, 3, 5, 7, 9, 11]
     assert value["configuration"]["generator_target_rank"] == 5
+    assert value["configuration"]["generator_source_rank"] == 10
+    assert all(case["source_rank"] == (11 if case["rank"] == 11 else 10)
+               for case in value["cases"])
     assert value["case_selection"]["rank11_policy"] == "expand"
     assert value["case_selection"]["setting_indices_by_experiment"] == {"0": [0, 1, 2, 3, 4], "1": [0, 1, 2, 3, 4, 5]}
-    assert value["tasks"][-1]["task_id"] == 118799
-    assert len((root / "work-items.tsv").read_text().splitlines()) == 118800
+    assert value["tasks"][-1]["task_id"] == 113849
+    assert len((root / "work-items.tsv").read_text().splitlines()) == 113850
+    assert value["task_deduplication"]["removed_duplicate_tasks"] == 4950
+    assert len(value["task_deduplication"]["canonical_rrr_tasks"]) == 990
     assert pilot.plan(root, 10, **selectors) == value
     with pytest.raises(ValueError, match="existing plan differs"):
         pilot.plan(root, 10, **dict(selectors, rank11_policy="omit"))
@@ -558,7 +566,7 @@ def test_rrr_bypasses_failed_initializers_with_physical_artifact_and_audit(campa
     value = pilot.plan(root, initializer_source_rank=6)
     prepared = pilot.prepare(root)
     assert prepared["success"] and prepared["cases"][0]["eligible_initializers"] == 0
-    assert prepared["cases"][0]["rrr_candidates"] == 2
+    assert prepared["cases"][0]["rrr_candidates"] == 1
     import sparse_smart_v2.estimator as estimator
     monkeypatch.setattr(estimator, "reduced_lasso", lambda *a, **k: (_ for _ in ()).throw(AssertionError("RRR does not initialize")))
     result = pilot.fit(root, 0)
@@ -631,3 +639,75 @@ def test_restrictive_caps_prevent_rrr_preparation_bypass(campaign, monkeypatch):
         pilot.prepare(root)
     report = pilot._read(root/"preparation-preflight.json")
     assert report["cases"][0]["rrr_candidates"] == 0
+
+
+@pytest.mark.parametrize("free,caps,shortcut,expected,rrr_indices", [
+    ([5, 5], [5, 5], True, 115, list(range(0, 120, 20))),
+    ([6, 6], [0, 0], True, 1, list(range(120))),
+    ([6, 5], [0, 5], True, 91, list(range(0, 120, 4))),
+    ([5, 5], [4, 5], True, 120, []),
+    ([6, 5], [0, 4], True, 120, []),
+    ([5, 5], [5, 5], False, 120, []),
+])
+def test_new_task_plan_deduplicates_only_equivalent_rrr_endpoints(
+        campaign, free, caps, shortcut, expected, rrr_indices):
+    root, case, config, _, _ = campaign
+    case.update(free_directions=free, support_limits=caps)
+    config.update(init_penalties=[.003, .03, .1, .3, 1., 3.],
+                  penalties_u=[0., .001, .0025, .01, .04], penalties_v=[0., .001, .0025, .01],
+                  rrr_shortcut=shortcut)
+    value = pilot.plan(root)
+    tasks = value["tasks"]
+    assert len(tasks) == value["n_tasks"] == expected
+    assert [task["task_id"] for task in tasks] == list(range(expected))
+    grid = list(product(config["init_penalties"], config["penalties_u"], config["penalties_v"]))
+    retained_indices = [i for i in range(120) if not rrr_indices or i not in rrr_indices[1:]]
+    assert [task["grid_index"] for task in tasks] == retained_indices
+    assert [(task["init_penalty"], task["penalty_u"], task["penalty_v"]) for task in tasks] == [
+        grid[i] for i in retained_indices]
+    assert (root/"work-items.tsv").read_text().splitlines() == [str(i) for i in range(expected)]
+    aliases = value["task_deduplication"]["canonical_rrr_tasks"]
+    assert len(aliases) == int(bool(rrr_indices))
+    if aliases:
+        assert aliases[0]["equivalent_grid_indices"] == rrr_indices
+        assert aliases[0]["grid_index"] == aliases[0]["task_id"] == 0
+    assert value["task_deduplication"]["expanded_task_count"] == 120
+    assert value["task_deduplication"]["removed_duplicate_tasks"] == 120-expected
+
+
+def test_deduplication_keeps_independent_case_rrr_fits_and_first_original_grid_index(campaign):
+    _, case, config, _, _ = campaign
+    config.update(rrr_shortcut=True, penalties_u=[.01, 0.])
+    tasks, provenance = pilot._planned_tasks([case, dict(case, case_id="another_case")], config)
+    assert [task["task_id"] for task in tasks] == list(range(6))
+    assert [task["grid_index"] for task in tasks] == [0, 1, 2, 0, 1, 2]
+    assert [row["task_id"] for row in provenance["canonical_rrr_tasks"]] == [1, 4]
+    assert [row["equivalent_grid_indices"] for row in provenance["canonical_rrr_tasks"]] == [[1, 3], [1, 3]]
+
+
+def test_frozen_legacy_full_grid_is_not_deduplicated_when_prepared_or_executed(campaign):
+    root, _, config, _, _ = campaign
+    config.update(init_penalties=[.003, .03, .1, .3, 1., 3.],
+                  penalties_u=[0., .001, .0025, .01, .04], penalties_v=[0., .001, .0025, .01],
+                  rrr_shortcut=True)
+    value = pilot.plan(root)
+    value.pop("task_deduplication")
+    value.pop("plan_fingerprint")
+    case_id = value["cases"][0]["case_id"]
+    value["tasks"] = [dict(task_id=i, case_id=case_id, grid_index=i,
+        init_penalty=initial, penalty_u=left, penalty_v=right)
+        for i, (initial, left, right) in enumerate(product(
+            config["init_penalties"], config["penalties_u"], config["penalties_v"]))]
+    value["n_tasks"] = 120
+    value["plan_fingerprint"] = pilot._digest(value)
+    pilot._json(root/"plan.json", value)
+    (root/"work-items.tsv").write_text("".join(f"{i}\n" for i in range(120)))
+    frozen_bytes = (root/"plan.json").read_bytes()
+    prepared = pilot.prepare(root)
+    assert prepared["n_tasks"] == 120 and prepared["cases"][0]["rrr_candidates"] == 6
+    result = pilot.fit(root, 100)  # Sixth initializer's previously duplicated RRR task.
+    assert result["task"] == value["tasks"][100]
+    assert result["success"] and result["fit_method"] == "target_rrr"
+    assert result["initialization_preflight_bypassed"] is True
+    assert (root/"plan.json").read_bytes() == frozen_bytes
+    assert len((root/"work-items.tsv").read_text().splitlines()) == 120

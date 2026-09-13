@@ -201,6 +201,7 @@ def _configure_cases(cases, initializer_source_rank, rank11_policy):
         case["initializer_source_rank"] = int(case["source_rank"] if initializer_source_rank is None
                                                else initializer_source_rank)
         if is_rank11 and rank11_policy == "expand":
+            case["source_rank"] = max(11, case["source_rank"])
             case["initializer_source_rank"] = max(11, case["initializer_source_rank"])
             case["free_directions"] = [max(11, count) for count in case["free_directions"]]
             case["support_limits"] = [(dimension-free)*case["rank"] for dimension, free in
@@ -329,6 +330,37 @@ def _require_slurm(root):
         raise ValueError("production campaign output must be under /scratch2")
 
 
+def _planned_tasks(cases, config):
+    """Keep the original grid identity but solve each case's RRR endpoint once.
+
+    This is a new-plan operation only. Loading or executing an existing frozen
+    task table never regenerates or renumbers it.
+    """
+    tasks, aliases = [], []
+    grid = list(product(config["init_penalties"], config["penalties_u"], config["penalties_v"]))
+    for case in cases:
+        canonical_rrr = None
+        reasons = {(left, right): _rrr_reason(case, config, left, right)
+                   for left, right in product(config["penalties_u"], config["penalties_v"])}
+        for grid_index, (initial, left, right) in enumerate(grid):
+            reason = reasons[left, right]
+            if reason is not None and canonical_rrr is not None:
+                canonical_rrr["equivalent_grid_indices"].append(grid_index)
+                continue
+            task = dict(task_id=len(tasks), case_id=case["case_id"], grid_index=grid_index,
+                        init_penalty=initial, penalty_u=left, penalty_v=right)
+            tasks.append(task)
+            if reason is not None:
+                canonical_rrr = dict(case_id=case["case_id"], task_id=task["task_id"],
+                    grid_index=grid_index, shortcut_reason=reason, equivalent_grid_indices=[grid_index])
+                aliases.append(canonical_rrr)
+    expanded = len(cases) * len(grid)
+    return tasks, dict(policy="one_target_rrr_per_case", rrr_shortcut=bool(config.get("rrr_shortcut", False)),
+        original_grid_size_per_case=len(grid), expanded_task_count=expanded,
+        retained_task_count=len(tasks), removed_duplicate_tasks=expanded-len(tasks),
+        canonical_rrr_tasks=aliases)
+
+
 def plan(root, initializer_source_rank=None, *, models=None, experiments=None, seed_ids=None,
          setting_indices=None, rank11_policy="error", d_lower=None, spectral_gap=None,
          anchor_min=None, init_penalties=None, refinement_solver=None):
@@ -350,17 +382,13 @@ def plan(root, initializer_source_rank=None, *, models=None, experiments=None, s
     if ranks != [config["rank"]]:
         config["rank"] = ranks[0] if len(ranks) == 1 else "per_case"
         config["fitted_ranks"] = ranks
-    tasks = []
-    grid = list(product(config["init_penalties"], config["penalties_u"], config["penalties_v"]))
-    for case in cases:
-        for grid_index, (initial, left, right) in enumerate(grid):
-            tasks.append(dict(task_id=len(tasks), case_id=case["case_id"], grid_index=grid_index,
-                              init_penalty=initial, penalty_u=left, penalty_v=right))
+    tasks, deduplication = _planned_tasks(cases, config)
     value = dict(schema_version=SCHEMA_VERSION, method=METHOD, root=str(root),
         source_manifest_sha256=manifest_hash, seed_file_sha256=seeds_hash,
         initializer_source_rank_override=initializer_source_rank,
         reference_cases_sha256=_sha(root / "reference-cases.json") if (root / "reference-cases.json").exists() else None,
-        configuration=config, cases=cases, tasks=tasks, n_cases=len(cases), n_tasks=len(tasks))
+        configuration=config, cases=cases, tasks=tasks, n_cases=len(cases), n_tasks=len(tasks),
+        task_deduplication=deduplication)
     if explicit_selection or rank11_policy != "error":
         value["case_selection"] = dict(
             models=sorted({case["model_id"] for case in cases}),
@@ -472,6 +500,11 @@ def prepare(root):
     api = _load_api()
     import external_validation_data
     config = value["configuration"]
+    rrr_candidates = {case["case_id"]: 0 for case in value["cases"]}
+    cases_by_id = {case["case_id"]: case for case in value["cases"]}
+    for task in value["tasks"]:
+        if _rrr_reason(cases_by_id[task["case_id"]], config, task["penalty_u"], task["penalty_v"]) is not None:
+            rrr_candidates[task["case_id"]] += 1
     reference = None
     if value.get("reference_cases_sha256") is not None:
         if _sha(root / "reference-cases.json") != value["reference_cases_sha256"]:
@@ -514,9 +547,7 @@ def prepare(root):
         records.append(dict(case_id=case["case_id"], case_json_sha256=_sha(case_root / "case.json"),
                             files=meta["files"], eligible_initializers=sum(row["eligible"] for row in meta["initializers"]),
                             initializers=meta["initializers"],
-                            rrr_candidates=sum(_rrr_reason(case, config, left, right) is not None
-                                for left, right in product(config["penalties_u"], config["penalties_v"]))
-                                * len(config["init_penalties"])))
+                            rrr_candidates=rrr_candidates[case["case_id"]]))
         print(json.dumps(dict(case_id=case["case_id"], prepared=True,
                               eligible_initializers=records[-1]["eligible_initializers"])), flush=True)
     _verify_imports(manifest)
@@ -788,7 +819,7 @@ def main(argv=None):
             child.add_argument("--seed-ids", type=int, nargs="+", help="Seed-table row IDs; default: 3 4 5 6 7")
             child.add_argument("--setting-indices", type=int, nargs="+", help="Zero-based setting indices, valid for every selected experiment")
             child.add_argument("--rank11-policy", choices=("error", "expand", "omit"), default="error",
-                               help="Explicitly expand initializer/free dimensions to at least11 for fitted rank11, or omit that setting")
+                               help="Explicitly expand supplied source rank and initializer/free dimensions to at least11 for fitted rank11, or omit that setting")
             child.add_argument("--d-lower", type=float,
                                help="Positive lower bound on fitted singular values; default: 0.05")
             child.add_argument("--spectral-gap", type=float,

@@ -8,16 +8,29 @@ an audit or aggregation job. Root deployment supplies `source/`,
 `/home1/mkolar/envs/smart`; no package installation occurs in jobs.
 
 Use one root for each model/experiment pair. The selected settings and seed IDs
-must already be explicit in each runner plan. For Models I–III and seed IDs
-0–29, Experiment 1 has 150 cases and 18,000 fits per model. Experiment 2 has
-180 cases and 21,600 fits per model when all six ranks are explicitly admitted,
-or 150 cases and 18,000 fits with setting indices 0–4. The rank-11 policy is a
-scientific plan decision; this launcher does not expand or omit it. Across six
-roots these choices give 990 cases/118,800 fits or 900 cases/108,000 fits.
+must already be explicit in each runner plan. New plans deduplicate equivalent
+RRR endpoints: the six-initializer, twenty-U/V grid has 114 iterative tasks and
+one direct RRR task per case. The frozen plan records the original grid indices
+represented by the retained RRR task. Old 120-task plans remain executable.
 
-Each case's 120 tuning tasks stay in the same chunk. The default maximum of
-10,000 tasks produces chunks of 9,960 and 8,040 for an 18,000-fit root; a
-21,600-fit root adds a third chunk of 1,680 after two chunks of 9,960. Preparation
+For the 100-seed campaign (rows 0–99), Experiments 1 and 3 have 500 cases and
+57,500 tasks per model; Experiment 3 uses supported source counts 5,7,10,15,20.
+Experiments 2 and 4 have 600 cases and 69,000 tasks per model. Across Models
+I–III this gives 6,600 cases and 759,000 planned outcomes before initializer
+exclusions. The rank-11 policy is declared in the plan; this launcher does not
+expand or omit settings itself.
+
+For the upcoming Models I–III, Experiments 1–4 campaign, the approved rank-11
+setting uses `plan --rank11-policy expand`: fitted target rank 11, supplied
+source rank 11, initializer dimension 11, and 11 unpenalized directions on each
+side. Other fitted ranks retain their existing source-rank settings. These are
+estimator dimensions; the data-generating target/source ranks remain 5/10.
+Existing frozen plans retain their recorded settings.
+
+Each case's actual planned tasks stay in the same chunk. With 115 tasks per
+case, the default maximum of 10,000 tasks gives 86 cases/9,890 tasks in a full
+chunk. The 100-seed roots need six or seven chunks, 78 fitting allocations in
+total. Preparation
 runs once per root and shares all case data, source frames and initializer
 artifacts across the chunks. Case inputs are never copied into chunk folders.
 

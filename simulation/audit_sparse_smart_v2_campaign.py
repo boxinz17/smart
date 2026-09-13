@@ -141,10 +141,16 @@ def load_case(root, cases_root, case, prep_case, plan):
     require(meta["files"] == prep_case["files"] and meta["initializers"] == prep_case["initializers"],
             "case metadata/preparation mismatch")
     array_root = cases_root / "cases" / cid
-    old_meta = read(array_root / "case.json")
-    old_preparation = read(cases_root / "preparation.json")
-    old_record = next(row for row in old_preparation["cases"] if row["case_id"] == cid)
-    check_hash(array_root / "case.json", old_record["case_json_sha256"])
+    if Path(cases_root).resolve() == Path(root).resolve():
+        # The caller already verified this preparation record. Reusing the
+        # checked metadata avoids parsing the whole campaign preparation once
+        # per case when auditing in place.
+        old_meta = meta
+    else:
+        old_meta = read(array_root / "case.json")
+        old_preparation = read(cases_root / "preparation.json")
+        old_record = next(row for row in old_preparation["cases"] if row["case_id"] == cid)
+        check_hash(array_root / "case.json", old_record["case_json_sha256"])
     require(old_meta["case"] == case and old_meta["files"] == meta["files"],
             "shared old/new case identity or file hashes differ")
     for name, expected in meta["files"].items():
