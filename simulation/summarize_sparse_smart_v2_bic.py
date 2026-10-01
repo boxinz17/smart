@@ -91,14 +91,15 @@ def write_csv(path, rows):
     temporary.replace(path)
 
 
-def load_plan(root):
+def load_plan(root, *, selection_rule="bic_terminal"):
     plan = read(root / "plan.json")
     require(plan.get("schema_version") == 1 and plan.get("method") == "SparseSMARTv2BIC",
             "unsupported BIC plan schema")
     require(plan.get("root") == str(root), "plan root identity mismatch")
     require(digest({key: value for key, value in plan.items() if key != "plan_fingerprint"}) ==
             plan.get("plan_fingerprint"), "plan fingerprint mismatch")
-    require(plan["configuration"].get("selection") == "bic_terminal", "plan is not terminal BIC")
+    require(selection_rule in ("bic_terminal", "bic_checkpoint"), "unsupported requested BIC policy")
+    require(plan["configuration"].get("selection") == selection_rule, "plan BIC policy differs")
     require(not plan["configuration"].get("validation_stopping", False), "validation stopping is enabled")
     require(plan["configuration"].get("validation_patience") is None, "validation patience is enabled")
     groups = {group["group_id"]: group for group in plan["groups"]}
@@ -210,7 +211,7 @@ def expected_identities(task, group, config):
     return expected
 
 
-def check_task(root, plan, group, task, meta):
+def check_task(root, plan, group, task, meta, *, selection_rule="bic_terminal"):
     folder = root / "tasks" / f"{task['task_id']:06d}"
     result, status = read(folder / "result.json"), read(folder / "status.json")
     check_hash(folder / "result.json", status.get("result_sha256"))
@@ -224,7 +225,7 @@ def check_task(root, plan, group, task, meta):
         require(status.get(key) == result.get(key), f"task status/result mismatch: {key}")
     require(result.get("status") == "complete" and result.get("execution_success") is True,
             "task execution did not complete successfully")
-    require(result.get("validation_used_for_fit") is False and result.get("selection_rule") == "bic_terminal",
+    require(result.get("validation_used_for_fit") is False and result.get("selection_rule") == selection_rule,
             "task fitting/selection policy differs")
     require(isinstance(result.get("files"), dict), "missing task artifact hash mapping")
     if any(outcome.get("success") is True for outcome in result["outcomes"]):
@@ -272,7 +273,10 @@ def check_task(root, plan, group, task, meta):
             require(outcome.get("fit_status") in ("completed", "converged"), "successful candidate has failure status")
             require(type(outcome["n_iter"]) is int and 0 <= outcome["n_iter"] <= plan["configuration"]["iterations"],
                     "invalid iteration count")
-            require(outcome["selected_iteration"] == outcome["n_iter"], "BIC candidate is not the terminal iterate")
+            if selection_rule == "bic_terminal":
+                require(outcome["selected_iteration"] == outcome["n_iter"], "BIC candidate is not the terminal iterate")
+            else:
+                check_checkpoint_record(outcome, plan, group)
             require(outcome.get("termination_reason") != "validation_stop", "candidate used validation stopping")
             if direct:
                 require(outcome["n_iter"] == 0 and outcome.get("optimization_converged") is True and
@@ -295,6 +299,32 @@ def check_task(root, plan, group, task, meta):
     require(identities == expected_identities(task, group, plan["configuration"]), "candidate tuning coverage differs from plan")
     require(rrr_count == int(task["include_rrr"]), "RRR coverage differs from plan")
     return rows
+
+
+def check_checkpoint_record(outcome, plan, group):
+    """Check checkpoint coverage and selection without using evaluation error."""
+    checkpoints = outcome.get("checkpoint_scores")
+    require(isinstance(checkpoints, list) and checkpoints, "missing checkpoint scores")
+    n_iter = outcome["n_iter"]
+    expected = sorted({0, n_iter, *(t for t in plan["configuration"]["checkpoint_iterations"] if t <= n_iter)})
+    require([point.get("iteration") for point in checkpoints] == expected, "checkpoint coverage differs")
+    for point in checkpoints:
+        score = point["selection"]
+        require(score.get("criterion") == "bic" and score.get("method") == outcome["fit_method"],
+                "invalid checkpoint BIC method")
+        for key, value in (("n", group["n_train"]), ("p", group["p"]), ("q", group["q"]), ("rank", outcome["rank"])):
+            require(score.get(key) == value, f"checkpoint BIC identity differs: {key}")
+        for key in ("score", "rss", "model_dimension"):
+            require(finite(score.get(key)), f"nonfinite checkpoint BIC {key}")
+        close(bic_from_rss(score["rss"], n=score["n"], q=score["q"], model_dimension=score["model_dimension"]),
+              score["score"], "checkpoint BIC arithmetic")
+    best = min(checkpoints, key=lambda point: (point["selection"]["score"], point["iteration"]))
+    require(outcome["selected_iteration"] == best["iteration"] and outcome["selection"] == best["selection"],
+            "selected checkpoint does not minimize training BIC")
+    require(outcome.get("terminal_selection") == checkpoints[-1]["selection"], "terminal BIC record differs")
+    require(all(finite(outcome.get("terminal_metrics", {}).get(key)) and outcome["terminal_metrics"][key] >= 0
+                for key in ("coefficient_rmse", "coefficient_frobenius_squared", "training_prediction_mse", "validation_mse")),
+            "invalid terminal evaluation metrics")
 
 
 def select_winner(rows, case=None):

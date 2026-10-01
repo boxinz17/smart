@@ -122,8 +122,10 @@ def test_resubmission_cannot_silently_change_resource_requests(campaign, monkeyp
     assert len(calls) == 3
 
 
-def test_command_line_rejects_outputs_outside_scratch2(campaign, monkeypatch):
-    root, _ = campaign
+def test_command_line_rejects_outputs_outside_scratch2(monkeypatch):
+    # Cluster TMPDIR may itself be on /scratch2, so tmp_path is not an
+    # outside-storage fixture. No directory is created for this rejected path.
+    root = Path("/not-scratch2/retrospective-test")
     monkeypatch.setattr(launcher.core.subprocess, "run", lambda *a, **k: pytest.fail("Scheduler reached"))
     with pytest.raises(ValueError, match="New output must be on /scratch2"):
         launcher.main(["--run-dir", str(root), "--dry-run"])
